@@ -27,7 +27,7 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-function mapForexSignal(signal: any): TradingSignal {
+export function mapForexSignal(signal: any): TradingSignal {
   const plan = signal.tradePlan;
   return {
     id: signal.id,

@@ -2115,6 +2115,10 @@ app.get(['/api/candles/:symbol', '/api/candles/:part1/:part2'], async (req: Requ
 // 6. Unified Signals
 app.get(['/api/signals', '/api/signals/all'], async (req: Request, res: Response) => {
   try {
+    const cachedSignals = autoTradingService.getSignals();
+    if (cachedSignals.length > 0) {
+      return res.json(cachedSignals);
+    }
     const signals = await scannerService.getAllSignals();
     res.json(signals);
   } catch (err: any) {

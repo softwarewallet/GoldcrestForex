@@ -84,12 +84,14 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
   private positionsCache: { expiresAt: number; positions: NormalizedPosition[] } | null = null;
   private instrumentsCache: { expiresAt: number; instruments: BrokerInstrument[] } | null = null;
   private quoteCache = new Map<string, { expiresAt: number; quote: NormalizedQuote }>();
+  private candleCache = new Map<string, { expiresAt: number; candles: any[] }>();
   private static readonly RAW_ACCOUNT_CACHE_TTL_MS = 60 * 1000;
   private static readonly SYMBOL_CACHE_TTL_MS = 5 * 60 * 1000;
   private static readonly ACCOUNT_DATA_CACHE_TTL_MS = 10 * 1000;
   private static readonly POSITIONS_CACHE_TTL_MS = 3 * 1000;
   private static readonly INSTRUMENTS_CACHE_TTL_MS = 30 * 60 * 1000;
   private static readonly QUOTE_CACHE_TTL_MS = 2500;
+  private static readonly CANDLE_CACHE_TTL_MS = 60 * 1000;
   private accountFetchInFlight: Promise<BrokerAccountInfo> | null = null;
   private lastKnownApiMode: string | null = null;
 
@@ -123,6 +125,7 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
     this.positionsCache = null;
     this.instrumentsCache = null;
     this.quoteCache.clear();
+    this.candleCache.clear();
   }
 
   /**
@@ -999,14 +1002,21 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
       .filter((value): value is NormalizedPositionClose => value !== null);
   }
 
-  async getHistoricalCandles(symbol: string, timeframe: string, limit: number) {
+  async getHistoricalCandles(symbol: string, timeframe: string, limit: number, forceRefresh?: boolean) {
+    const key = `${symbol.replace('/', '').toUpperCase()}:${timeframe}:${limit}`;
+    const now = Date.now();
+    const cached = this.candleCache.get(key);
+    if (!forceRefresh && cached && now < cached.expiresAt) {
+      return cached.candles;
+    }
+
     try {
       const raw = await this.resolveRawAccount();
       const instruments = await this.getCachedCTraderSymbols(raw);
       const normalized = symbol.replace('/', '').toUpperCase();
       const match = instruments.find(s => s.symbolName.replace('/', '').toUpperCase() === normalized);
       if (!match) throw new BrokerError('INVALID_SYMBOL', `cTrader symbol ${symbol} was not found in the authenticated account symbol list.`, 'CTRADER', this.environment);
-      return await fetchCTraderTrendbars(
+      const result = await fetchCTraderTrendbars(
         raw.ctidTraderAccountId,
         match.symbolId,
         timeframe,
@@ -1017,6 +1027,10 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
         raw.isLive,
         match.digits
       );
+      if (Array.isArray(result) && result.length > 0) {
+        this.candleCache.set(key, { expiresAt: Date.now() + CTraderBrokerAdapter.CANDLE_CACHE_TTL_MS, candles: result });
+      }
+      return result;
     } catch (err: any) {
       throw normalizeBrokerError(err, 'CTRADER', this.environment);
     }

@@ -16,6 +16,8 @@ import { liveRuntimeLog, tradeAuditLog } from './liveRuntimeLog';
 import { calculateForexPipTargets, normalizePriceToThreeDigits, normalizePriceToInstrumentDigits, sizeForexOrderToMaxTradeValue } from '../brokers/safety/TradeSizing';
 import { recordLiveTradeResearchSignal, updateLiveTradeResearchQuote, updateLiveTradeResearchExecution } from './liveTradeResearchService';
 import { AUTO_LIVE_POSITION_CAPACITY_POLL_MS, AUTO_LIVE_RUNTIME_RECOVERY_POLL_MS, getAutoLiveParallelTradePolicy, hasPairPositionCapacity } from './autoLiveTradePolicy';
+import { mapForexSignal } from './scannerService';
+import { TradingSignal } from '../markets/common/types';
 
 const LIVE_QUOTE_MAX_AGE_MS = 30_000;
 
@@ -214,6 +216,7 @@ class AutoTradingService {
   private provider = new LiveForexSignalProvider();
   private signalEngine = new ForexSignalEngine(undefined, this.provider);
   private pairScores = new Map<string, { score: number; direction: string; timestamp: number }>();
+  private pairSignals = new Map<string, any>();
   private timer: NodeJS.Timeout | null = null;
   private state: AutoTradingState = 'STOPPED';
   private lastCycleAt: number | null = null;
@@ -287,6 +290,7 @@ class AutoTradingService {
               direction: signal.direction,
               timestamp: Date.now()
             });
+            this.pairSignals.set(pair, signal);
           } catch {
             // Ignore background scan errors
           }
@@ -295,6 +299,18 @@ class AutoTradingService {
     } catch {
       // Ignore background scan errors
     }
+  }
+
+  public getSignals(): TradingSignal[] {
+    const configuredPairs = getConfiguredAutoForexPairs();
+    const list: TradingSignal[] = [];
+    for (const pair of configuredPairs) {
+      const rawSignal = this.pairSignals.get(pair);
+      if (rawSignal) {
+        list.push(mapForexSignal(rawSignal));
+      }
+    }
+    return list;
   }
 
   private isRequested(): boolean {
@@ -1047,6 +1063,14 @@ class AutoTradingService {
 
       // 1. Pre-scan all configured non-blocked pairs so we evaluate exact current
       // signals and scores before selecting trade execution candidates.
+      this.setExecutionStatus({
+        stage: 'SCANNING_MARKET',
+        pair: null,
+        side: null,
+        signalId: null,
+        message: 'Scanning live market signals across all configured Forex pairs...'
+      });
+
       const scannedPairs = await Promise.all(
         pairsToEvaluate.map(async (pair) => {
           try {
@@ -1057,6 +1081,7 @@ class AutoTradingService {
               direction: signal.direction,
               timestamp: Date.now()
             });
+            this.pairSignals.set(pair, signal);
             return { pair, signal };
           } catch (err: any) {
             return { pair, signal: null, error: err?.message || String(err) };
