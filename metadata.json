@@ -1,0 +1,6 @@
+{
+  "name": "Goldcrest Finman - AI Trading",
+  "description": "Multi-market quantitative trading and machine learning intelligence platform analyzing Forex and Indian Equity Derivatives with research-grade point-in-time predictive modeling.",
+  "permissions": [],
+  "capabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
