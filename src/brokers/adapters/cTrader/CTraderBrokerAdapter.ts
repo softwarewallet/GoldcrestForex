@@ -81,9 +81,15 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
   // authenticated WebSocket sessions during Auto Live preparation.
   private rawAccountCache: { expiresAt: number; account: CTraderRawAccount } | null = null;
   private symbolCache: { expiresAt: number; accountKey: string; symbols: Awaited<ReturnType<typeof fetchCTraderSymbols>> } | null = null;
+  private positionsCache: { expiresAt: number; positions: NormalizedPosition[] } | null = null;
+  private instrumentsCache: { expiresAt: number; instruments: BrokerInstrument[] } | null = null;
+  private quoteCache = new Map<string, { expiresAt: number; quote: NormalizedQuote }>();
   private static readonly RAW_ACCOUNT_CACHE_TTL_MS = 60 * 1000;
   private static readonly SYMBOL_CACHE_TTL_MS = 5 * 60 * 1000;
   private static readonly ACCOUNT_DATA_CACHE_TTL_MS = 10 * 1000;
+  private static readonly POSITIONS_CACHE_TTL_MS = 3 * 1000;
+  private static readonly INSTRUMENTS_CACHE_TTL_MS = 30 * 60 * 1000;
+  private static readonly QUOTE_CACHE_TTL_MS = 2500;
   private accountFetchInFlight: Promise<BrokerAccountInfo> | null = null;
   private lastKnownApiMode: string | null = null;
 
@@ -114,6 +120,9 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
     this.symbolCache = null;
     this.conversionAssetCache = null;
     this.conversionChainCache.clear();
+    this.positionsCache = null;
+    this.instrumentsCache = null;
+    this.quoteCache.clear();
   }
 
   /**
@@ -669,7 +678,12 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
     return symbols;
   }
 
-  async getPositions(): Promise<NormalizedPosition[]> {
+  async getPositions(forceRefresh?: boolean): Promise<NormalizedPosition[]> {
+    const now = Date.now();
+    if (!forceRefresh && this.positionsCache && now < this.positionsCache.expiresAt) {
+      return this.positionsCache.positions;
+    }
+
     const raw = await this.resolveRawAccount();
     const state = await fetchCTraderReconcileState(
       raw.ctidTraderAccountId,
@@ -747,7 +761,7 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
       }
     }));
 
-    return enriched.map(({ position, currentPrice, currentPriceStatus }) => {
+    const finalPositions = enriched.map(({ position, currentPrice, currentPriceStatus }) => {
       const p = position.raw;
       const pnl = pnlByPositionId.get(Number(p.positionId));
 
@@ -771,6 +785,12 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
         brokerPositionId: String(p.positionId)
       } as NormalizedPosition;
     });
+
+    this.positionsCache = {
+      expiresAt: Date.now() + CTraderBrokerAdapter.POSITIONS_CACHE_TTL_MS,
+      positions: finalPositions
+    };
+    return finalPositions;
   }
   async getOpenOrders(): Promise<NormalizedOrder[]> {
     const raw = await this.resolveRawAccount();
@@ -1002,7 +1022,14 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
     }
   }
 
-  async getQuote(symbol: string): Promise<NormalizedQuote> {
+  async getQuote(symbol: string, forceRefresh?: boolean): Promise<NormalizedQuote> {
+    const normalizedKey = symbol.replace('/', '').toUpperCase();
+    const now = Date.now();
+    const cached = this.quoteCache.get(normalizedKey);
+    if (!forceRefresh && cached && now < cached.expiresAt && cached.quote.status === 'FRESH') {
+      return cached.quote;
+    }
+
     try {
       const raw = await this.resolveRawAccount();
       const symbols = await this.getCachedCTraderSymbols(raw);
@@ -1064,7 +1091,7 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
         throw new BrokerError('STALE_DATA', `cTrader did not provide a valid bid/ask for ${symbol}.`, 'CTRADER', this.environment);
       }
 
-      return {
+      const res: NormalizedQuote = {
         symbol,
         bid: Number(bid.toFixed(match.digits)),
         ask: Number(ask.toFixed(match.digits)),
@@ -1074,12 +1101,26 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
         environment: this.environment,
         status: quoteStatus
       };
+
+      if (res.status === 'FRESH') {
+        this.quoteCache.set(normalizedKey, {
+          expiresAt: Date.now() + CTraderBrokerAdapter.QUOTE_CACHE_TTL_MS,
+          quote: res
+        });
+      }
+
+      return res;
     } catch (err: any) {
       throw normalizeBrokerError(err, 'CTRADER', this.environment);
     }
   }
 
-  async getInstruments(): Promise<BrokerInstrument[]> {
+  async getInstruments(forceRefresh?: boolean): Promise<BrokerInstrument[]> {
+    const now = Date.now();
+    if (!forceRefresh && this.instrumentsCache && now < this.instrumentsCache.expiresAt) {
+      return this.instrumentsCache.instruments;
+    }
+
     const raw = await this.resolveRawAccount();
     const symbols = await fetchCTraderSymbols(
       raw.ctidTraderAccountId,
@@ -1089,7 +1130,7 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
       raw.isLive
     );
     const allowed = new Set(FOREX_PAIRS.map(p => p.symbol.replace('/', '').toUpperCase()));
-    return symbols.filter(s => allowed.has(s.symbolName.replace('/', '').toUpperCase())).map(s => {
+    const res = symbols.filter(s => allowed.has(s.symbolName.replace('/', '').toUpperCase())).map(s => {
       const p = FOREX_PAIRS.find(x => x.symbol.replace('/', '').toUpperCase() === s.symbolName.replace('/', '').toUpperCase());
       if (!p) throw new BrokerError('INVALID_SYMBOL', `Unsupported cTrader symbol ${s.symbolName}`, 'CTRADER', this.environment);
       // cTrader Open API represents Forex volume in protocol cents:
@@ -1124,12 +1165,18 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
       digits: Number.isInteger(Number(s.digits)) && Number(s.digits) >= 0
         ? Number(s.digits)
         : p.digits,
-      supportedOrderTypes: ['MARKET', 'LIMIT', 'STOP'],
+      supportedOrderTypes: ['MARKET', 'LIMIT', 'STOP'] as any,
       baseCurrency: p.symbol.split('/')[0],
       quoteCurrency: p.symbol.split('/')[1],
       brokerInstrumentId: String(s.symbolId)
-    };
+    } as BrokerInstrument;
     });
+
+    this.instrumentsCache = {
+      expiresAt: Date.now() + CTraderBrokerAdapter.INSTRUMENTS_CACHE_TTL_MS,
+      instruments: res
+    };
+    return res;
   }
 
   async getInstrument(symbol: string): Promise<BrokerInstrument | null> {

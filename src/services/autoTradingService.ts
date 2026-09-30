@@ -255,6 +255,48 @@ class AutoTradingService {
   // flags, preserving the production safety boundary.
   private hasCompletedExplicitStart = false;
 
+  private backgroundScannerTimer: NodeJS.Timeout | null = null;
+
+  private startBackgroundSignalScanner(): void {
+    if (this.backgroundScannerTimer) return;
+    this.backgroundScannerTimer = setInterval(() => {
+      void this.refreshBackgroundSignals();
+    }, 10_000);
+    this.backgroundScannerTimer.unref?.();
+    void this.refreshBackgroundSignals();
+  }
+
+  private stopBackgroundSignalScanner(): void {
+    if (this.backgroundScannerTimer) {
+      clearInterval(this.backgroundScannerTimer);
+      this.backgroundScannerTimer = null;
+    }
+  }
+
+  private async refreshBackgroundSignals(): Promise<void> {
+    if (this.state !== 'RUNNING' && this.state !== 'PREPARING') return;
+    try {
+      const configuredPairs = getConfiguredAutoForexPairs();
+      await Promise.all(
+        configuredPairs.map(async (pair) => {
+          try {
+            await this.provider.refreshPair(pair);
+            const signal = await this.signalEngine.generateSignal(pair);
+            this.pairScores.set(pair, {
+              score: signal.score,
+              direction: signal.direction,
+              timestamp: Date.now()
+            });
+          } catch {
+            // Ignore background scan errors
+          }
+        })
+      );
+    } catch {
+      // Ignore background scan errors
+    }
+  }
+
   private isRequested(): boolean {
     // Development mode is not itself an execution request. Autonomous live
     // execution must be explicitly armed through the two runtime flags.
@@ -418,7 +460,7 @@ class AutoTradingService {
     }
     const activeQualifiedPairs = configuredPairs.filter(p => {
       const entry = this.pairScores.get(p);
-      return entry !== undefined ? entry.score >= minScore : true;
+      return entry !== undefined ? (entry.score >= minScore && Boolean(entry.direction && entry.direction !== 'NO_TRADE')) : false;
     });
 
     return {
@@ -587,6 +629,8 @@ class AutoTradingService {
     }, AUTO_INTERVAL_MS);
     this.timer.unref?.();
 
+    this.startBackgroundSignalScanner();
+
     return this.getStatus();
   }
 
@@ -603,6 +647,7 @@ class AutoTradingService {
       clearInterval(this.timer);
       this.timer = null;
     }
+    this.stopBackgroundSignalScanner();
     this.clearPositionCapacityPause();
     this.runtimeFaultReason = null;
     if (this.runtimeRecoveryTimer) {
@@ -1000,20 +1045,48 @@ class AutoTradingService {
         });
       }
 
+      // 1. Pre-scan all configured non-blocked pairs so we evaluate exact current
+      // signals and scores before selecting trade execution candidates.
+      const scannedPairs = await Promise.all(
+        pairsToEvaluate.map(async (pair) => {
+          try {
+            await this.provider.refreshPair(pair);
+            const signal = await this.signalEngine.generateSignal(pair);
+            this.pairScores.set(pair, {
+              score: signal.score,
+              direction: signal.direction,
+              timestamp: Date.now()
+            });
+            return { pair, signal };
+          } catch (err: any) {
+            return { pair, signal: null, error: err?.message || String(err) };
+          }
+        })
+      );
+
       // Only pairs whose score meets or exceeds the minimum score set in settings
-      // should be active in the execution evaluation loop.
+      // AND have an actionable directional signal (BUY or SELL) with a trade plan
+      // are eligible for live order execution.
       const config = getSystemConfig();
       const minSignalScore = Math.max(0, Math.min(100, Math.round(Number(config.autoLiveMinSignalScore))));
 
-      const eligiblePairs: string[] = [];
-      for (const pair of pairsToEvaluate) {
-        const cached = this.pairScores.get(pair);
-        if (cached && cached.score < minSignalScore) {
-          liveRuntimeLog('INFO', 'PAIR_INACTIVE_LOW_SCORE', { pair, score: cached.score, threshold: minSignalScore });
-          continue;
+      const eligiblePairsMap = new Map<string, any>();
+      for (const item of scannedPairs) {
+        if (!item.signal) continue;
+        const isDirectional = item.signal.direction.includes('BUY') || item.signal.direction.includes('SELL');
+        if (item.signal.score >= minSignalScore && isDirectional && item.signal.tradePlan) {
+          eligiblePairsMap.set(item.pair, item.signal);
+        } else {
+          liveRuntimeLog('INFO', 'PAIR_INACTIVE_LOW_SCORE_OR_NON_DIRECTIONAL', {
+            pair: item.pair,
+            score: item.signal.score,
+            threshold: minSignalScore,
+            direction: item.signal.direction
+          });
         }
-        eligiblePairs.push(pair);
       }
+
+      const eligiblePairs = Array.from(eligiblePairsMap.keys());
 
       if (eligiblePairs.length === 0) {
         const message = `No trade executed this cycle: No scanned pairs met the minimum score threshold of ${minSignalScore}.`;
@@ -1028,14 +1101,15 @@ class AutoTradingService {
 
       // Sort pairs with highest scores first so strongest conviction setups execute first
       eligiblePairs.sort((a, b) => {
-        const scoreA = this.pairScores.get(a)?.score ?? 50;
-        const scoreB = this.pairScores.get(b)?.score ?? 50;
+        const scoreA = eligiblePairsMap.get(a)?.score ?? 50;
+        const scoreB = eligiblePairsMap.get(b)?.score ?? 50;
         return scoreB - scoreA;
       });
 
       // Evaluate active eligible pairs sequentially to eliminate cTrader WebSocket handshake flooding
       for (const pair of eligiblePairs) {
-        await this.evaluatePair(pair);
+        const preGeneratedSignal = eligiblePairsMap.get(pair);
+        await this.evaluatePair(pair, preGeneratedSignal);
         const executed = this.lastActions.find(action => action.result === 'EXECUTED');
         if (executed) {
           break;
@@ -1070,7 +1144,7 @@ class AutoTradingService {
     }
   }
 
-  private async evaluatePair(pair: string): Promise<void> {
+  private async evaluatePair(pair: string, preGeneratedSignal?: any): Promise<void> {
     try {
       this.setExecutionStatus({
         stage: 'SCANNING_MARKET',
@@ -1079,9 +1153,11 @@ class AutoTradingService {
         signalId: null,
         message: 'Scanning live market data for ' + pair + '.'
       });
-      await this.provider.refreshPair(pair);
+      if (!preGeneratedSignal) {
+        await this.provider.refreshPair(pair);
+      }
       liveRuntimeLog('INFO', 'LIVE_DATA_REFRESHED', { pair });
-      const signal = await this.signalEngine.generateSignal(pair);
+      const signal = preGeneratedSignal || await this.signalEngine.generateSignal(pair);
       let marketTrendContext: Awaited<ReturnType<typeof getMarketTrendContext>> | null = null;
       try {
         marketTrendContext = await getMarketTrendContext(pair);
