@@ -91,14 +91,18 @@ export async function persistSystemConfigToDatabase(
   updatedAt = Date.now()
 ): Promise<void> {
   const rows = buildSystemSettingRows(config, updatedAt);
-  await executeTransaction(rows.map(([key, value, ts]) => ({
-    sql: `INSERT INTO system_settings (key, value, updated_at)
-          VALUES (?, ?, ?)
-          ON CONFLICT(key) DO UPDATE SET
-            value = excluded.value,
-            updated_at = excluded.updated_at`,
-    params: [key, value, ts]
-  })));
+  await executeTransaction((db) => {
+    for (const [key, value, ts] of rows) {
+      db.run(
+        `INSERT INTO system_settings (key, value, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET
+           value = excluded.value,
+           updated_at = excluded.updated_at`,
+        [key, value, ts]
+      );
+    }
+  });
 }
 
 export async function loadPersistedSystemConfigFromDatabase(): Promise<Partial<SystemConfig>> {

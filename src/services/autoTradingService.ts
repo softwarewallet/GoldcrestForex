@@ -13,7 +13,7 @@ import { getSystemConfig } from './configService';
 import { killSwitch } from '../brokers/safety/KillSwitch';
 import { BrokerAdapter, ConnectionTestResult, NormalizedQuote, OrderRequest } from '../brokers/types';
 import { liveRuntimeLog, tradeAuditLog } from './liveRuntimeLog';
-import { calculateForexPipTargets, normalizePriceToThreeDigits, sizeForexOrderToMaxTradeValue } from '../brokers/safety/TradeSizing';
+import { calculateForexPipTargets, normalizePriceToThreeDigits, normalizePriceToInstrumentDigits, sizeForexOrderToMaxTradeValue } from '../brokers/safety/TradeSizing';
 import { recordLiveTradeResearchSignal, updateLiveTradeResearchQuote, updateLiveTradeResearchExecution } from './liveTradeResearchService';
 import { AUTO_LIVE_POSITION_CAPACITY_POLL_MS, AUTO_LIVE_RUNTIME_RECOVERY_POLL_MS, getAutoLiveParallelTradePolicy, hasPairPositionCapacity } from './autoLiveTradePolicy';
 
@@ -1009,12 +1009,21 @@ class AutoTradingService {
       for (const pair of pairsToEvaluate) {
         const cached = this.pairScores.get(pair);
         if (cached && cached.score < minSignalScore) {
-          const reason = `Pair score (${cached.score}) is below configured Auto Live threshold (${minSignalScore}); inactive.`;
-          this.lastActions.push({ pair, result: 'FILTERED', reason });
           liveRuntimeLog('INFO', 'PAIR_INACTIVE_LOW_SCORE', { pair, score: cached.score, threshold: minSignalScore });
           continue;
         }
         eligiblePairs.push(pair);
+      }
+
+      if (eligiblePairs.length === 0) {
+        const message = `No trade executed this cycle: No scanned pairs met the minimum score threshold of ${minSignalScore}.`;
+        this.finishExecution('REJECTED', message, {
+          pair: null,
+          side: null,
+          signalId: null
+        });
+        this.lastCycleResult = 'Cycle completed. No pairs met minimum score threshold.';
+        return;
       }
 
       // Sort pairs with highest scores first so strongest conviction setups execute first
@@ -1036,7 +1045,7 @@ class AutoTradingService {
       const executed = this.lastActions.find(action => action.result === 'EXECUTED');
       if (!executed) {
         const reasons = this.lastActions
-          .filter(action => action.reason)
+          .filter(action => action.result !== 'FILTERED' && action.reason)
           .map(action => `${action.pair}: ${action.reason}`)
           .slice(-8);
         const message = reasons.length
@@ -1374,10 +1383,12 @@ return;
       }
 
       // Operator-configured Forex pip margins are authoritative for every
-      // new Auto Live order. Calculate SL/TP from the exact three-decimal
-      // execution price that will be placed in the broker packet, rather than
-      // from the signal engine's analytical trade-plan levels.
-      const executionEntryPrice = normalizePriceToThreeDigits(entryPrice);
+      // new Auto Live order. Calculate SL/TP from the exact instrument-precision
+      // execution price that will be placed in the broker packet.
+      const targetDigits = typeof instrument.digits === 'number' && Number.isInteger(instrument.digits) && instrument.digits >= 0
+        ? instrument.digits
+        : (instrument.pipSize < 0.001 ? 5 : 3);
+      const executionEntryPrice = normalizePriceToInstrumentDigits(entryPrice, targetDigits);
       let configuredTargets;
       try {
         configuredTargets = calculateForexPipTargets(
@@ -1385,7 +1396,8 @@ return;
           executionEntryPrice,
           instrument.pipSize,
           config.forexStopLossPips,
-          config.forexTakeProfitPips
+          config.forexTakeProfitPips,
+          targetDigits
         );
       } catch (targetError: any) {
         const reason = targetError?.message || String(targetError);

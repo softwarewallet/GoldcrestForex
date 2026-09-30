@@ -261,8 +261,9 @@ export function prepareSystemConfigUpdate(updates: Partial<SystemConfig>): Syste
   return next;
 }
 
-export function applyPersistedSystemConfig(config: SystemConfig): void {
+export function applyPersistedSystemConfig(config: Partial<SystemConfig> | SystemConfig): void {
   activeConfig = {
+    ...activeConfig,
     ...config,
     tradingMode: 'LIVE_ONLY',
     researchStatus: 'CLOSED'

@@ -28,6 +28,7 @@ async function mapWithConcurrency<T, R>(
 }
 
 function mapForexSignal(signal: any): TradingSignal {
+  const plan = signal.tradePlan;
   return {
     id: signal.id,
     timestamp: signal.timestamp,
@@ -35,17 +36,21 @@ function mapForexSignal(signal: any): TradingSignal {
     instrument: signal.pair,
     underlying: undefined,
     direction: signal.direction,
-    category: signal.category,
-    strategy: signal.strategy,
+    category: signal.signalCategory || signal.category,
+    strategy: signal.strategyVersion || signal.strategy || 'Forex Structure',
     score: signal.score,
     scoreBreakdown: signal.scoreBreakdown,
-    mlProbability: signal.mlProbability,
-    entryZone: signal.entryZone,
-    stopLoss: signal.stopLoss,
-    target1: signal.target1,
-    target2: signal.target2,
-    target3: signal.target3,
-    riskReward: signal.riskReward,
+    mlProbability: signal.mlProbability ?? 0,
+    entryZone: plan ? {
+      min: plan.entryMin,
+      max: plan.entryMax,
+      preferred: plan.entryPreferred
+    } : (signal.entryZone || { min: signal.currentPrice || 0, max: signal.currentPrice || 0 }),
+    stopLoss: plan ? plan.stopLoss : (signal.stopLoss ?? null),
+    target1: plan ? (typeof plan.takeProfit1 === 'object' ? plan.takeProfit1.targetPrice : plan.takeProfit1) : (signal.target1 ?? null),
+    target2: plan ? (typeof plan.takeProfit2 === 'object' ? plan.takeProfit2.targetPrice : plan.takeProfit2) : (signal.target2 ?? null),
+    target3: plan ? (typeof plan.takeProfit3 === 'object' ? plan.takeProfit3.targetPrice : plan.takeProfit3) : (signal.target3 ?? null),
+    riskReward: plan ? plan.riskReward : (signal.riskReward ?? 1.5),
     status: signal.status,
     invalidationConditions: signal.invalidationConditions,
     reasons: signal.reasons,

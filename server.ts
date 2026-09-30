@@ -355,7 +355,7 @@ app.get('/api/operations/brokers/verify', operatorAuthRequired, async (_req: Req
     const credentialStatuses = brokerRegistry.getCredentialStatuses();
 
     const results = await Promise.all(
-      (['CTRADER', 'FIVE_PAISA'] as const).map(async (broker) => {
+      (['CTRADER'] as const).map(async (broker) => {
         const credentials = credentialStatuses.find(item => item.broker === broker && item.environment === 'LIVE');
         if (!credentials?.configured) {
           return evaluateBrokerVerification({
@@ -1553,8 +1553,8 @@ app.get('/api/reports/account-balance-history', operatorAuthRequired, async (req
     const broker = typeof req.query.broker === 'string'
       ? String(req.query.broker).toUpperCase()
       : undefined;
-    if (broker && broker !== 'CTRADER' && broker !== 'FIVE_PAISA') {
-      return res.status(400).json({ error: 'BROKER_INVALID', message: 'broker must be CTRADER or FIVE_PAISA.' });
+    if (broker && broker !== 'CTRADER') {
+      return res.status(400).json({ error: 'BROKER_INVALID', message: 'broker must be CTRADER.' });
     }
 
     const from = req.query.from !== undefined ? Number(req.query.from) : undefined;
@@ -1563,7 +1563,7 @@ app.get('/api/reports/account-balance-history', operatorAuthRequired, async (req
     const rows = await getAccountBalanceSnapshots({
       from: Number.isFinite(from) ? from : undefined,
       to: Number.isFinite(to) ? to : undefined,
-      broker: broker as 'CTRADER' | 'FIVE_PAISA' | undefined,
+      broker: broker as 'CTRADER' | undefined,
       limit: Number.isFinite(limit) ? limit : 500
     });
 
@@ -2864,11 +2864,10 @@ async function captureLiveBrokerReconciliation(): Promise<void> {
   if (!databaseReady) return;
   try {
     const results = await Promise.allSettled([
-      reconciliationService.captureBrokerSnapshot('CTRADER'),
-      reconciliationService.captureBrokerSnapshot('FIVE_PAISA')
+      reconciliationService.captureBrokerSnapshot('CTRADER')
     ]);
     results.forEach((result, index) => {
-      const broker = index === 0 ? 'CTRADER' : 'FIVE_PAISA';
+      const broker = index === 0 ? 'CTRADER' : 'CTRADER';
       if (result.status === 'rejected') {
         console.warn(`Goldcrest reconciliation failed for ${broker}: `, result.reason?.message || result.reason);
       } else if (result.value?.status === 'UNCONFIGURED') {

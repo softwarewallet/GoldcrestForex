@@ -86,7 +86,7 @@ async function captureBrokerBalance(broker: BrokerType, capturedAt: number): Pro
       broker,
       environment: 'LIVE',
       accountId: String(account.accountId || '****'),
-      currency: String(account.currency || (broker === 'FIVE_PAISA' ? 'INR' : 'USD')),
+      currency: String(account.currency || 'USD'),
       capturedAt,
       balance,
       equity,

@@ -2,7 +2,7 @@
 // CANONICAL MULTI-CURRENCY ACCOUNTING & CONSOLIDATION LAYER TYPES
 // ============================================================================
 
-export type CurrencyCode = 'USD' | 'EUR' | 'GBP' | 'JPY';
+export type CurrencyCode = 'USD' | 'EUR' | 'GBP' | 'JPY' | 'INR';
 
 export type MarketTypeWithCurrency = 'FOREX';
 

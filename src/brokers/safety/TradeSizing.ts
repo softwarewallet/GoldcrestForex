@@ -34,16 +34,17 @@ export function normalizePriceToThreeDigits(price: number): number {
 }
 
 /**
- * Backward-compatible name used by existing execution code.
+ * Normalizes an execution price to the broker instrument's exact digit precision.
+ * Standard Forex pairs use 5 decimals; JPY pairs and indices use 3 decimals.
  */
 export function normalizePriceToInstrumentDigits(price: number, digits?: number): number {
   if (!Number.isFinite(price) || price <= 0) {
     throw new Error('INVALID_PRICE: Price must be a positive finite number.');
   }
-  // The optional digits argument is retained for API compatibility, but
-  // executable Goldcrest prices are always normalized to three decimals.
-  void digits;
-  return Number(price.toFixed(GOLD_CREST_PRICE_DIGITS));
+  const d = typeof digits === 'number' && Number.isInteger(digits) && digits >= 0
+    ? digits
+    : (price < 10 ? 5 : 3);
+  return Number(price.toFixed(d));
 }
 
 export interface ForexPipTargets {
@@ -65,15 +66,14 @@ export interface ForexPipTargets {
  * SELL:
  *   SL = entry + stopLossPips * pipSize
  *   TP = entry - takeProfitPips * pipSize
- *
- * The resulting prices use Goldcrest's global three-decimal execution policy.
  */
 export function calculateForexPipTargets(
   side: 'BUY' | 'SELL',
   entryPrice: number,
   pipSize: number,
   stopLossPips: number,
-  takeProfitPips: number
+  takeProfitPips: number,
+  digits?: number
 ): ForexPipTargets {
   if (side !== 'BUY' && side !== 'SELL') {
     throw new Error('INVALID_SIDE: Forex side must be BUY or SELL.');
@@ -91,6 +91,10 @@ export function calculateForexPipTargets(
     throw new Error('INVALID_TAKE_PROFIT_PIPS: Take Profit in pips must be greater than zero.');
   }
 
+  const targetDigits = typeof digits === 'number' && Number.isInteger(digits) && digits >= 0
+    ? digits
+    : (pipSize < 0.001 ? 5 : 3);
+
   const stopDistance = stopLossPips * pipSize;
   const takeProfitDistance = takeProfitPips * pipSize;
   const stopLoss = side === 'BUY'
@@ -105,8 +109,8 @@ export function calculateForexPipTargets(
   }
 
   return {
-    stopLoss: normalizePriceToThreeDigits(stopLoss),
-    takeProfit: normalizePriceToThreeDigits(takeProfit),
+    stopLoss: normalizePriceToInstrumentDigits(stopLoss, targetDigits),
+    takeProfit: normalizePriceToInstrumentDigits(takeProfit, targetDigits),
     stopLossPips,
     takeProfitPips,
     pipSize

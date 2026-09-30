@@ -936,7 +936,8 @@ brokerRouter.post('/order', async (req: Request, res: Response) => {
           Number(orderReq.price),
           precisionInstrument.pipSize,
           config.forexStopLossPips,
-          config.forexTakeProfitPips
+          config.forexTakeProfitPips,
+          precisionInstrument.digits
         );
         orderReq.stopLoss = pipTargets.stopLoss;
         orderReq.takeProfit = pipTargets.takeProfit;
