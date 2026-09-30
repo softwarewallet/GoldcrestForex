@@ -185,7 +185,6 @@ export interface AutoTradingStatus {
   maxTradesPerPair: number;
   maxOpenPositions: number;
   pairs: string[];
-  indianUnderlyings: string[];
   lastCycleAt: number | null;
   lastCycleResult: string | null;
   lastActions: Array<{
@@ -431,7 +430,6 @@ class AutoTradingService {
       maxTradesPerPair: Number(config.autoLiveMaxTradesPerPair),
       maxOpenPositions: Number(config.maxOpenPositions),
       pairs: configuredPairs,
-      indianUnderlyings: [...config.autoLiveIndianUnderlyings],
       lastCycleAt: this.lastCycleAt,
       lastCycleResult: this.lastCycleResult,
       lastActions: [...this.lastActions],

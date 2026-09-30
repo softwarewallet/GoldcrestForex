@@ -16,13 +16,11 @@ type PersistedConfigKey =
   | 'eventProximityThresholdMinutes'
   | 'strikeDepth'
   | 'maxTradeValueForexUsd'
-  | 'maxTradeValueIndianInr'
   | 'autoLiveMinSignalScore'
   | 'autoLiveMaxTradesPerPair'
   | 'forexStopLossPips'
   | 'forexTakeProfitPips'
   | 'autoLiveForexPairs'
-  | 'autoLiveIndianUnderlyings'
   | 'financialDisclaimer';
 
 const SYSTEM_SETTING_MAP: ReadonlyArray<[string, PersistedConfigKey]> = [
@@ -40,13 +38,11 @@ const SYSTEM_SETTING_MAP: ReadonlyArray<[string, PersistedConfigKey]> = [
   ['EVENT_PROXIMITY_THRESHOLD_MINUTES', 'eventProximityThresholdMinutes'],
   ['STRIKE_DEPTH', 'strikeDepth'],
   ['MAX_TRADE_VALUE_FOREX_USD', 'maxTradeValueForexUsd'],
-  ['MAX_TRADE_VALUE_INDIAN_INR', 'maxTradeValueIndianInr'],
   ['AUTO_LIVE_MIN_SIGNAL_SCORE', 'autoLiveMinSignalScore'],
   ['AUTO_LIVE_MAX_TRADES_PER_PAIR', 'autoLiveMaxTradesPerPair'],
   ['FOREX_STOP_LOSS_PIPS', 'forexStopLossPips'],
   ['FOREX_TAKE_PROFIT_PIPS', 'forexTakeProfitPips'],
   ['AUTO_LIVE_FOREX_PAIRS', 'autoLiveForexPairs'],
-  ['AUTO_LIVE_INDIAN_UNDERLYINGS', 'autoLiveIndianUnderlyings'],
   ['FINANCIAL_DISCLAIMER', 'financialDisclaimer']
 ];
 
@@ -61,7 +57,6 @@ const NUMERIC_KEYS = new Set<PersistedConfigKey>([
   'eventProximityThresholdMinutes',
   'strikeDepth',
   'maxTradeValueForexUsd',
-  'maxTradeValueIndianInr',
   'autoLiveMinSignalScore',
   'autoLiveMaxTradesPerPair',
   'forexStopLossPips',
@@ -69,8 +64,7 @@ const NUMERIC_KEYS = new Set<PersistedConfigKey>([
 ]);
 
 const ARRAY_KEYS = new Set<PersistedConfigKey>([
-  'autoLiveForexPairs',
-  'autoLiveIndianUnderlyings'
+  'autoLiveForexPairs'
 ]);
 
 function serializeConfigValue(key: PersistedConfigKey, value: SystemConfig[PersistedConfigKey]): string {
@@ -92,64 +86,55 @@ export function buildSystemSettingRows(
   ]);
 }
 
-export function decodeSystemSettingRows(
-  rows: Array<{ key?: unknown; value?: unknown }>
-): Partial<SystemConfig> {
-  const keyToConfig = new Map(SYSTEM_SETTING_MAP);
-  const updates: Partial<SystemConfig> = {};
-
-  for (const row of rows) {
-    const dbKey = String(row.key ?? '');
-    const configKey = keyToConfig.get(dbKey);
-    if (!configKey) continue;
-
-    const raw = String(row.value ?? '');
-    if (ARRAY_KEYS.has(configKey)) {
-      try {
-        const parsed: unknown = JSON.parse(raw || 'null');
-        if (Array.isArray(parsed) && parsed.every(item => typeof item === 'string')) {
-          (updates as any)[configKey] = [...parsed];
-        }
-      } catch {
-        // Ignore malformed persisted arrays; configuration integrity checks
-        // on the resulting runtime snapshot remain fail-closed.
-      }
-      continue;
-    }
-
-    if (NUMERIC_KEYS.has(configKey)) {
-      const value = Number(raw);
-      if (Number.isFinite(value)) (updates as any)[configKey] = value;
-      continue;
-    }
-
-    if (raw.trim() !== '') {
-      (updates as any)[configKey] = raw;
-    }
-  }
-
-  return updates;
+export async function persistSystemConfigToDatabase(
+  config: SystemConfig,
+  updatedAt = Date.now()
+): Promise<void> {
+  const rows = buildSystemSettingRows(config, updatedAt);
+  await executeTransaction(rows.map(([key, value, ts]) => ({
+    sql: `INSERT INTO system_settings (key, value, updated_at)
+          VALUES (?, ?, ?)
+          ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = excluded.updated_at`,
+    params: [key, value, ts]
+  })));
 }
 
 export async function loadPersistedSystemConfigFromDatabase(): Promise<Partial<SystemConfig>> {
   const rows = await executeQuery<{ key: string; value: string }>(
     'SELECT key, value FROM system_settings'
   );
-  return decodeSystemSettingRows(rows);
-}
+  if (!rows || rows.length === 0) return {};
 
-export async function persistSystemConfigToDatabase(
-  config: SystemConfig,
-  updatedAt = Date.now()
-): Promise<void> {
-  const rows = buildSystemSettingRows(config, updatedAt);
+  const map = new Map(rows.map(r => [r.key, r.value]));
+  const result: Partial<SystemConfig> = {};
 
-  await executeTransaction((db) => {
-    for (const [key, value, timestamp] of rows) {
-      db.run(
-        'INSERT OR REPLACE INTO system_settings (key, value, updated_at) VALUES (?, ?, ?)',
-        [key, value, timestamp]
-      );
+  for (const [dbKey, configKey] of SYSTEM_SETTING_MAP) {
+    if (!map.has(dbKey)) continue;
+    const raw = map.get(dbKey);
+    if (raw === undefined || raw === null || raw === '') continue;
+
+    if (ARRAY_KEYS.has(configKey)) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          (result as any)[configKey] = parsed;
+        }
+      } catch {}
+      continue;
     }
-  });
+
+    if (NUMERIC_KEYS.has(configKey)) {
+      const num = Number(raw);
+      if (Number.isFinite(num)) {
+        (result as any)[configKey] = num;
+      }
+      continue;
+    }
+
+    (result as any)[configKey] = raw;
+  }
+
+  return result;
 }

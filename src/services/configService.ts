@@ -23,13 +23,11 @@ export interface SystemConfig {
   eventProximityThresholdMinutes: number;
   strikeDepth: number;
   maxTradeValueForexUsd: number;
-  maxTradeValueIndianInr: number;
   autoLiveMinSignalScore: number;
   autoLiveMaxTradesPerPair: number;
   forexStopLossPips: number;
   forexTakeProfitPips: number;
   autoLiveForexPairs: string[];
-  autoLiveIndianUnderlyings: string[];
   financialDisclaimer: string;
 }
 
@@ -61,19 +59,17 @@ const PERSISTED_KEYS: readonly (keyof SystemConfig)[] = [
   'eventProximityThresholdMinutes',
   'strikeDepth',
   'maxTradeValueForexUsd',
-  'maxTradeValueIndianInr',
   'autoLiveMinSignalScore',
   'autoLiveMaxTradesPerPair',
   'forexStopLossPips',
   'forexTakeProfitPips',
   'autoLiveForexPairs',
-  'autoLiveIndianUnderlyings',
   'financialDisclaimer'
 ];
 
 let activeConfig: SystemConfig = {
   tradingMode: 'LIVE_ONLY',
-  liveTradingEnabled: process.env.LIVE_TRADING_ENABLED === 'true',
+  liveTradingEnabled: true,
   dataStatus: 'UNAVAILABLE',
   modelStatus: 'ML BASELINE / UNCALIBRATED (PHASE 1)',
   researchStatus: 'CLOSED',
@@ -88,18 +84,13 @@ let activeConfig: SystemConfig = {
   eventProximityThresholdMinutes: 20,
   strikeDepth: 7,
   maxTradeValueForexUsd: 100000,
-  maxTradeValueIndianInr: 1000000,
   autoLiveMinSignalScore: 75,
   autoLiveMaxTradesPerPair: 4,
   forexStopLossPips: 20,
   forexTakeProfitPips: 40,
-  // If the operator has not persisted a working-universe selection yet,
-  // Auto Live evaluates the complete supported Forex universe rather than
-  // silently falling back to the old five-pair subset.
   autoLiveForexPairs: FOREX_PAIRS.map(pair => pair.symbol),
-  autoLiveIndianUnderlyings: ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX'],
   financialDisclaimer:
-    'Trading in Forex and derivatives involves substantial risk of loss. Model outputs, signals, probabilities and technical analysis are estimates for informational and analytical purposes only and are not financial advice, guarantees, or assurances of future performance.'
+    'Trading in Forex involves substantial risk of loss. Model outputs, signals, probabilities and technical analysis are estimates for informational and analytical purposes only and are not financial advice, guarantees, or assurances of future performance.'
 };
 
 let diskConfigLoaded = false;
@@ -110,139 +101,186 @@ function ensureConfigDir(): void {
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function sanitizePersistedConfig(input: unknown): Partial<SystemConfig> {
-  if (!isRecord(input)) return {};
-
-  const output: Partial<SystemConfig> = {};
-  for (const key of PERSISTED_KEYS) {
-    const value = input[key];
-
-    if (typeof value === 'number') {
-      if (Number.isFinite(value)) (output as any)[key] = value;
-      continue;
-    }
-
-    if (typeof value === 'string') {
-      if (value.trim() !== '') (output as any)[key] = value;
-      continue;
-    }
-
-    if (Array.isArray(value) && value.every(item => typeof item === 'string')) {
-      (output as any)[key] = [...value];
-    }
+function sanitizeNumber(value: unknown, fallback: number): number {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
   }
-
-  return output;
+  if (typeof value === 'string') {
+    const parsed = parseFloat(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return fallback;
 }
 
-/**
- * Load persisted operator settings exactly once per server process.
- * A corrupt/partial file is ignored rather than preventing the terminal from
- * starting; the next successful save replaces it atomically.
- */
-export function loadPersistedSystemConfig(): SystemConfig {
-  if (diskConfigLoaded) return { ...activeConfig };
-  diskConfigLoaded = true;
+function sanitizeString(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.trim().length > 0
+    ? value.trim()
+    : fallback;
+}
 
+function sanitizeStringArray(value: unknown, fallback: string[]): string[] {
+  if (!Array.isArray(value)) return [...fallback];
+  const cleaned = value
+    .filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+    .map(v => v.trim());
+  return cleaned.length > 0 ? cleaned : [...fallback];
+}
+
+export function loadPersistedSystemConfig(): Partial<SystemConfig> {
   try {
-    ensureConfigDir();
     if (!fs.existsSync(CONFIG_FILE)) {
-      return { ...activeConfig };
+      return {};
     }
-
-    const raw = fs.readFileSync(CONFIG_FILE, 'utf8');
+    const raw = fs.readFileSync(CONFIG_FILE, 'utf-8');
+    if (!raw.trim()) return {};
     const parsed = JSON.parse(raw);
-    const persisted = sanitizePersistedConfig(parsed);
+    if (typeof parsed !== 'object' || parsed === null) return {};
 
-    activeConfig = {
-      ...activeConfig,
-      ...persisted,
-      tradingMode: 'LIVE_ONLY'
-    };
-  } catch (error) {
-    console.warn('[CONFIG] Persisted system-config.json could not be loaded; using defaults.', error);
+    const filtered: Partial<SystemConfig> = {};
+    for (const key of PERSISTED_KEYS) {
+      if (key in parsed) {
+        (filtered as any)[key] = parsed[key];
+      }
+    }
+    return filtered;
+  } catch (err: any) {
+    console.warn(`[Goldcrest Config] Failed to load ${CONFIG_FILE}: ${err?.message || err}`);
+    return {};
   }
-
-  return { ...activeConfig };
 }
 
-export function persistSystemConfig(config: SystemConfig = activeConfig): void {
-  try {
-    ensureConfigDir();
-
-    const persisted: Record<string, unknown> = {};
-    for (const key of PERSISTED_KEYS) {
-      persisted[key] = config[key];
+export function persistSystemConfig(config: SystemConfig): void {
+  ensureConfigDir();
+  const toSave: Record<string, unknown> = {};
+  for (const key of PERSISTED_KEYS) {
+    if (config[key] !== undefined) {
+      toSave[key] = config[key];
     }
+  }
 
-    const serialized = JSON.stringify(persisted, null, 2) + '\n';
-    fs.writeFileSync(CONFIG_TMP_FILE, serialized, 'utf8');
+  const payload = JSON.stringify(toSave, null, 2);
+  try {
+    fs.writeFileSync(CONFIG_TMP_FILE, payload, 'utf-8');
     fs.renameSync(CONFIG_TMP_FILE, CONFIG_FILE);
-  } catch (error) {
-    console.error('[CONFIG] Failed to persist system configuration:', error);
+  } catch (err: any) {
     try {
-      if (fs.existsSync(CONFIG_TMP_FILE)) fs.unlinkSync(CONFIG_TMP_FILE);
+      if (fs.existsSync(CONFIG_TMP_FILE)) {
+        fs.unlinkSync(CONFIG_TMP_FILE);
+      }
     } catch {}
-    throw error;
+    throw new Error(`Failed to persist system config: ${err?.message || err}`);
   }
 }
 
 export function getSystemConfig(): SystemConfig {
-  loadPersistedSystemConfig();
-  return { ...activeConfig };
-}
-
-export function applyPersistedSystemConfig(updates: Partial<SystemConfig>): SystemConfig {
-  // Once the server hydrates the authoritative persisted store (SQLite), do
-  // not subsequently reload the possibly stale file-backed snapshot and
-  // overwrite those values. SQLite is the durable runtime source of record;
-  // the JSON file is only a bootstrap/fallback snapshot.
-  activeConfig = {
-    ...activeConfig,
-    ...updates,
-    tradingMode: 'LIVE_ONLY'
-  };
-  diskConfigLoaded = true;
-
+  if (!diskConfigLoaded) {
+    const persisted = loadPersistedSystemConfig();
+    activeConfig = {
+      ...activeConfig,
+      ...persisted,
+      tradingMode: 'LIVE_ONLY',
+      researchStatus: 'CLOSED'
+    };
+    diskConfigLoaded = true;
+  }
   return { ...activeConfig };
 }
 
 export function prepareSystemConfigUpdate(updates: Partial<SystemConfig>): SystemConfig {
-  loadPersistedSystemConfig();
-
-  // Goldcrest's broker routing remains explicit, while cTrader Open API
-  // endpoint mode may be selected independently for connection/testing.
-  if (updates.tradingMode !== undefined && updates.tradingMode !== 'LIVE_ONLY') {
-    throw new Error('Trading mode rejected: Goldcrest supports LIVE_ONLY mode only.');
-  }
-  if (updates.cTraderApiMode !== undefined && !['LIVE', 'DEMO'].includes(updates.cTraderApiMode)) {
-    throw new Error('cTrader API mode must be LIVE or DEMO.');
-  }
-
-  const candidate: SystemConfig = {
-    ...activeConfig,
-    ...updates,
-    tradingMode: 'LIVE_ONLY'
+  const current = getSystemConfig();
+  const next: SystemConfig = {
+    ...current,
+    tradingMode: 'LIVE_ONLY',
+    researchStatus: 'CLOSED'
   };
-  const integrity = evaluateSystemConfigIntegrity(candidate);
-  if (!integrity.ok) {
-    throw new Error(`Configuration integrity rejected: ${integrity.failures.join(', ') || 'invalid configuration'}`);
+
+  if ('defaultRiskPct' in updates) {
+    next.defaultRiskPct = Math.max(0.1, Math.min(10.0, sanitizeNumber(updates.defaultRiskPct, current.defaultRiskPct)));
   }
-  return { ...candidate };
+  if ('maxDailyLossPct' in updates) {
+    next.maxDailyLossPct = Math.max(0.5, Math.min(20.0, sanitizeNumber(updates.maxDailyLossPct, current.maxDailyLossPct)));
+  }
+  if ('maxOpenPositions' in updates) {
+    next.maxOpenPositions = Math.max(1, Math.min(50, Math.floor(sanitizeNumber(updates.maxOpenPositions, current.maxOpenPositions))));
+  }
+  if ('maxTradesPerDay' in updates) {
+    next.maxTradesPerDay = Math.max(1, Math.min(200, Math.floor(sanitizeNumber(updates.maxTradesPerDay, current.maxTradesPerDay))));
+  }
+  if ('maxConsecutiveLosses' in updates) {
+    next.maxConsecutiveLosses = Math.max(1, Math.min(10, Math.floor(sanitizeNumber(updates.maxConsecutiveLosses, current.maxConsecutiveLosses))));
+  }
+  if ('maxSpreadBps' in updates) {
+    next.maxSpreadBps = Math.max(1, Math.min(200, Math.floor(sanitizeNumber(updates.maxSpreadBps, current.maxSpreadBps))));
+  }
+  if ('signalCooldownMs' in updates) {
+    next.signalCooldownMs = Math.max(1000, Math.min(600000, Math.floor(sanitizeNumber(updates.signalCooldownMs, current.signalCooldownMs))));
+  }
+  if ('eventProximityThresholdMinutes' in updates) {
+    next.eventProximityThresholdMinutes = Math.max(0, Math.min(120, Math.floor(sanitizeNumber(updates.eventProximityThresholdMinutes, current.eventProximityThresholdMinutes))));
+  }
+  if ('strikeDepth' in updates) {
+    next.strikeDepth = Math.max(1, Math.min(20, Math.floor(sanitizeNumber(updates.strikeDepth, current.strikeDepth))));
+  }
+  if ('maxTradeValueForexUsd' in updates) {
+    next.maxTradeValueForexUsd = Math.max(100, Math.min(5000000, sanitizeNumber(updates.maxTradeValueForexUsd, current.maxTradeValueForexUsd)));
+  }
+  if ('autoLiveMinSignalScore' in updates) {
+    next.autoLiveMinSignalScore = Math.max(0, Math.min(100, Math.floor(sanitizeNumber(updates.autoLiveMinSignalScore, current.autoLiveMinSignalScore))));
+  }
+  if ('autoLiveMaxTradesPerPair' in updates) {
+    next.autoLiveMaxTradesPerPair = Math.max(1, Math.min(20, Math.floor(sanitizeNumber(updates.autoLiveMaxTradesPerPair, current.autoLiveMaxTradesPerPair))));
+  }
+  if ('forexStopLossPips' in updates) {
+    next.forexStopLossPips = Math.max(1, Math.min(500, Math.floor(sanitizeNumber(updates.forexStopLossPips, current.forexStopLossPips))));
+  }
+  if ('forexTakeProfitPips' in updates) {
+    next.forexTakeProfitPips = Math.max(1, Math.min(1000, Math.floor(sanitizeNumber(updates.forexTakeProfitPips, current.forexTakeProfitPips))));
+  }
+  if ('autoLiveForexPairs' in updates) {
+    next.autoLiveForexPairs = sanitizeStringArray(updates.autoLiveForexPairs, current.autoLiveForexPairs);
+  }
+  if ('cTraderApiMode' in updates) {
+    const rawMode = String(updates.cTraderApiMode || '').toUpperCase().trim();
+    if (rawMode === 'LIVE' || rawMode === 'DEMO') {
+      next.cTraderApiMode = rawMode;
+    }
+  }
+  if ('selectedCtraderAccountId' in updates) {
+    next.selectedCtraderAccountId = updates.selectedCtraderAccountId ? String(updates.selectedCtraderAccountId).trim() : undefined;
+  }
+  if ('selectedCtraderAccountCurrency' in updates) {
+    next.selectedCtraderAccountCurrency = updates.selectedCtraderAccountCurrency ? String(updates.selectedCtraderAccountCurrency).trim().toUpperCase() : undefined;
+  }
+  if ('selectedCtraderAccountLabel' in updates) {
+    next.selectedCtraderAccountLabel = updates.selectedCtraderAccountLabel ? String(updates.selectedCtraderAccountLabel).trim() : undefined;
+  }
+  if ('financialDisclaimer' in updates) {
+    next.financialDisclaimer = sanitizeString(updates.financialDisclaimer, current.financialDisclaimer);
+  }
+
+  return next;
+}
+
+export function applyPersistedSystemConfig(config: SystemConfig): void {
+  activeConfig = {
+    ...config,
+    tradingMode: 'LIVE_ONLY',
+    researchStatus: 'CLOSED'
+  };
+  diskConfigLoaded = true;
 }
 
 export function updateSystemConfig(updates: Partial<SystemConfig>): SystemConfig {
-  const candidate = prepareSystemConfigUpdate(updates);
-  activeConfig = candidate;
-  persistSystemConfig(activeConfig);
+  const updated = prepareSystemConfigUpdate(updates);
+  persistSystemConfig(updated);
+  applyPersistedSystemConfig(updated);
   return { ...activeConfig };
 }
 
 export function getCTraderApiMode(): 'LIVE' | 'DEMO' {
-  loadPersistedSystemConfig();
-  return activeConfig.cTraderApiMode;
+  const configuredMode = getSystemConfig().cTraderApiMode;
+  if (configuredMode === 'LIVE' || configuredMode === 'DEMO') {
+    return configuredMode;
+  }
+  return process.env.CTRADER_API_MODE === 'LIVE' ? 'LIVE' : 'DEMO';
 }

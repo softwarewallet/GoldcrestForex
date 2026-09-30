@@ -27,13 +27,11 @@ export const DiagnosticsModal: React.FC<DiagnosticsModalProps> = ({ onClose }) =
   useEffect(() => { fetchStats(); }, []);
 
   const phase1Checklist = [
-    { title:'Market Abstraction Layer', detail:'Uniform interface for Forex, Equity, Options', verified:true },
-    { title:'Forex Module', detail:'Currency pairs, pip calculation, session states', verified:true },
-    { title:'Indian Equity Module', detail:'NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY, SENSEX', verified:true },
-    { title:'Options Analytics & Greeks', detail:'Dynamic strike depth and Black-Scholes analytics', verified:true },
+    { title:'Forex Market Layer', detail:'Currency pairs, pip calculation, and multi-session states', verified:true },
+    { title:'cTrader Live Adapter', detail:'Authoritative Fix/Open API connectivity with token refresh', verified:true },
+    { title:'Quantitative ML Strategy', detail:'Gradient-boosted signal scoring and MTF structure analysis', verified:true },
     { title:'SQLite Database Layer', detail:'Authoritative local SQLite persistence', verified:true },
-    { title:'Automatic Broker Routing', detail:'cTrader for FOREX; 5paisa for Indian markets', verified:true },
-    { title:'Live Execution Safety', detail:'Autonomous live-money execution permanently disabled', verified:true }
+    { title:'Risk & Execution Safety', detail:'Dynamic trade sizing, risk limits, and emergency kill switch', verified:true }
   ];
 
   return (

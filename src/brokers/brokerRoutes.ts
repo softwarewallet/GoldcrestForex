@@ -7,7 +7,7 @@ import { getAuditLogs, logBrokerAction, maskIdentifier } from './auditLog';
 import { BrokerAdapter, BrokerType, NormalizedPosition, NormalizedQuote, TradingEnvironment, OrderRequest } from './types';
 import { normalizeBrokerError } from './errors';
 import { reconciliationService } from '../services/reconciliationService';
-import { getForexSessionState, getIndianSessionState } from '../markets/common/session';
+import { getForexSessionState } from '../markets/common/session';
 import { claimExecutionIntent, completeExecutionIntent, failExecutionIntent, markExecutionIntentInFlight, getExecutionIntent, resumeExecutionIntentReconciliation } from '../services/executionIntentService';
 import { reconcileExecutionIntent } from '../services/executionReconciliationService';
 import { getSystemConfig } from '../services/configService';
@@ -18,7 +18,7 @@ import { autoTradingService } from '../services/autoTradingService';
 
 export const brokerRouter = Router();
 
-const LIVE_BROKERS: BrokerType[] = ['CTRADER', 'FIVE_PAISA'];
+const LIVE_BROKERS: BrokerType[] = ['CTRADER'];
 
 // Several terminal surfaces request broker status at nearly the same time.
 // Share one short-lived broker snapshot and one in-flight request so normal
@@ -40,10 +40,7 @@ const BROKER_COLLECTION_CACHE_TTL_MS = 10_000;
 
 function resolveMarketBroker(market: string): BrokerType {
   if (market === 'FOREX') return 'CTRADER';
-  if (market === 'INDIAN_EQUITY' || market === 'INDIAN_FUTURES' || market === 'INDIAN_OPTIONS') {
-    return 'FIVE_PAISA';
-  }
-  throw new Error(`Unsupported market: ${market}. No compatible live broker is configured.`);
+  throw new Error(`Unsupported market: ${market}. Only FOREX is supported.`);
 }
 
 function forexQuoteCurrencies(symbol: string): { base: string; quote: string } | null {
@@ -288,10 +285,7 @@ async function refreshBrokerStatusSnapshot(forceRefresh?: boolean): Promise<any>
     routingMode: 'AUTOMATIC_BY_MARKET',
     selectedBroker: null,
     brokerRouting: {
-      FOREX: 'CTRADER',
-      INDIAN_EQUITY: 'FIVE_PAISA',
-      INDIAN_FUTURES: 'FIVE_PAISA',
-      INDIAN_OPTIONS: 'FIVE_PAISA'
+      FOREX: 'CTRADER'
     },
     brokers: brokerStatus,
     credentials: brokerRegistry.getCredentialStatuses(),
@@ -367,7 +361,7 @@ brokerRouter.post('/test-connection', async (req: Request, res: Response) => {
   const requestedBroker = req.body?.broker as BrokerType | undefined;
 
   if (requestedBroker && !LIVE_BROKERS.includes(requestedBroker)) {
-    return res.status(400).json({ error: 'Allowed live brokers: CTRADER, FIVE_PAISA' });
+    return res.status(400).json({ error: 'Allowed live broker: CTRADER' });
   }
 
   const brokers = requestedBroker ? [requestedBroker] : LIVE_BROKERS;
@@ -427,7 +421,7 @@ brokerRouter.post('/select', (req: Request, res: Response) => {
   const { broker } = req.body as { broker: BrokerType };
 
   if (!LIVE_BROKERS.includes(broker)) {
-    return res.status(400).json({ error: 'Invalid broker. Allowed: CTRADER, FIVE_PAISA' });
+    return res.status(400).json({ error: 'Invalid broker. Allowed: CTRADER' });
   }
 
   res.json({
@@ -448,7 +442,7 @@ brokerRouter.post('/credentials/live', (req: Request, res: Response) => {
   }
 
   if (!LIVE_BROKERS.includes(broker)) {
-    return res.status(400).json({ error: 'Missing or invalid broker. Allowed: CTRADER, FIVE_PAISA' });
+    return res.status(400).json({ error: 'Missing or invalid broker. Allowed: CTRADER' });
   }
 
   if (!credentials) {
@@ -583,7 +577,7 @@ brokerRouter.get('/account', async (req: Request, res: Response) => {
   try {
     if (requestedBroker) {
       if (!LIVE_BROKERS.includes(requestedBroker)) {
-        return res.status(400).json({ error: 'Allowed live brokers: CTRADER, FIVE_PAISA' });
+        return res.status(400).json({ error: 'Allowed live broker: CTRADER' });
       }
 
       // Reuse the same account snapshot as the header/status endpoint. This
@@ -1034,9 +1028,7 @@ brokerRouter.post('/order', async (req: Request, res: Response) => {
 
     const account = await adapter.getAccount();
     const positions = await adapter.getPositions();
-    const isMarketOpen = orderReq.market === 'FOREX'
-      ? !getForexSessionState().activeSessions.includes('CLOSED (WEEKEND)')
-      : getIndianSessionState().isOpen;
+    const isMarketOpen = !getForexSessionState().activeSessions.includes('CLOSED (WEEKEND)');
     let totalAccountExposure: number;
     try {
       totalAccountExposure = await calculateAccountCurrencyExposure(
@@ -1062,7 +1054,7 @@ brokerRouter.post('/order', async (req: Request, res: Response) => {
       signalAgeMs: 15000,
       currentQuote: quote,
       isMarketOpen,
-      dailyRealizedLoss: await reconciliationService.getDailyLoss(adapter.broker as 'CTRADER' | 'FIVE_PAISA', Number(account.balance || 0)),
+      dailyRealizedLoss: await reconciliationService.getDailyLoss('CTRADER', Number(account.balance || 0)),
       dailyLossLimit,
       totalAccountExposure,
       maxAllowedExposure,
@@ -1203,7 +1195,7 @@ brokerRouter.post('/order/:id/cancel', async (req: Request, res: Response) => {
   try {
     const broker = req.body?.broker as BrokerType | undefined;
     if (!broker || !LIVE_BROKERS.includes(broker)) {
-      return res.status(400).json({ error: 'Broker is required for cancel operation: CTRADER or FIVE_PAISA' });
+      return res.status(400).json({ error: 'Broker is required for cancel operation: CTRADER' });
     }
     const success = await brokerRegistry.getAdapter(broker, 'LIVE').cancelOrder(req.params.id);
     res.json({ success, broker });
@@ -1216,7 +1208,7 @@ brokerRouter.post('/position/:id/close', async (req: Request, res: Response) => 
   try {
     const broker = req.body?.broker as BrokerType | undefined;
     if (!broker || !LIVE_BROKERS.includes(broker)) {
-      return res.status(400).json({ error: 'Broker is required for close operation: CTRADER or FIVE_PAISA' });
+      return res.status(400).json({ error: 'Broker is required for close operation: CTRADER' });
     }
     const success = await brokerRegistry.getAdapter(broker, 'LIVE').closePosition(req.params.id, req.body?.quantity);
     res.json({ success, broker });
@@ -1259,13 +1251,12 @@ brokerRouter.post('/controls', (req: Request, res: Response) => {
 });
 
 brokerRouter.post('/reconciliation/snapshot', async (req: Request, res: Response) => {
-  const broker = req.body?.broker as ('CTRADER' | 'FIVE_PAISA') | undefined;
-  const brokers: ('CTRADER' | 'FIVE_PAISA')[] = broker ? [broker] : ['CTRADER', 'FIVE_PAISA'];
-  if (brokers.some(b => !LIVE_BROKERS.includes(b))) {
-    return res.status(400).json({ error: 'Allowed live brokers: CTRADER, FIVE_PAISA' });
+  const broker = (req.body?.broker as 'CTRADER' | undefined) || 'CTRADER';
+  if (!LIVE_BROKERS.includes(broker)) {
+    return res.status(400).json({ error: 'Allowed live broker: CTRADER' });
   }
   try {
-    const snapshots = await Promise.all(brokers.map(b => reconciliationService.captureBrokerSnapshot(b)));
+    const snapshots = [await reconciliationService.captureBrokerSnapshot(broker)];
     res.json({ success: true, snapshots });
   } catch (err: any) {
     res.status(502).json({ error: err.message, code: 'BROKER_RECONCILIATION_FAILED' });
@@ -1284,37 +1275,4 @@ brokerRouter.get('/reconciliation/snapshots', async (req: Request, res: Response
 brokerRouter.get('/audit-logs', (req: Request, res: Response) => {
   const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 100;
   res.json(getAuditLogs(limit));
-});
-
-brokerRouter.post('/fivepaisa/totp-login', async (req: Request, res: Response) => {
-  const { totp, pin } = req.body;
-  try {
-    const adapter = brokerRegistry.getAdapter('FIVE_PAISA', 'LIVE') as any;
-    if (typeof adapter.loginWithTotp !== 'function') {
-      return res.status(400).json({ error: 'Selected adapter does not support TOTP login.' });
-    }
-    await adapter.loginWithTotp(totp, pin);
-    const account = await adapter.getAccount();
-    res.json({ success: true, message: 'Successfully authenticated with 5paisa OpenAPI via TOTP.', account });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message || '5paisa TOTP authentication failed' });
-  }
-});
-
-brokerRouter.post('/fivepaisa/exchange-token', async (req: Request, res: Response) => {
-  const { requestToken } = req.body;
-  if (!requestToken) {
-    return res.status(400).json({ error: 'Missing requestToken parameter.' });
-  }
-  try {
-    const adapter = brokerRegistry.getAdapter('FIVE_PAISA', 'LIVE') as any;
-    if (typeof adapter.exchangeRequestToken !== 'function') {
-      return res.status(400).json({ error: 'Selected adapter does not support token exchange.' });
-    }
-    await adapter.exchangeRequestToken(requestToken);
-    const account = await adapter.getAccount();
-    res.json({ success: true, message: 'Successfully exchanged RequestToken for 5paisa AccessToken.', account });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message || '5paisa token exchange failed' });
-  }
 });

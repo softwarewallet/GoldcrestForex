@@ -1,4 +1,4 @@
-import { ForexSessionState, IndianSessionState } from './types';
+import { ForexSessionState } from './types';
 
 /**
  * Calculates current active Forex trading sessions based on UTC time.
@@ -13,7 +13,7 @@ export function getForexSessionState(now: Date = new Date()): ForexSessionState 
   const utcHours = now.getUTCHours() + now.getUTCMinutes() / 60;
   const day = now.getUTCDay(); // 0 = Sun, 6 = Sat
 
-  // Weekend check (Forex typically closes Friday ~21:00 UTC to Sunday ~21:00 UTC)
+  // Weekend check (Forex closes Friday ~21:00 UTC to Sunday ~21:00 UTC)
   const isWeekend = (day === 6) || (day === 0 && utcHours < 21) || (day === 5 && utcHours >= 21);
 
   if (isWeekend) {
@@ -53,94 +53,5 @@ export function getForexSessionState(now: Date = new Date()): ForexSessionState 
     newYork,
     isLondonNyOverlap,
     activeSessions
-  };
-}
-
-/**
- * Calculates Indian Equity Derivatives session state based on IST (UTC + 5:30).
- * Session timeline:
- * - 09:00 - 09:08 IST: Pre-Market
- * - 09:15 IST: Market Open
- * - 09:15 - 15:00 IST: Regular Session
- * - 15:00 - 15:30 IST: Near Close / Intraday Squaring
- * - Thursday (or Wednesday for BankNifty): Expiry Session
- * - 15:30 IST: Market Closes
- */
-export function getIndianSessionState(now: Date = new Date()): IndianSessionState {
-  // Convert to IST (UTC + 5:30)
-  const istOffset = 5.5 * 3600000;
-  const istDate = new Date(now.getTime() + istOffset);
-
-  const istDay = istDate.getUTCDay(); // 0 = Sun, 1 = Mon, ..., 6 = Sat
-  const hours = istDate.getUTCHours();
-  const minutes = istDate.getUTCMinutes();
-  const seconds = istDate.getUTCSeconds();
-  const timeInMinutes = hours * 60 + minutes;
-
-  const istTimeString = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')} IST`;
-  const isWeekend = (istDay === 0 || istDay === 6);
-  const isExpiryDay = (istDay === 4); // Thursday weekly expiry for NSE Nifty
-
-  if (isWeekend) {
-    return {
-      currentPhase: 'CLOSED',
-      isOpen: false,
-      istTime: istTimeString,
-      minutesToClose: 0,
-      isExpiryDay
-    };
-  }
-
-  // Pre-market: 09:00 to 09:14 (540 to 554 mins)
-  if (timeInMinutes >= 540 && timeInMinutes < 555) {
-    return {
-      currentPhase: 'PRE_MARKET',
-      isOpen: false,
-      istTime: istTimeString,
-      minutesToClose: 0,
-      isExpiryDay
-    };
-  }
-
-  // Market Open: 09:15 to 09:30 (555 to 570 mins)
-  if (timeInMinutes >= 555 && timeInMinutes < 570) {
-    return {
-      currentPhase: 'MARKET_OPEN',
-      isOpen: true,
-      istTime: istTimeString,
-      minutesToClose: 930 - timeInMinutes,
-      isExpiryDay
-    };
-  }
-
-  // Regular Session: 09:30 to 15:00 (570 to 900 mins)
-  if (timeInMinutes >= 570 && timeInMinutes < 900) {
-    return {
-      currentPhase: isExpiryDay ? 'EXPIRY_SESSION' : 'REGULAR',
-      isOpen: true,
-      istTime: istTimeString,
-      minutesToClose: 930 - timeInMinutes,
-      isExpiryDay
-    };
-  }
-
-  // Near Close: 15:00 to 15:30 (900 to 930 mins)
-  if (timeInMinutes >= 900 && timeInMinutes <= 930) {
-    return {
-      currentPhase: 'NEAR_CLOSE',
-      isOpen: true,
-      istTime: istTimeString,
-      minutesToClose: 930 - timeInMinutes,
-      isExpiryDay
-    };
-  }
-
-  // Post market or before 9 AM
-  return {
-    currentPhase: 'CLOSED',
-    isOpen: false,
-    istTime: istTimeString,
-    minutesToClose: 0,
-    isExpiryDay
   };
 }

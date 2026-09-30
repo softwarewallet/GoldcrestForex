@@ -90,50 +90,38 @@ export function evaluateSystemConfigIntegrity(config: any): ConfigIntegrityResul
     config.maxTradeValueForexUsd > 0;
   record('maxTradeValueForexUsd', isForexValueValid);
 
-  // 14. maxTradeValueIndianInr (> 0)
-  const isIndianValueValid = typeof config.maxTradeValueIndianInr === 'number' &&
-    Number.isFinite(config.maxTradeValueIndianInr) &&
-    config.maxTradeValueIndianInr > 0;
-  record('maxTradeValueIndianInr', isIndianValueValid);
-
-  // 15. autoLiveMinSignalScore (0 to 100)
+  // 14. autoLiveMinSignalScore (0 to 100)
   const isMinScoreValid = typeof config.autoLiveMinSignalScore === 'number' &&
     Number.isFinite(config.autoLiveMinSignalScore) &&
     config.autoLiveMinSignalScore >= 0 &&
     config.autoLiveMinSignalScore <= 100;
   record('autoLiveMinSignalScore', isMinScoreValid);
 
-  // 16. autoLiveMaxTradesPerPair (integer > 0)
+  // 15. autoLiveMaxTradesPerPair (integer > 0)
   const isMaxTradesPerPairValid = typeof config.autoLiveMaxTradesPerPair === 'number' &&
     Number.isInteger(config.autoLiveMaxTradesPerPair) &&
     config.autoLiveMaxTradesPerPair > 0;
   record('autoLiveMaxTradesPerPair', isMaxTradesPerPairValid);
 
-  // 17. forexStopLossPips (> 0)
+  // 16. forexStopLossPips (> 0)
   const isStopLossValid = typeof config.forexStopLossPips === 'number' &&
     Number.isFinite(config.forexStopLossPips) &&
     config.forexStopLossPips > 0;
   record('forexStopLossPips', isStopLossValid);
 
-  // 18. forexTakeProfitPips (> 0)
+  // 17. forexTakeProfitPips (> 0)
   const isTakeProfitValid = typeof config.forexTakeProfitPips === 'number' &&
     Number.isFinite(config.forexTakeProfitPips) &&
     config.forexTakeProfitPips > 0;
   record('forexTakeProfitPips', isTakeProfitValid);
 
-  // 19. autoLiveForexPairs (non-empty array, format XXX/YYY)
+  // 18. autoLiveForexPairs (non-empty array, format XXX/YYY)
   const isForexPairsValid = Array.isArray(config.autoLiveForexPairs) &&
     config.autoLiveForexPairs.length > 0 &&
     config.autoLiveForexPairs.every((p: unknown) => typeof p === 'string' && /^[A-Z0-9]{3}\/[A-Z0-9]{3}$/.test(p));
   record('autoLiveForexPairs', isForexPairsValid);
 
-  // 20. autoLiveIndianUnderlyings (non-empty array, alphanumeric uppercase)
-  const isIndianUnderlyingsValid = Array.isArray(config.autoLiveIndianUnderlyings) &&
-    config.autoLiveIndianUnderlyings.length > 0 &&
-    config.autoLiveIndianUnderlyings.every((u: unknown) => typeof u === 'string' && /^[A-Z0-9]+$/.test(u));
-  record('autoLiveIndianUnderlyings', isIndianUnderlyingsValid);
-
-  // 21. financialDisclaimer (non-empty string)
+  // 19. financialDisclaimer (non-empty string)
   const isDisclaimerValid = typeof config.financialDisclaimer === 'string' &&
     config.financialDisclaimer.trim().length > 0;
   record('financialDisclaimer', isDisclaimerValid);

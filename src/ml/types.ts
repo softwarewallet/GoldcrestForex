@@ -2,7 +2,7 @@
 // PHASE 3: MACHINE LEARNING TYPES, INTERFACES & ENUMS
 // ============================================================================
 
-export type MarketType = 'FOREX' | 'INDIAN_EQUITY' | 'INDIAN_OPTIONS';
+export type MarketType = 'FOREX';
 export type EnvironmentType = 'LIVE';
 
 export const CURRENT_FEATURE_VERSION = 'FEAT-v3.1.0';
@@ -109,62 +109,6 @@ export interface ForexFeatureVector {
   entryDistancePips: number;
   stopDistancePips: number;
   targetDistancePips: number;
-  [key: string]: number;
-}
-
-export interface IndianMarketFeatureVector {
-  price: number;
-  returns1: number;
-  returns5: number;
-  returns15: number;
-  ema9_21_cross: number;
-  emaStructureScore: number;
-  rsi14: number;
-  macdHist: number;
-  adx14: number;
-  atr: number;
-  vwapDistance: number;
-  openingRangePosition: number; // 0-1 within OR, >1 above, <0 below
-  gapPercentage: number;
-  distToPdh: number;
-  distToPdl: number;
-  distToSupport: number;
-  distToResistance: number;
-  marketStructureScore: number;
-  trendStrength: number;
-  volumeRatio: number;
-  momentumScore: number;
-  timeOfDayMinutes: number; // Minutes from 09:15
-  [key: string]: number;
-}
-
-export interface OptionsFeatureVector {
-  underlyingPrice: number;
-  strike: number;
-  distFromAtmPct: number;
-  moneyness: number;
-  dte: number;
-  isCall: number; // 1 = Call, 0 = Put
-  premium: number;
-  bidAskSpreadPct: number;
-  volume: number;
-  oi: number;
-  oiChangePct: number;
-  pcrAtm: number;
-  pcrTotal: number;
-  iv: number;
-  ivChange: number;
-  ivRank: number;
-  ivPercentile: number;
-  delta: number;
-  gamma: number;
-  theta: number;
-  vega: number;
-  rho: number;
-  liquidityScore: number;
-  underlyingTrendScore: number;
-  underlyingMomentum: number;
-  underlyingVolatility: number;
   [key: string]: number;
 }
 
@@ -400,7 +344,7 @@ export interface BacktestConfig {
   endDate: number;
   strategyMode: 'DETERMINISTIC_ONLY' | 'ML_ONLY' | 'COMBINED';
   mlProbabilityThreshold: number;
-  slippageUnits: number; // Pips for forex, points for Indian equity/options
+  slippageUnits: number; // Pips for forex
   commissionPerTrade: number;
   taxPct: number;
   spreadCostUnits: number;

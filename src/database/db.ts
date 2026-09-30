@@ -764,9 +764,7 @@ function initSchema(db: Database) {
 function seedInitialData(db: Database) {
   // Markets
   db.run(`INSERT OR IGNORE INTO markets (id, code, name, status, currency) VALUES 
-    ('mkt_fx', 'FOREX', 'Global Foreign Exchange', 'ACTIVE', 'USD'),
-    ('mkt_in_eq', 'INDIA_EQUITY', 'Indian Equity Benchmark Indices', 'ACTIVE', 'INR'),
-    ('mkt_in_opt', 'INDIA_OPTIONS', 'Indian Equity Index Options', 'ACTIVE', 'INR');
+    ('mkt_fx', 'FOREX', 'Global Foreign Exchange', 'ACTIVE', 'USD');
   `);
 
   // System settings
@@ -776,9 +774,7 @@ function seedInitialData(db: Database) {
     ('DATA_STATUS', 'UNAVAILABLE', ${now}),
     ('MODEL_STATUS', 'BASELINE_UNCALIBRATED', ${now}),
     ('DEFAULT_RISK_PCT', '1.0', ${now}),
-    ('STRIKE_DEPTH', '7', ${now}),
-    ('MAX_TRADE_VALUE_FOREX_USD', '100000', ${now}),
-    ('MAX_TRADE_VALUE_INDIAN_INR', '1000000', ${now});
+    ('MAX_TRADE_VALUE_FOREX_USD', '100000', ${now});
   `);
 
   // Enforce LIVE_ONLY persistence.

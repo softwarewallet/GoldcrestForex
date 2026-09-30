@@ -164,8 +164,7 @@ export async function captureAccountBalanceSnapshots(capturedAt = Date.now()): P
   await ensureTable();
   const timestamp = Number(capturedAt);
   return Promise.all([
-    captureBrokerBalance('CTRADER', timestamp),
-    captureBrokerBalance('FIVE_PAISA', timestamp)
+    captureBrokerBalance('CTRADER', timestamp)
   ]);
 }
 

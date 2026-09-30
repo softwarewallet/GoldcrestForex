@@ -47,9 +47,7 @@ function todayBounds(): { from: string; to: string } {
 
 const formatPrice = (value: number | null, symbol: string) => {
   if (value === null || !Number.isFinite(value)) return '—';
-  const digits = symbol.includes('/') || !['NIFTY', 'BANKNIFTY', 'SENSEX', 'FINNIFTY'].some(prefix => symbol.toUpperCase().startsWith(prefix))
-    ? 5
-    : 2;
+  const digits = symbol.includes('JPY') ? 3 : 5;
   return value.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
 };
 

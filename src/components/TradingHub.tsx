@@ -21,7 +21,6 @@ import {
   X
 } from 'lucide-react';
 import { TradingEnvironment, BrokerType } from '../brokers/types';
-import { OptionsTradingPanel } from './OptionsTradingPanel';
 import { AUTO_LIVE_POSITION_REFRESH_INTERVAL_MS, isVisibleAutoLiveSignal } from '../services/autoLiveTradePolicy';
 
 interface TradingHubProps {
@@ -440,7 +439,7 @@ export const TradingHub: React.FC<TradingHubProps> = ({
       updatedAt: number;
     } | null;
   }
-  const [activeTab, setActiveTab] = useState<'cockpit' | 'positions' | 'signals' | 'options' | 'execution' | 'research' | 'controls'>('cockpit');
+  const [activeTab, setActiveTab] = useState<'cockpit' | 'positions' | 'signals' | 'execution' | 'research' | 'controls'>('cockpit');
   const [autoStatus, setAutoStatus] = useState<AutoTradingStatusSnapshot | null>(null);
   const [autoStatusError, setAutoStatusError] = useState<string | null>(null);
   const [executionDiagnostics, setExecutionDiagnostics] = useState<ExecutionReconciliationDiagnostic[]>([]);
@@ -877,16 +876,8 @@ export const TradingHub: React.FC<TradingHubProps> = ({
   // Handle market change configuration
   const handleMarketChange = (newMarket: string) => {
     setMarket(newMarket);
-    if (newMarket === 'FOREX') {
-      setSymbol('EUR/USD');
-      setQuantity(10000);
-    } else if (newMarket === 'INDIAN_EQUITY') {
-      setSymbol('RELIANCE');
-      setQuantity(50);
-    } else {
-      setSymbol('NIFTY');
-      setQuantity(1);
-    }
+    setSymbol('EUR/USD');
+    setQuantity(10000);
   };
 
   // Submit direct manual trade order
@@ -1129,7 +1120,6 @@ export const TradingHub: React.FC<TradingHubProps> = ({
         ['cockpit', 'Auto Live'],
         ['positions', 'Positions'],
         ['signals', 'Signals'],
-        ['options', 'NIFTY Options'],
         ['execution', 'Execution Log'],
         ['research', 'Prediction Research'],
         ['controls', 'Controls']
@@ -1245,14 +1235,6 @@ export const TradingHub: React.FC<TradingHubProps> = ({
           <div className="overflow-x-auto"><table className="w-full text-xs font-mono"><thead><tr className="text-slate-500 border-b border-slate-800"><th className="py-2 text-left">Market</th><th>Symbol</th><th>Side</th><th>Strategy</th><th className="text-right">SL</th><th className="text-right">TP</th><th>Score</th><th>ML</th><th>Age</th><th>Action</th></tr></thead>
           <tbody>{visiblePlannedTrades.map(signal => <tr key={signal.id} className="border-b border-slate-800/60"><td className="py-2 text-slate-500">{signal.market}</td><td className="text-white font-bold">{signal.instrument}</td><td className={signal.direction === 'BUY' ? "text-emerald-400" : "text-rose-400"}>{signal.direction}</td><td className="max-w-xs truncate" title={signal.reasons?.join(', ') || signal.strategy}>{signal.strategy}</td><td className="text-right text-rose-300">{signal.stopLoss?.toLocaleString() || 'N/A'}</td><td className="text-right text-emerald-300">{signal.target1?.toLocaleString() || 'N/A'}</td><td className="text-center">{signal.score}</td><td className="text-center text-emerald-400">{(signal.mlProbability * 100).toFixed(0)}%</td><td className="text-center text-cyan-300">{formatAge(signalsScanCompletedAt)}</td><td className="text-center"><button type="button" onClick={() => triggerSignalExecution(signal)} disabled={triggeringSignalId === signal.id} className="text-[10px] px-2.5 py-1 rounded bg-emerald-700 text-white disabled:opacity-50">{triggeringSignalId === signal.id ? 'Triggering...' : 'Trigger Now'}</button></td></tr>)}</tbody></table></div>
         </div>
-      )}
-
-      {activeTab === 'options' && (
-        <OptionsTradingPanel
-          isEmergencyHalted={isEmergencyHalted}
-          onPositionsRefresh={() => { void fetchRealPositions(true); }}
-          onLog={addLog}
-        />
       )}
 
       {activeTab === 'execution' && (

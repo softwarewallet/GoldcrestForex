@@ -6,7 +6,6 @@ interface CandleChartProps {
   candles: Candle[];
   title: string;
   subtitle?: string;
-  isIndianMarket?: boolean;
   supportLevels?: number[];
   resistanceLevels?: number[];
   entryZone?: { min: number; max: number; preferred?: number };
@@ -20,7 +19,6 @@ export const CandleChart: React.FC<CandleChartProps> = ({
   candles,
   title,
   subtitle,
-  isIndianMarket = false,
   supportLevels = [],
   resistanceLevels = [],
   entryZone,
@@ -36,7 +34,6 @@ export const CandleChart: React.FC<CandleChartProps> = ({
   const [showEMA200, setShowEMA200] = useState(true);
   const [showSR, setShowSR] = useState(true);
   const [showTradeLevels, setShowTradeLevels] = useState(true);
-  const [showVWAP, setShowVWAP] = useState(isIndianMarket);
   const [showRSI, setShowRSI] = useState(true);
   const [timeframe, setTimeframe] = useState<'5M' | '15M' | '1H' | '4H' | 'D'>((selectedTimeframe as any) || '15M');
 
@@ -253,16 +250,6 @@ export const CandleChart: React.FC<CandleChartProps> = ({
               Trade Levels
             </button>
           )}
-          {isIndianMarket && (
-            <button
-              onClick={() => setShowVWAP(!showVWAP)}
-              className={`px-2 py-1 rounded text-[11px] font-mono border transition ${
-                showVWAP ? 'bg-orange-950/80 border-orange-700 text-orange-300' : 'bg-slate-950 border-slate-800 text-slate-500'
-              }`}
-            >
-              VWAP
-            </button>
-          )}
           <button
             onClick={() => setShowRSI(!showRSI)}
             className={`px-2 py-1 rounded text-[11px] font-mono border transition ${
@@ -361,15 +348,6 @@ export const CandleChart: React.FC<CandleChartProps> = ({
           )}
           {showEMA200 && (
             <path d={generateLinePath(ema200)} fill="none" stroke="#f43f5e" strokeWidth="1.6" opacity={0.95} />
-          )}
-          {isIndianMarket && showVWAP && (
-            <path
-              d={generateLinePath(validCandles.map(c => c.vwap || c.close))}
-              fill="none"
-              stroke="#fb923c"
-              strokeWidth="1.6"
-              strokeDasharray="4 2"
-            />
           )}
 
           {/* Support and Resistance Horizontal Lines */}
@@ -484,7 +462,6 @@ export const CandleChart: React.FC<CandleChartProps> = ({
         <div className="flex items-center space-x-4">
           {showEMA9 && <span className="flex items-center space-x-1"><span className="w-2.5 h-0.5 bg-cyan-400"></span><span>EMA 9: {activeEma9?.toFixed(activeCandle?.close > 100 ? 1 : 4)}</span></span>}
           {showEMA21 && <span className="flex items-center space-x-1"><span className="w-2.5 h-0.5 bg-amber-400"></span><span>EMA 21: {activeEma21?.toFixed(activeCandle?.close > 100 ? 1 : 4)}</span></span>}
-          {isIndianMarket && showVWAP && <span className="flex items-center space-x-1"><span className="w-2.5 h-0.5 bg-orange-400"></span><span>VWAP</span></span>}
         </div>
         <div>
           <span className="text-slate-500">Tick: 15M • Data: LIVE deterministic engine</span>

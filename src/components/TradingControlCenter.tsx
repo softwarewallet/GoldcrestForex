@@ -50,7 +50,6 @@ export type ControlCenterSection =
   | 'ACCOUNT_OVERVIEW'
   | 'BALANCE_HISTORY'
   | 'MARKET_INTELLIGENCE'
-  | 'OPTIONS_CHAIN'
   | 'SIGNAL_CENTER'
   | 'POSITIONS'
   | 'ORDERS'
@@ -83,7 +82,7 @@ interface AccountCardData {
 }
 
 interface MarketQuoteItem {
-  market: 'FOREX' | 'INDIA_EQUITY';
+  market: 'FOREX';
   symbol: string;
   bid: number;
   ask: number;
@@ -215,14 +214,6 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
   const [auditCategoryFilter, setAuditCategoryFilter] = useState<string>('ALL');
   const [auditSeverityFilter, setAuditSeverityFilter] = useState<string>('ALL');
 
-  // Options Workspace State
-  const [optionsUnderlying, setOptionsUnderlying] = useState<string>('NIFTY');
-  const [optionsExpiry, setOptionsExpiry] = useState<string>('');
-  const [optionsStrikeRange, setOptionsStrikeRange] = useState<number>(7);
-  const [optionsChainData, setOptionsChainData] = useState<any | null>(null);
-  const [optionsLoading, setOptionsLoading] = useState<boolean>(false);
-  const [optionsError, setOptionsError] = useState<string | null>(null);
-
   // Execution Gate State
   const [gateBusy, setGateBusy] = useState<boolean>(false);
   const [gateFeedback, setGateFeedback] = useState<string | null>(null);
@@ -249,8 +240,6 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
   const [newsSnapshot, setNewsSnapshot] = useState<any | null>(null);
   const [newsBusy, setNewsBusy] = useState(false);
   const [newsError, setNewsError] = useState<string | null>(null);
-  const [indianNewsSnapshot, setIndianNewsSnapshot] = useState<any | null>(null);
-  const [indianNewsBusy, setIndianNewsBusy] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -278,7 +267,6 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
         healthRes,
         autoTradingRes,
         forexPairsRes,
-        indiaUnderlyingsRes,
         signalsRes,
         newsRes,
         balanceHistoryRes
@@ -292,7 +280,6 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
         fetch('/api/governance/live-health', { cache: 'no-store' }).catch(() => null),
         fetch('/api/auto-trading/status', { cache: 'no-store' }).catch(() => null),
         fetch('/api/forex/pairs', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/india/underlyings', { cache: 'no-store' }).catch(() => null),
         fetch('/api/signals/all', { cache: 'no-store' }).catch(() => null),
         fetch('/api/forex/news', { cache: 'no-store' }).catch(() => null),
         fetch('/api/reports/account-balance-history?limit=1000', { cache: 'no-store' }).catch(() => null)
@@ -333,7 +320,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
               realizedPnl: Number(account.realizedPnL ?? account.realizedPnl ?? 0),
               lastSyncTimestamp: Number(account.lastUpdate || Date.now()),
               freshness: 'LIVE',
-              source: item.broker === 'CTRADER' ? `cTrader ${account.accountType === 'DEMO' ? 'DEMO' : 'LIVE'} API` : '5paisa LIVE API',
+              source: 'cTrader LIVE API',
               errorMessage: item.error || undefined
             };
           })
@@ -392,11 +379,8 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
           .filter((o: any) => o.internalOrderId && Number.isFinite(o.quantity)));
       }
 
-      if (forexPairsRes?.ok || indiaUnderlyingsRes?.ok) {
-        const [fxRows, inRows] = await Promise.all([
-          forexPairsRes?.ok ? forexPairsRes.json() : [],
-          indiaUnderlyingsRes?.ok ? indiaUnderlyingsRes.json() : []
-        ]);
+      if (forexPairsRes?.ok) {
+        const fxRows = await forexPairsRes.json();
         const liveQuotes: MarketQuoteItem[] = [];
         if (Array.isArray(fxRows)) {
           for (const q of fxRows) {
@@ -413,26 +397,6 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
               spreadPipsOrPts: Number(q.spreadPips ?? q.spreadPipsOrPts ?? 0),
               change24h: Number(q.changePips24h ?? q.changePips ?? 0),
               changePercent24h: Number(q.changePercent24h ?? 0),
-              timestamp: Date.now(),
-              timeframe: 'LIVE',
-              status: 'OPEN',
-              freshness: 'LIVE'
-            });
-          }
-        }
-        if (Array.isArray(inRows)) {
-          for (const q of inRows) {
-            const spot = Number(q?.spot);
-            if (!(spot > 0)) continue;
-            liveQuotes.push({
-              market: 'INDIA_EQUITY',
-              symbol: q.symbol,
-              bid: null as unknown as number,
-              ask: null as unknown as number,
-              ltp: spot,
-              spreadPipsOrPts: Number(q.spreadPoints ?? 0),
-              change24h: Number(q.change ?? 0),
-              changePercent24h: Number(q.changePercent ?? 0),
               timestamp: Date.now(),
               timeframe: 'LIVE',
               status: 'OPEN',
@@ -585,29 +549,6 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
       setNewsError(err?.message || 'Manual news refresh failed.');
     } finally {
       setNewsBusy(false);
-    }
-  }, []);
-
-  const fetchIndianNewsNow = useCallback(async () => {
-    setIndianNewsBusy(true);
-    try {
-      const response = await fetch('/api/india/news?refresh=true', {
-        cache: 'no-store',
-        headers: { Accept: 'application/json' }
-      });
-      const payload = await response.json().catch(() => ({}));
-      setIndianNewsSnapshot(payload);
-    } catch (err: any) {
-      setIndianNewsSnapshot({
-        status: 'UNAVAILABLE',
-        marketOpen: false,
-        marketPhase: 'UNKNOWN',
-        articleCount: 0,
-        articles: [],
-        error: err?.message || 'Indian market news refresh failed.'
-      });
-    } finally {
-      setIndianNewsBusy(false);
     }
   }, []);
 
@@ -802,34 +743,6 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
     }
   }, []);
 
-  // Fetch Options Chain
-  const fetchOptionsChain = useCallback(async (symbol: string, expiry?: string, depth: number = 7) => {
-    setOptionsLoading(true);
-    setOptionsError(null);
-    try {
-      const url = `/api/options/chain/${encodeURIComponent(symbol)}?depth=${depth}${expiry ? `&expiry=${encodeURIComponent(expiry)}` : ''}`;
-      const res = await fetch(url);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.isBlank && data.error) {
-          setOptionsError(data.error);
-        } else {
-          setOptionsChainData(data);
-          if (data.expiry && !optionsExpiry) {
-            setOptionsExpiry(data.expiry);
-          }
-        }
-      } else {
-        const errData = await res.json().catch(() => ({ error: 'Failed to fetch options chain' }));
-        setOptionsError(errData.error || 'Options API Unavailable');
-      }
-    } catch (err: any) {
-      setOptionsError(err.message || 'Failed to connect to Options Data Adapter');
-    } finally {
-      setOptionsLoading(false);
-    }
-  }, [optionsExpiry]);
-
   useEffect(() => {
     if (parentAutoTradingStatus) {
       setAutoTradingStatus(parentAutoTradingStatus);
@@ -838,22 +751,13 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
 
   useEffect(() => {
     fetchAllOperationalData();
-    fetchOptionsChain(optionsUnderlying, optionsExpiry, optionsStrikeRange);
 
     const interval = setInterval(() => {
       fetchAllOperationalData();
     }, 30000);
 
     return () => clearInterval(interval);
-  }, [fetchAllOperationalData, fetchOptionsChain, optionsUnderlying, optionsExpiry, optionsStrikeRange]);
-
-  useEffect(() => {
-    fetchIndianNewsNow();
-    const interval = setInterval(() => {
-      fetchIndianNewsNow();
-    }, 60000);
-    return () => clearInterval(interval);
-  }, [fetchIndianNewsNow]);
+  }, [fetchAllOperationalData]);
 
   const filteredBalanceSnapshots = useMemo(() => {
     return balanceSnapshots.filter(row => {
@@ -987,22 +891,13 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
               </p>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                <div className="p-3 rounded-lg bg-slate-950 border border-slate-800">
+                <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 col-span-2">
                   <div className="text-slate-500 text-[10px]">FOREX / cTRADER</div>
                   <div className={closedMarketPrompt.marketGate?.forex?.isOpen ? 'text-emerald-400 font-bold mt-1' : 'text-amber-300 font-bold mt-1'}>
                     {closedMarketPrompt.marketGate?.forex?.isOpen ? 'OPEN' : 'CLOSED'}
                   </div>
                   <div className="text-slate-500 text-[10px] mt-1">
                     {closedMarketPrompt.marketGate?.forex?.sessions?.join(' / ') || 'Session unavailable'}
-                  </div>
-                </div>
-                <div className="p-3 rounded-lg bg-slate-950 border border-slate-800">
-                  <div className="text-slate-500 text-[10px]">INDIA / 5PAISA</div>
-                  <div className={closedMarketPrompt.marketGate?.india?.isOpen ? 'text-emerald-400 font-bold mt-1' : 'text-amber-300 font-bold mt-1'}>
-                    {closedMarketPrompt.marketGate?.india?.isOpen ? 'OPEN' : 'CLOSED'}
-                  </div>
-                  <div className="text-slate-500 text-[10px] mt-1">
-                    {closedMarketPrompt.marketGate?.india?.phase || 'Session unavailable'}
                   </div>
                 </div>
               </div>
@@ -1045,9 +940,9 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
                 </span>
               </div>
               <div className="text-slate-400 text-xs flex items-center space-x-2 mt-0.5">
-                <span>Multi-Market Operations</span>
+                <span>Forex Live Operations</span>
                 <span className="text-slate-600">•</span>
-                <span>cTrader (Forex) & 5paisa (India F&O)</span>
+                <span>cTrader (Forex Live Execution)</span>
                 <span className="text-slate-600">•</span>
                 <span>Synced: {new Date(lastRefreshedAt).toLocaleTimeString()}</span>
               </div>
@@ -1158,8 +1053,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
             { id: 'ACCOUNT_OVERVIEW', label: '1. ACCOUNTS', icon: DollarSign },
             ...(reportsMode ? [{ id: 'BALANCE_HISTORY', label: '2. BALANCE HISTORY', icon: Activity }] : []),
             { id: 'MARKET_INTELLIGENCE', label: '2. MARKET INTEL', icon: TrendingUp },
-            { id: 'OPTIONS_CHAIN', label: '3. OPTIONS CHAIN', icon: PieChart },
-            { id: 'SIGNAL_CENTER', label: '4. SIGNALS', icon: Sparkles },
+            { id: 'SIGNAL_CENTER', label: '3. SIGNALS', icon: Sparkles },
             { id: 'POSITIONS', label: '5. POSITIONS', icon: Layers },
             { id: 'ORDERS', label: '6. ORDERS', icon: FileText },
             { id: 'RISK_CENTER', label: '7. RISK CENTER', icon: ShieldAlert },
@@ -1275,7 +1169,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
               <p className="text-[10px] text-slate-500 mt-1">Authoritative LIVE API snapshots at 00:00, 03:00, 06:00, 09:00, 12:00, 15:00, 18:00 and 21:00. No calculated or fabricated balance values are stored.</p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <select value={balanceSnapshotBrokerFilter} onChange={e => setBalanceSnapshotBrokerFilter(e.target.value)} className="bg-slate-950 border border-slate-800 text-slate-200 rounded px-2.5 py-1.5"><option value="ALL">All Brokers</option><option value="CTRADER">cTrader</option><option value="FIVE_PAISA">5paisa</option></select>
+              <select value={balanceSnapshotBrokerFilter} onChange={e => setBalanceSnapshotBrokerFilter(e.target.value)} className="bg-slate-950 border border-slate-800 text-slate-200 rounded px-2.5 py-1.5"><option value="ALL">All Brokers</option><option value="CTRADER">cTrader</option></select>
               <input type="date" value={balanceSnapshotDateFilter} onChange={e => setBalanceSnapshotDateFilter(e.target.value)} className="bg-slate-950 border border-slate-800 text-slate-200 rounded px-2.5 py-1.5" />
               {(balanceSnapshotDateFilter || balanceSnapshotBrokerFilter !== 'ALL') && <button type="button" onClick={() => { setBalanceSnapshotDateFilter(''); setBalanceSnapshotBrokerFilter('ALL'); }} className="px-2.5 py-1.5 rounded border border-slate-700 bg-slate-950 text-slate-300 hover:text-white">Clear</button>}
             </div>
@@ -1316,7 +1210,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <h3 className="text-sm font-bold text-slate-200 uppercase tracking-wider flex items-center space-x-2">
               <TrendingUp className="w-4 h-4 text-emerald-400" />
-              <span>Market Intelligence (Forex & Indian Equities)</span>
+              <span>Market Intelligence (Forex Majors & Crosses)</span>
             </h3>
             <span className="text-xs text-slate-400 font-mono">Live Ingestion & Point-in-Time Freshness</span>
           </div>
@@ -1445,274 +1339,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
         </div>
       )}
 
-      {/* INDIAN MARKET NEWS INTELLIGENCE — provider fetches and prediction are server-gated to market OPEN */}
-      {(activeSection === 'ALL_OVERVIEW' || activeSection === 'MARKET_INTELLIGENCE') && (
-        <div className="mt-4 bg-slate-900 border border-slate-800 rounded-xl p-4 shadow space-y-3">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-            <div>
-              <div className="text-xs font-bold text-slate-200 uppercase tracking-wider">Indian Market News & Prediction</div>
-              <div className="text-[10px] text-slate-500 font-mono mt-1">
-                Pulse · CNBC-TV18 · ET Markets · Mint · FMP · server-gated to NSE/BSE market OPEN
-              </div>
-            </div>
-            <div className="flex items-center gap-2 font-mono text-[10px]">
-              <span className={`px-2 py-1 rounded border ${
-                indianNewsSnapshot?.marketOpen
-                  ? 'border-emerald-700 bg-emerald-950/50 text-emerald-300'
-                  : 'border-slate-700 bg-slate-950 text-slate-400'
-              }`}>
-                INDIA: {indianNewsSnapshot?.marketOpen ? 'OPEN' : indianNewsSnapshot?.status === 'MARKET_CLOSED' ? 'CLOSED' : 'NOT FETCHED'}
-              </span>
-              <span className="text-slate-500">{indianNewsSnapshot?.marketPhase || '—'}</span>
-              <button
-                type="button"
-                onClick={fetchIndianNewsNow}
-                disabled={indianNewsBusy || indianNewsSnapshot?.marketOpen === false}
-                className="px-2.5 py-1 rounded border border-cyan-800 bg-cyan-950/40 text-cyan-300 hover:bg-cyan-900/50 disabled:opacity-50"
-                title="Fetch Indian news only while the Indian market is open"
-              >
-                <RefreshCw className={`w-3 h-3 inline mr-1 ${indianNewsBusy ? 'animate-spin' : ''}`} />
-                {indianNewsBusy ? 'FETCHING...' : 'FETCH INDIA NEWS'}
-              </button>
-            </div>
-          </div>
-
-          {indianNewsSnapshot?.status === 'MARKET_CLOSED' ? (
-            <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-4 text-center font-mono text-xs text-slate-400">
-              INDIAN MARKET CLOSED — news ingestion and prediction are disabled.
-            </div>
-          ) : (
-            <>
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-2">
-                {[
-                  ['PULSE_ZERODHA', 'Pulse by Zerodha'],
-                  ['CNBC_TV18', 'CNBC-TV18'],
-                  ['ET_MARKETS', 'ET Markets'],
-                  ['MINT', 'Mint'],
-                  ['FMP', 'FMP']
-                ].map(([key, label]) => {
-                  const d = indianNewsSnapshot?.providerDiagnostics?.[key];
-                  const status = d?.status || indianNewsSnapshot?.providerStatus?.[key] || 'NO_RESULTS';
-                  const badge = status === 'LIVE'
-                    ? 'text-emerald-300 border-emerald-800 bg-emerald-950/40'
-                    : status === 'STALE'
-                      ? 'text-amber-300 border-amber-800 bg-amber-950/40'
-                      : status === 'ERROR'
-                        ? 'text-rose-300 border-rose-800 bg-rose-950/40'
-                        : 'text-slate-400 border-slate-800 bg-slate-950';
-                  return (
-                    <div key={key} className="p-3 rounded-lg border border-slate-800 bg-slate-950/70 font-mono">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-[11px] font-bold text-white">{label}</span>
-                        <span className={`px-1.5 py-0.5 rounded border text-[9px] font-bold ${badge}`}>{status}</span>
-                      </div>
-                      <div className="grid grid-cols-3 gap-2 mt-2 text-[9px]">
-                        <div><div className="text-slate-600">RAW</div><div className="text-slate-300">{d?.rawArticleCount ?? 0}</div></div>
-                        <div><div className="text-slate-600">FRESH</div><div className="text-cyan-300">{d?.freshArticleCount ?? 0}</div></div>
-                        <div><div className="text-slate-600">STALE</div><div className="text-amber-300">{d?.staleArticleCount ?? 0}</div></div>
-                      </div>
-                      {d?.error && <div className="mt-2 text-[9px] text-rose-400 truncate" title={d.error}>{d.error}</div>}
-                    </div>
-                  );
-                })}
-              </div>
-
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-                <div className="lg:col-span-2 rounded-lg border border-slate-800 bg-slate-950/70 p-3">
-                  <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">Latest Indian Market Headlines</div>
-                  <div className="space-y-2 max-h-64 overflow-y-auto">
-                    {(indianNewsSnapshot?.articles || []).slice(0, 10).map((article: any, index: number) => (
-                      <div key={`${article.url || article.title}-${index}`} className="border-b border-slate-800/70 pb-2">
-                        <div className="text-[11px] text-slate-200">{article.title}</div>
-                        <div className="text-[9px] text-slate-600 mt-1">
-                          {article.source} · {article.publishedAt ? new Date(article.publishedAt).toLocaleTimeString() : 'time unavailable'}
-                        </div>
-                      </div>
-                    ))}
-                    {(!indianNewsSnapshot?.articles || indianNewsSnapshot.articles.length === 0) && (
-                      <div className="text-[10px] text-slate-500">No fresh Indian-market headlines returned.</div>
-                    )}
-                  </div>
-                </div>
-
-                <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">News Prediction</span>
-                    <span className={`px-2 py-0.5 rounded border text-[10px] font-bold ${
-                      indianNewsSnapshot?.prediction?.bias === 'BULLISH'
-                        ? 'text-emerald-300 border-emerald-800 bg-emerald-950/40'
-                        : indianNewsSnapshot?.prediction?.bias === 'BEARISH'
-                          ? 'text-rose-300 border-rose-800 bg-rose-950/40'
-                          : 'text-amber-300 border-amber-800 bg-amber-950/40'
-                    }`}>
-                      {indianNewsSnapshot?.prediction?.bias || 'PENDING'}
-                    </span>
-                  </div>
-                  <div className="mt-3 text-2xl font-bold text-white">
-                    {indianNewsSnapshot?.prediction?.confidence ?? '—'}{indianNewsSnapshot?.prediction ? '%' : ''}
-                  </div>
-                  <div className="text-[9px] text-slate-500">confidence · news + live market context</div>
-                  <div className="mt-3 space-y-1 text-[10px] text-slate-400">
-                    {(indianNewsSnapshot?.prediction?.rationale || []).map((reason: string, i: number) => (
-                      <div key={i}>• {reason}</div>
-                    ))}
-                  </div>
-                  {indianNewsSnapshot?.prediction?.disclaimer && (
-                    <div className="mt-3 pt-2 border-t border-slate-800 text-[8px] text-slate-600">
-                      {indianNewsSnapshot.prediction.disclaimer}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </>
-          )}
-
-          {indianNewsSnapshot?.error && indianNewsSnapshot.status !== 'MARKET_CLOSED' && (
-            <div className="px-3 py-2 rounded border border-rose-800 bg-rose-950/30 text-rose-300 text-[10px] font-mono">
-              {indianNewsSnapshot.error}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* SECTION 3: OPTIONS CHAIN WORKSPACE (FivePaisa Options Data Adapter) */}
-      {(activeSection === 'ALL_OVERVIEW' || activeSection === 'OPTIONS_CHAIN') && (
-        <div id="section_options_chain" className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow space-y-3">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-bold text-slate-200 uppercase tracking-wider flex items-center space-x-2">
-                <PieChart className="w-4 h-4 text-amber-400" />
-                <span>Options Chain Workspace (5paisa Data Adapter)</span>
-              </h3>
-              <p className="text-xs text-slate-400 font-mono mt-0.5">
-                Derivative surface with Open Interest, Volume, Bid/Ask, and Greeks
-              </p>
-            </div>
-
-            {/* Options Controls */}
-            <div className="flex flex-wrap items-center gap-2 font-mono text-xs">
-              <select
-                value={optionsUnderlying}
-                onChange={e => setOptionsUnderlying(e.target.value)}
-                className="bg-slate-950 border border-slate-800 text-slate-200 rounded px-2.5 py-1 text-xs"
-              >
-                <option value="NIFTY">NIFTY</option>
-                <option value="BANKNIFTY">BANKNIFTY</option>
-                <option value="FINNIFTY">FINNIFTY</option>
-              </select>
-
-              <select
-                value={optionsStrikeRange}
-                onChange={e => setOptionsStrikeRange(Number(e.target.value))}
-                className="bg-slate-950 border border-slate-800 text-slate-200 rounded px-2.5 py-1 text-xs"
-              >
-                <option value={5}>±5 Strikes</option>
-                <option value={7}>±7 Strikes</option>
-                <option value={10}>±10 Strikes</option>
-              </select>
-
-              <button
-                onClick={() => fetchOptionsChain(optionsUnderlying, optionsExpiry, optionsStrikeRange)}
-                disabled={optionsLoading}
-                className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded border border-slate-700 flex items-center space-x-1"
-              >
-                <RefreshCw className={`w-3 h-3 ${optionsLoading ? 'animate-spin' : ''}`} />
-                <span>Refresh</span>
-              </button>
-            </div>
-          </div>
-
-          {optionsError ? (
-            <div className="p-3 bg-amber-950/50 border border-amber-800/80 rounded-lg text-amber-200 text-xs font-mono flex items-start space-x-2">
-              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-              <div>
-                <strong className="font-bold">5paisa Options Data Diagnostic:</strong> {optionsError}
-                <div className="text-[11px] text-amber-300/80 mt-1">
-                  Using verified 5paisa session. Connect credentials in Broker Settings if token expired.
-                </div>
-              </div>
-            </div>
-          ) : optionsChainData && optionsChainData.rows ? (
-            <div className="overflow-x-auto">
-              <div className="flex items-center justify-between text-xs font-mono bg-slate-950 p-2.5 rounded-lg border border-slate-800 mb-2">
-                <div>
-                  <span className="text-slate-400">Underlying: </span>
-                  <strong className="text-white">{optionsChainData.underlying}</strong>
-                  <span className="text-slate-600 mx-2">|</span>
-                  <span className="text-slate-400">Spot: </span>
-                  <strong className="text-emerald-400">₹{Number.isFinite(optionsChainData.spotPrice) && optionsChainData.spotPrice > 0 ? optionsChainData.spotPrice.toFixed(2) : '—'}</strong>
-                </div>
-                <div>
-                  <span className="text-slate-400">PCR: </span>
-                  <strong className="text-amber-400">{Number.isFinite(optionsChainData.pcr) && optionsChainData.pcr > 0 ? optionsChainData.pcr.toFixed(2) : '—'}</strong>
-                  <span className="text-slate-600 mx-2">|</span>
-                  <span className="text-slate-400">Expiry: </span>
-                  <strong className="text-slate-200">{optionsChainData.expiry || '—'}</strong>
-                </div>
-              </div>
-
-              <table className="w-full text-center font-mono text-xs">
-                <thead className="bg-slate-950 text-slate-400 border-b border-slate-800 text-[11px]">
-                  <tr>
-                    <th colSpan={4} className="py-1.5 px-2 bg-emerald-950/40 text-emerald-300 border-r border-slate-800">
-                      CALLS (CE)
-                    </th>
-                    <th className="py-1.5 px-2 bg-slate-950 text-slate-300">STRIKE</th>
-                    <th colSpan={4} className="py-1.5 px-2 bg-rose-950/40 text-rose-300 border-l border-slate-800">
-                      PUTS (PE)
-                    </th>
-                  </tr>
-                  <tr className="border-t border-slate-800/80 text-[10px]">
-                    <th className="py-1 px-2">OI</th>
-                    <th className="py-1 px-2">VOL</th>
-                    <th className="py-1 px-2">BID/ASK</th>
-                    <th className="py-1 px-2 border-r border-slate-800">LTP</th>
-                    <th className="py-1 px-2 bg-slate-950">PRICE</th>
-                    <th className="py-1 px-2 border-l border-slate-800">LTP</th>
-                    <th className="py-1 px-2">BID/ASK</th>
-                    <th className="py-1 px-2">VOL</th>
-                    <th className="py-1 px-2">OI</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/50">
-                  {optionsChainData.rows.map((row: any, idx: number) => {
-                    const isAtm = row.isAtm || Math.abs(row.strike - (optionsChainData.spotPrice || 24850)) < 25;
-                    return (
-                      <tr key={`strike-${row.strike ?? idx}`} className={`hover:bg-slate-800/40 transition ${isAtm ? 'bg-amber-500/10 font-bold' : ''}`}>
-                        <td className="py-2 px-2 text-slate-300">{row.call?.oi?.toLocaleString() || row.callOI?.toLocaleString() ||formatNumber(row.call?.oi ?? row.callOI)}</td>
-                        <td className="py-2 px-2 text-slate-400">{row.call?.volume?.toLocaleString() || row.callVolume?.toLocaleString() ||formatNumber(row.call?.oi ?? row.callOI)}</td>
-                        <td className="py-2 px-2 text-[10px] text-slate-400">
-                          {row.call?.bid ? `${row.call.bid}/${row.call.ask}` :formatNumber(row.call?.oi ?? row.callOI)}
-                        </td>
-                        <td className="py-2 px-2 text-emerald-400 border-r border-slate-800">
-                          ₹{row.call?.ltp?.toFixed(2) || row.callLtp?.toFixed(2) ||formatNumber(row.call?.oi ?? row.callOI)}
-                        </td>
-                        <td className={`py-2 px-2 font-bold ${isAtm ? 'text-amber-300 bg-amber-950/40' : 'text-white'}`}>
-                          {row.strike}
-                        </td>
-                        <td className="py-2 px-2 text-rose-400 border-l border-slate-800">
-                          ₹{row.put?.ltp?.toFixed(2) || row.putLtp?.toFixed(2) ||formatNumber(row.call?.oi ?? row.callOI)}
-                        </td>
-                        <td className="py-2 px-2 text-[10px] text-slate-400">
-                          {row.put?.bid ? `${row.put.bid}/${row.put.ask}` :formatNumber(row.call?.oi ?? row.callOI)}
-                        </td>
-                        <td className="py-2 px-2 text-slate-400">{row.put?.volume?.toLocaleString() || row.putVolume?.toLocaleString() ||formatNumber(row.call?.oi ?? row.callOI)}</td>
-                        <td className="py-2 px-2 text-slate-300">{row.put?.oi?.toLocaleString() || row.putOI?.toLocaleString() ||formatNumber(row.call?.oi ?? row.callOI)}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <div className="p-6 text-center text-slate-500 font-mono text-xs">
-              No options chain data currently loaded. Click Refresh to query FivePaisa OpenAPI.
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* SECTION 4: SIGNAL CENTER & VISUAL LIFECYCLE TRACE */}
+      {/* SECTION 3: SIGNAL CENTER & VISUAL LIFECYCLE TRACE */}
       {(activeSection === 'ALL_OVERVIEW' || activeSection === 'SIGNAL_CENTER') && (
         <div id="section_signal_center" className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow space-y-3">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
@@ -1938,7 +1565,6 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
               >
                 <option value="ALL">All Brokers</option>
                 <option value="CTRADER">cTrader (USD)</option>
-                <option value="FIVE_PAISA">5paisa (INR)</option>
               </select>
 
               <select
@@ -2045,7 +1671,6 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
               >
                 <option value="ALL">All Brokers</option>
                 <option value="CTRADER">cTrader</option>
-                <option value="FIVE_PAISA">5paisa</option>
               </select>
             </div>
           </div>
