@@ -46,8 +46,6 @@ import { BrokerType, TradingEnvironment, OrderRequest } from '../brokers/types';
 import { TradingSignal } from '../markets/common/types';
 
 export type ControlCenterSection =
-  | 'ALL_OVERVIEW'
-  | 'ACCOUNT_OVERVIEW'
   | 'BALANCE_HISTORY'
   | 'MARKET_INTELLIGENCE'
   | 'SIGNAL_CENTER'
@@ -187,7 +185,7 @@ interface TradingControlCenterProps {
 }
 
 export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
-  initialSection = 'ALL_OVERVIEW',
+  initialSection = 'MARKET_INTELLIGENCE',
   onSelectSignalModal,
   autoTradingStatus: parentAutoTradingStatus = null,
   onAutoTradingStatusChange,
@@ -257,6 +255,8 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
   const fetchAllOperationalData = useCallback(async () => {
     setIsRefreshing(true);
     try {
+      const active = activeSection;
+      
       const [
         brokerStatusRes,
         positionsRes,
@@ -271,18 +271,51 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
         newsRes,
         balanceHistoryRes
       ] = await Promise.all([
+        // Core telemetry (always fetch)
         fetch('/api/brokers/status', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/brokers/positions', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/brokers/orders', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/governance/audit-logs?limit=100', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/governance/reconciliation/positions', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/governance/reconciliation/orders', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/governance/live-health', { cache: 'no-store' }).catch(() => null),
+        
+        // Section-specific telemetry
+        (active === 'POSITIONS') 
+          ? fetch('/api/brokers/positions', { cache: 'no-store' }).catch(() => null) 
+          : Promise.resolve(null),
+          
+        (active === 'ORDERS') 
+          ? fetch('/api/brokers/orders', { cache: 'no-store' }).catch(() => null) 
+          : Promise.resolve(null),
+          
+        (active === 'AUDIT_CENTER' || active === 'RISK_CENTER') 
+          ? fetch('/api/governance/audit-logs?limit=100', { cache: 'no-store' }).catch(() => null) 
+          : Promise.resolve(null),
+          
+        (active === 'RECONCILIATION') 
+          ? fetch('/api/governance/reconciliation/positions', { cache: 'no-store' }).catch(() => null) 
+          : Promise.resolve(null),
+          
+        (active === 'RECONCILIATION') 
+          ? fetch('/api/governance/reconciliation/orders', { cache: 'no-store' }).catch(() => null) 
+          : Promise.resolve(null),
+          
+        (active === 'SYSTEM_HEALTH') 
+          ? fetch('/api/governance/live-health', { cache: 'no-store' }).catch(() => null) 
+          : Promise.resolve(null),
+          
         fetch('/api/auto-trading/status', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/forex/pairs', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/signals/all', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/forex/news', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/reports/account-balance-history?limit=1000', { cache: 'no-store' }).catch(() => null)
+        
+        (active === 'MARKET_INTELLIGENCE') 
+          ? fetch('/api/forex/pairs', { cache: 'no-store' }).catch(() => null) 
+          : Promise.resolve(null),
+          
+        (active === 'SIGNAL_CENTER') 
+          ? fetch('/api/signals/all', { cache: 'no-store' }).catch(() => null) 
+          : Promise.resolve(null),
+          
+        (active === 'MARKET_INTELLIGENCE') 
+          ? fetch('/api/forex/news', { cache: 'no-store' }).catch(() => null) 
+          : Promise.resolve(null),
+          
+        (reportsMode && (active === 'BALANCE_HISTORY')) 
+          ? fetch('/api/reports/account-balance-history?limit=1000', { cache: 'no-store' }).catch(() => null) 
+          : Promise.resolve(null)
       ]);
 
       if (autoTradingRes?.ok) {
@@ -1037,7 +1070,11 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
             <button
               onClick={fetchAllOperationalData}
               disabled={isRefreshing}
-              className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded border border-slate-700 transition flex items-center space-x-1.5 text-xs font-semibold disabled:opacity-50"
+              className={`px-3 py-1 rounded border transition-all flex items-center space-x-1.5 text-xs font-semibold disabled:opacity-50 ${
+                isRefreshing 
+                  ? 'bg-emerald-900/40 border-emerald-700 text-emerald-200 shadow-[0_0_8px_rgba(16,185,129,0.2)]' 
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700 hover:border-slate-600'
+              }`}
               title="Refresh all Control Center telemetry"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-emerald-400' : ''}`} />
@@ -1049,17 +1086,15 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
         {/* Section Navigation Tabs (10 Primary Operations Sections) */}
         <div className="mt-4 pt-3 border-t border-slate-800/80 flex flex-wrap items-center gap-1.5">
           {[
-            { id: 'ALL_OVERVIEW', label: 'OVERVIEW', icon: Activity },
-            { id: 'ACCOUNT_OVERVIEW', label: '1. ACCOUNTS', icon: DollarSign },
-            ...(reportsMode ? [{ id: 'BALANCE_HISTORY', label: '2. BALANCE HISTORY', icon: Activity }] : []),
-            { id: 'MARKET_INTELLIGENCE', label: '2. MARKET INTEL', icon: TrendingUp },
-            { id: 'SIGNAL_CENTER', label: '3. SIGNALS', icon: Sparkles },
-            { id: 'POSITIONS', label: '5. POSITIONS', icon: Layers },
-            { id: 'ORDERS', label: '6. ORDERS', icon: FileText },
-            { id: 'RISK_CENTER', label: '7. RISK CENTER', icon: ShieldAlert },
-            { id: 'RECONCILIATION', label: '8. RECONCILIATION', icon: CheckCircle2 },
-            { id: 'SYSTEM_HEALTH', label: '9. HEALTH & APIS', icon: Server },
-            { id: 'AUDIT_CENTER', label: '10. AUDIT LEDGER', icon: FileCheck },
+            ...(reportsMode ? [{ id: 'BALANCE_HISTORY', label: '1. BALANCE HISTORY', icon: Activity }] : []),
+            { id: 'MARKET_INTELLIGENCE', label: '1. MARKET INTEL', icon: TrendingUp },
+            { id: 'SIGNAL_CENTER', label: '2. SIGNALS', icon: Sparkles },
+            { id: 'POSITIONS', label: '3. POSITIONS', icon: Layers },
+            { id: 'ORDERS', label: '4. ORDERS', icon: FileText },
+            { id: 'RISK_CENTER', label: '5. RISK CENTER', icon: ShieldAlert },
+            { id: 'RECONCILIATION', label: '6. RECONCILIATION', icon: CheckCircle2 },
+            { id: 'SYSTEM_HEALTH', label: '7. HEALTH & APIS', icon: Server },
+            { id: 'AUDIT_CENTER', label: '8. AUDIT LEDGER', icon: FileCheck },
             { id: 'SAFETY_STATUS', label: 'SAFETY & GOVERNANCE', icon: Lock }
           ].map(tab => {
             const Icon = tab.icon;
@@ -1081,84 +1116,6 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
           })}
         </div>
       </div>
-
-      {/* SECTION 1: ACCOUNT OVERVIEW & IDENTITY (Native Currencies USD / INR) */}
-      {(activeSection === 'ALL_OVERVIEW' || activeSection === 'ACCOUNT_OVERVIEW') && (
-        <div id="section_accounts_overview" className="space-y-3">
-          <div className="flex items-center justify-between">
-            <h3 className="text-sm font-bold text-slate-200 uppercase tracking-wider flex items-center space-x-2">
-              <DollarSign className="w-4 h-4 text-emerald-400" />
-              <span>Multi-Broker Account Identity & Margin Overview</span>
-            </h3>
-            <span className="text-xs text-slate-500 font-mono">Strict Native Currency Preservation (USD & INR)</span>
-          </div>
-
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            {accounts.map((acc, accIdx) => {
-              const isForex = acc.currency === 'USD';
-              const symbolPrefix = isForex ? '$' : '₹';
-              const formattedBalance = `${symbolPrefix}${formatNumber(acc.balance, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-              const formattedEquity = `${symbolPrefix}${formatNumber(acc.equity, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-              const formattedMargin = `${symbolPrefix}${formatNumber(acc.availableMargin, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-              const formattedUnrealized = `${acc.unrealizedPnl >= 0 ? '+' : ''}${symbolPrefix}${formatNumber(acc.unrealizedPnl, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-
-              return (
-                <div key={acc.accountId ? `${acc.broker}-${acc.accountId}` : `acc-${acc.broker}-${accIdx}`} className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow space-y-3 font-mono">
-                  <div className="flex items-center justify-between border-b border-slate-800/80 pb-2.5">
-                    <div className="flex items-center space-x-2">
-                      <div className={`w-3 h-3 rounded-full ${acc.connectionStatus === 'CONNECTED' ? 'bg-emerald-500' : 'bg-rose-500 animate-pulse'}`} />
-                      <span className="font-bold text-white text-sm">{acc.broker}</span>
-                      <span className="text-slate-400 text-xs">({acc.accountId})</span>
-                    </div>
-                    <div>{renderFreshnessBadge(acc.freshness, acc.lastSyncTimestamp)}</div>
-                  </div>
-
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
-                    <div className="bg-slate-950/70 p-2.5 rounded-lg border border-slate-800/60">
-                      <div className="text-slate-400 text-[10px]">BALANCE</div>
-                      <div className="font-bold text-slate-100 mt-0.5">{formattedBalance}</div>
-                      <div className="text-[9px] text-slate-500">{acc.currency}</div>
-                    </div>
-
-                    <div className="bg-slate-950/70 p-2.5 rounded-lg border border-slate-800/60">
-                      <div className="text-slate-400 text-[10px]">EQUITY</div>
-                      <div className="font-bold text-emerald-400 mt-0.5">{formattedEquity}</div>
-                      <div className="text-[9px] text-slate-500">{acc.currency}</div>
-                    </div>
-
-                    <div className="bg-slate-950/70 p-2.5 rounded-lg border border-slate-800/60">
-                      <div className="text-slate-400 text-[10px]">FREE MARGIN</div>
-                      <div className="font-bold text-slate-200 mt-0.5">{formattedMargin}</div>
-                      <div className="text-[9px] text-slate-500">{Number.isFinite(Number(acc.marginLevelPct)) ? `${Number(acc.marginLevelPct).toFixed(0)}% lvl` : 'Available'}</div>
-                    </div>
-
-                    <div className="bg-slate-950/70 p-2.5 rounded-lg border border-slate-800/60">
-                      <div className="text-slate-400 text-[10px]">UNREALIZED P&L</div>
-                      <div className={`font-bold mt-0.5 ${acc.unrealizedPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                        {formattedUnrealized}
-                      </div>
-                      <div className="text-[9px] text-slate-500">{acc.currency}</div>
-                    </div>
-                  </div>
-
-                  <div className="pt-2 text-[11px] text-slate-400 flex flex-wrap items-center justify-between gap-2 border-t border-slate-800/40">
-                    <div>
-                      <span>Source: </span>
-                      <span className="text-slate-300">{acc.source}</span>
-                    </div>
-                    <div>
-                      <span>Account Status: </span>
-                      <strong className={acc.accountStatus === 'ACTIVE' ? 'text-emerald-400' : 'text-rose-400'}>
-                        {acc.accountStatus}
-                      </strong>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
 
       {/* REPORTS: THREE-HOUR ACCOUNT BALANCE HISTORY */}
       {activeSection === 'BALANCE_HISTORY' && (
@@ -1205,7 +1162,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
       )}
 
       {/* SECTION 2: MARKET INTELLIGENCE CENTER */}
-      {(activeSection === 'ALL_OVERVIEW' || activeSection === 'MARKET_INTELLIGENCE') && (
+      {activeSection === 'MARKET_INTELLIGENCE' && (
         <div id="section_market_intelligence" className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow space-y-3">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <h3 className="text-sm font-bold text-slate-200 uppercase tracking-wider flex items-center space-x-2">
@@ -1340,7 +1297,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
       )}
 
       {/* SECTION 3: SIGNAL CENTER & VISUAL LIFECYCLE TRACE */}
-      {(activeSection === 'ALL_OVERVIEW' || activeSection === 'SIGNAL_CENTER') && (
+      {activeSection === 'SIGNAL_CENTER' && (
         <div id="section_signal_center" className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow space-y-3">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <div>
@@ -1548,7 +1505,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
       )}
 
       {/* SECTION 5: POSITIONS CENTER */}
-      {(activeSection === 'ALL_OVERVIEW' || activeSection === 'POSITIONS') && (
+      {activeSection === 'POSITIONS' && (
         <div id="section_positions" className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow space-y-3">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <h3 className="text-sm font-bold text-slate-200 uppercase tracking-wider flex items-center space-x-2">
@@ -1642,7 +1599,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
       )}
 
       {/* SECTION 6: ORDERS CENTER */}
-      {(activeSection === 'ALL_OVERVIEW' || activeSection === 'ORDERS') && (
+      {activeSection === 'ORDERS' && (
         <div id="section_orders" className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow space-y-3">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <h3 className="text-sm font-bold text-slate-200 uppercase tracking-wider flex items-center space-x-2">
@@ -1729,7 +1686,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
       )}
 
       {/* SECTION 7: RISK CENTER & CHRONOLOGICAL EVENT TIMELINE */}
-      {(activeSection === 'ALL_OVERVIEW' || activeSection === 'RISK_CENTER') && (
+      {activeSection === 'RISK_CENTER' && (
         <div id="section_risk_center" className="space-y-3">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-bold text-slate-200 uppercase tracking-wider flex items-center space-x-2">
@@ -1796,7 +1753,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
       )}
 
       {/* SECTION 8: RECONCILIATION CENTER (Broker API ↔ SQLite Ledger) */}
-      {(activeSection === 'ALL_OVERVIEW' || activeSection === 'RECONCILIATION') && (
+      {activeSection === 'RECONCILIATION' && (
         <div id="section_reconciliation" className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow space-y-3 font-mono text-xs">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-2">
             <div>
@@ -1848,7 +1805,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
       )}
 
       {/* SECTION 9: SYSTEM HEALTH & API MONITORING */}
-      {(activeSection === 'ALL_OVERVIEW' || activeSection === 'SYSTEM_HEALTH') && (
+      {activeSection === 'SYSTEM_HEALTH' && (
         <div id="section_system_health" className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow space-y-3 font-mono text-xs">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-2">
             <div>
@@ -1900,7 +1857,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
       )}
 
       {/* SECTION 10: AUDIT LEDGER (Filterable & Searchable) */}
-      {(activeSection === 'ALL_OVERVIEW' || activeSection === 'AUDIT_CENTER') && (
+      {activeSection === 'AUDIT_CENTER' && (
         <div id="section_audit_ledger" className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow space-y-3 font-mono text-xs">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
@@ -1990,7 +1947,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
       )}
 
       {/* SECTION 11: SAFETY STATUS & MODEL GOVERNANCE */}
-      {(activeSection === 'ALL_OVERVIEW' || activeSection === 'SAFETY_STATUS') && (
+      {activeSection === 'SAFETY_STATUS' && (
         <div id="section_safety_status" className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow space-y-4 font-mono text-xs">
           <div className="flex items-center justify-between border-b border-slate-800 pb-2">
             <h3 className="text-sm font-bold text-slate-200 uppercase tracking-wider flex items-center space-x-2">

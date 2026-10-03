@@ -14,9 +14,8 @@ interface GlobalAppShellProps {
 }
 
 const nav = [
-  { id: 'market_watch', label: 'Market Watch', icon: Activity },
-  { id: 'trading', label: 'Positions', icon: CandlestickChart },
-  { id: 'control_center', label: 'Orders', icon: ListChecks },
+  { id: 'trading', label: 'Cockpit', icon: CandlestickChart },
+  { id: 'control_center', label: 'Control Center', icon: ListChecks },
   { id: 'history', label: 'History', icon: HistoryIcon },
   { id: 'database', label: 'Database', icon: Database },
   { id: 'signals', label: 'Strategy', icon: Sparkles },
@@ -28,9 +27,6 @@ const nav = [
 export const GlobalAppShell: React.FC<GlobalAppShellProps> = ({
   activeTab, setActiveTab, children, header, forexSessions
 }) => {
-  const [dashboardOpen, setDashboardOpen] = useState(true);
-  const isDashboard = activeTab === 'forex_terminal';
-
   const fxOpen = forexSessions ? (forexSessions.activeSessions.length > 0 && !forexSessions.activeSessions.includes('CLOSED (WEEKEND)')) : true;
 
   return (
@@ -42,38 +38,7 @@ export const GlobalAppShell: React.FC<GlobalAppShellProps> = ({
         className="fixed top-[126px] bottom-9 left-0 z-[60] w-[242px] border-r border-slate-800/80 bg-[#02070d] flex flex-col"
       >
         <nav className="flex-1 overflow-y-auto px-3 pt-2 pb-3">
-          <button
-            type="button"
-            onClick={() => {
-              setDashboardOpen(v => !v);
-              setActiveTab('forex_terminal');
-            }}
-            className={`w-full h-[40px] flex items-center gap-3 px-4 rounded-lg border transition text-left ${
-              isDashboard
-                ? 'bg-[#092345] border-blue-700/70 text-white shadow-[0_0_18px_rgba(30,100,210,0.18)]'
-                : 'bg-transparent border-transparent text-slate-300 hover:bg-slate-900/70'
-            }`}
-          >
-            <Grid2X2 className="w-[18px] h-[18px] text-blue-400" />
-            <span className="flex-1 text-sm font-semibold">Forex Terminal</span>
-            {dashboardOpen ? <ChevronDown className="w-4 h-4 text-slate-500" /> : <ChevronRight className="w-4 h-4 text-slate-500" />}
-          </button>
-
-          {dashboardOpen && (
-            <div className="mt-0 mb-1 pl-10 pr-2 space-y-[-4px]">
-              <button
-                type="button"
-                onClick={() => setActiveTab('forex_terminal')}
-                className={`w-full py-0.5 text-left text-sm transition ${
-                  activeTab === 'forex_terminal' ? 'text-white font-semibold' : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                <span className="mr-2 text-slate-600">-</span>FX Majors & Crosses
-              </button>
-            </div>
-          )}
-
-          <div className="space-y-[-4px] mt-1">
+          <div className="space-y-[4px]">
             {nav.map(item => {
               const Icon = item.icon;
               const selected = activeTab === item.id;

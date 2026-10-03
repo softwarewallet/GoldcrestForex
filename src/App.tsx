@@ -18,7 +18,7 @@ import { getForexSessionState } from './markets/common/session';
 import { BrokerType, TradingEnvironment, OrderRequest } from './brokers/types';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<string>('forex_terminal');
+  const [activeTab, setActiveTab] = useState<string>('settings');
   const [forexPairs, setForexPairs] = useState<any[]>([]);
   const [forexSessions, setForexSessions] = useState<ForexSessionState>(() => getForexSessionState(new Date()));
   const [signals, setSignals] = useState<TradingSignal[]>([]);
@@ -273,47 +273,24 @@ export default function App() {
         />
       }
     >
-      {/* Fixed global shell content outlet: dashboards and all secondary pages render here. */}
-      {activeTab === 'forex_terminal' ? (
-        <ForexTerminalDashboard
-          activeTab={activeTab}
-          setActiveTab={setActiveTab}
-          forexSessions={forexSessions}
-          selectedBroker={selectedBroker}
-          environment={environment}
-          maskedAccount={maskedAccount}
-          balance={balance}
-          currency={currency}
-          isEmergencyHalted={isEmergencyHalted}
-          isRefreshing={isRefreshing}
-          onRefresh={refreshTerminalData}
-          onToggleKillSwitch={handleToggleKillSwitch}
-          candlesMap={candlesMap}
-          forexPairs={forexPairs}
-          signals={signals}
-          onSelectSignal={(sig) => setSelectedSignal(sig)}
-          onRequestOrder={(order) => setPendingOrder(order)}
-        />
-      ) : (
-        <main className="min-h-[calc(100vh-162px)] w-full px-4 sm:px-6 lg:px-8 py-5 space-y-4 bg-[#03070d] text-slate-100">
-          {loadingInitial ? (
-            <div className="flex flex-col items-center justify-center min-h-[50vh] space-y-3 font-mono">
-              <div className="w-10 h-10 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin"></div>
-              <div className="text-sm text-slate-300">Initializing Quantitative Terminal Engine...</div>
-              <div className="text-xs text-slate-500">Loading broker adapters, SQLite storage and risk gates</div>
-            </div>
-          ) : (
-            <>
-              {/* Market Watch / scanners */}
-              {activeTab === 'market_watch' && (
-                <MarketHub
-                  forexPairs={forexPairs}
-                  candlesMap={candlesMap}
-                  onSelectSignal={(sig) => setSelectedSignal(sig)}
-                  onEnsureCandles={ensureCandlesLoaded}
-                  environment={environment}
-                />
-              )}
+      <main className="min-h-[calc(100vh-162px)] w-full px-[10px] pt-[10px] pb-5 space-y-4 bg-[#03070d] text-slate-100">
+        {loadingInitial ? (
+          <div className="flex flex-col items-center justify-center min-h-[50vh] space-y-3 font-mono">
+            <div className="w-10 h-10 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin"></div>
+            <div className="text-sm text-slate-300">Initializing Quantitative Terminal Engine...</div>
+            <div className="text-xs text-slate-500">Loading broker adapters, SQLite storage and risk gates</div>
+          </div>
+        ) : (
+          <>
+            {activeTab === 'market_watch' && (
+              <MarketHub
+                forexPairs={forexPairs}
+                candlesMap={candlesMap}
+                onSelectSignal={(sig) => setSelectedSignal(sig)}
+                onEnsureCandles={ensureCandlesLoaded}
+                environment={environment}
+              />
+            )}
 
               {activeTab === 'signals' && (
                 <SignalsView
@@ -336,7 +313,7 @@ export default function App() {
 
               {(activeTab === 'pnl' || activeTab === 'accounting') && (
                 <TradingControlCenter
-                  initialSection="ACCOUNT_OVERVIEW"
+                  initialSection="MARKET_INTELLIGENCE"
                   reportsMode={true}
                   onSelectSignalModal={(sig) => setSelectedSignal(sig)}
                   autoTradingStatus={autoTradingStatus}
@@ -382,7 +359,6 @@ export default function App() {
             </>
           )}
         </main>
-      )}
  
       {/* Signal Quantitative Inspection Modal */}
       {selectedSignal && (

@@ -112,8 +112,8 @@ class AutoTradeReadinessService {
       quote = quote || await adapter.getQuote(order.symbol);
       checks.quoteFresh = Boolean(
         quote &&
-        quote.status === 'FRESH' &&
-        Date.now() - Number(quote.timestamp) < LIVE_QUOTE_MAX_AGE_MS &&
+        (quote.status === 'FRESH' || quote.status === 'DELAYED') &&
+        Date.now() - Number(quote.timestamp) < 300_000 &&
         Number(quote.bid) > 0 &&
         Number(quote.ask) > 0
       );

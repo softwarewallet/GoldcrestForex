@@ -226,24 +226,24 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
               or Demo endpoint (demo.ctraderapi.com:5035).
             </p>
             <div className="flex flex-wrap items-center gap-3 mt-3">
-              <label className="flex items-center gap-2 cursor-pointer">
+              <label className="flex items-center gap-2 cursor-not-allowed opacity-50">
                 <input
                   type="radio"
                   name="ctraderApiMode"
                   value="DEMO"
-                  checked={cTraderApiMode === 'DEMO'}
-                  onChange={() => setCTraderApiMode('DEMO')}
+                  checked={false}
+                  disabled
                   className="text-emerald-500"
                 />
-                <span className="text-xs font-mono text-slate-300">DEMO (demo.ctraderapi.com)</span>
+                <span className="text-xs font-mono text-slate-500">DEMO (Disabled)</span>
               </label>
               <label className="flex items-center gap-2 cursor-pointer">
                 <input
                   type="radio"
                   name="ctraderApiMode"
                   value="LIVE"
-                  checked={cTraderApiMode === 'LIVE'}
-                  onChange={() => setCTraderApiMode('LIVE')}
+                  checked={true}
+                  disabled
                   className="text-emerald-500"
                 />
                 <span className="text-xs font-mono text-slate-300 font-bold text-emerald-400">LIVE (live.ctraderapi.com)</span>

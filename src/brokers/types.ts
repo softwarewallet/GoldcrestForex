@@ -232,7 +232,7 @@ export interface BrokerAdapter {
   getBalance(): Promise<number>;
   getEquity(): Promise<number>;
   getMargin(): Promise<{ usedMargin: number; freeMargin: number; marginLevelPct?: number }>;
-  getPositions(): Promise<NormalizedPosition[]>;
+  getPositions(forceRefresh?: boolean): Promise<NormalizedPosition[]>;
   getOpenOrders(): Promise<NormalizedOrder[]>;
   getOrderHistory(): Promise<NormalizedOrder[]>;
   getOrderHistoryRange?(fromTimestamp: number, toTimestamp: number): Promise<NormalizedOrder[]>;

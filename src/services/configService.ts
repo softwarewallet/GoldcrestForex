@@ -73,7 +73,7 @@ let activeConfig: SystemConfig = {
   dataStatus: 'UNAVAILABLE',
   modelStatus: 'ML BASELINE / UNCALIBRATED (PHASE 1)',
   researchStatus: 'CLOSED',
-  cTraderApiMode: 'DEMO',
+  cTraderApiMode: 'LIVE',
   defaultRiskPct: 1.0,
   maxDailyLossPct: 3.0,
   maxOpenPositions: 5,

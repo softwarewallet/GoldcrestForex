@@ -628,25 +628,27 @@ brokerRouter.get('/account', async (req: Request, res: Response) => {
   }
 });
 
-brokerRouter.get('/positions', async (_req: Request, res: Response) => {
+brokerRouter.get('/positions', async (req: Request, res: Response) => {
   const now = Date.now();
-  if (now < positionsCache.expiresAt) return res.json(positionsCache.payload);
+  const force = req.query.force === 'true';
+  if (!force && now < positionsCache.expiresAt) return res.json(positionsCache.payload);
   if (positionsInFlight) {
-    if (positionsCache.payload.length) return res.json(positionsCache.payload);
+    if (!force && positionsCache.payload.length) return res.json(positionsCache.payload);
     return res.json(await positionsInFlight);
   }
 
   positionsInFlight = (async () => {
     const results = await Promise.all(LIVE_BROKERS.map(async broker => {
       try {
-        return await brokerRegistry.getAdapter(broker, 'LIVE').getPositions();
-      } catch {
-        return [];
+        const positions = await brokerRegistry.getAdapter(broker, 'LIVE').getPositions(force);
+        return { success: true, positions };
+      } catch (err) {
+        return { success: false, positions: [] };
       }
     }));
-    const payload = results.flat();
-    if (payload.length || positionsCache.payload.length === 0) {
-      positionsCache.payload = payload;
+    const succeeded = results.filter(r => r.success);
+    if (succeeded.length > 0) {
+      positionsCache.payload = succeeded.flatMap(r => r.positions);
     }
     positionsCache.expiresAt = Date.now() + BROKER_COLLECTION_CACHE_TTL_MS;
     return positionsCache.payload;
@@ -738,25 +740,27 @@ brokerRouter.get('/order-history', async (req: Request, res: Response) => {
   }
 });
 
-brokerRouter.get('/orders', async (_req: Request, res: Response) => {
+brokerRouter.get('/orders', async (req: Request, res: Response) => {
   const now = Date.now();
-  if (now < ordersCache.expiresAt) return res.json(ordersCache.payload);
+  const force = req.query.force === 'true';
+  if (!force && now < ordersCache.expiresAt) return res.json(ordersCache.payload);
   if (ordersInFlight) {
-    if (ordersCache.payload.length) return res.json(ordersCache.payload);
+    if (!force && ordersCache.payload.length) return res.json(ordersCache.payload);
     return res.json(await ordersInFlight);
   }
 
   ordersInFlight = (async () => {
     const results = await Promise.all(LIVE_BROKERS.map(async broker => {
       try {
-        return await brokerRegistry.getAdapter(broker, 'LIVE').getOpenOrders();
+        const orders = await brokerRegistry.getAdapter(broker, 'LIVE').getOpenOrders();
+        return { success: true, orders };
       } catch {
-        return [];
+        return { success: false, orders: [] };
       }
     }));
-    const payload = results.flat();
-    if (payload.length || ordersCache.payload.length === 0) {
-      ordersCache.payload = payload;
+    const succeeded = results.filter(r => r.success);
+    if (succeeded.length > 0) {
+      ordersCache.payload = succeeded.flatMap(r => r.orders);
     }
     ordersCache.expiresAt = Date.now() + BROKER_COLLECTION_CACHE_TTL_MS;
     return ordersCache.payload;

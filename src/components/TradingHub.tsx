@@ -508,7 +508,7 @@ export const TradingHub: React.FC<TradingHubProps> = ({
   const fetchRealPositions = useCallback(async (isSilent = false) => {
     if (!isSilent) setIsLoadingPositions(true);
     try {
-      const res = await fetch('/api/brokers/positions');
+      const res = await fetch('/api/brokers/positions?force=true');
       if (res.ok) {
         const data = await safeParseJson(res);
         if (Array.isArray(data)) {
@@ -1115,7 +1115,7 @@ export const TradingHub: React.FC<TradingHubProps> = ({
     REJECTED: 'REJECTED'
   };
   const renderTabs = () => (
-    <div className="flex flex-wrap gap-2 border-b border-slate-800 pb-3">
+    <div className="flex flex-wrap gap-2 border-b border-slate-800 pb-[5px] mb-[5px]">
       {[
         ['cockpit', 'Auto Live'],
         ['positions', 'Positions'],
@@ -1135,7 +1135,7 @@ export const TradingHub: React.FC<TradingHubProps> = ({
 
   return (
     <div id="unified_trading_hub" className="space-y-4">
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-lg">
+      <div className="bg-slate-900 border border-slate-800 rounded-xl px-4 pt-[2px] pb-[2px] mb-[5px] shadow-lg">
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
           <div>
             <div className="text-white font-bold text-base">Auto Live Trading Cockpit</div>
@@ -1156,9 +1156,9 @@ export const TradingHub: React.FC<TradingHubProps> = ({
 
       {activeTab === 'cockpit' && (
         <>
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+          <div className="bg-slate-900 border border-slate-800 rounded-xl px-5 pt-[5px] pb-[5px] mb-[5px]">
             <div className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">Current Activity</div>
-            <div className="mt-2 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+            <div className="mt-[2px] flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
               <div>
                 <div className={"text-xl font-black font-mono " +
                   (executionStage === 'TRADE_EXECUTED' ? "text-emerald-400" :
@@ -1177,7 +1177,7 @@ export const TradingHub: React.FC<TradingHubProps> = ({
                  executionStage === 'REJECTED' ? 'TRADE NOT EXECUTED' : 'AUTO LIVE MONITORING'}
               </div>
             </div>
-            <div className="grid grid-cols-5 gap-1 mt-5">
+            <div className="grid grid-cols-5 gap-1 mt-[10px]">
               {['SCANNING_MARKET','ANALYZING_SIGNAL','PREPARING_ORDER','SAFETY_GATE','SUBMITTING_ORDER'].map(stage => (
                 <div key={stage} className={"h-1.5 rounded " +
                   (executionStage === stage ? "bg-cyan-400 animate-pulse" :
@@ -1186,13 +1186,13 @@ export const TradingHub: React.FC<TradingHubProps> = ({
             </div>
           </div>
 
-          <div className="grid md:grid-cols-3 gap-3">
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4"><div className="text-[10px] text-slate-500 font-mono uppercase">Active Positions</div><div className="text-2xl font-bold text-white mt-1">{runningTrades.length}</div></div>
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4"><div className="text-[10px] text-slate-500 font-mono uppercase">Actionable Signals</div><div className="text-2xl font-bold text-white mt-1">{visiblePlannedTrades.length}</div></div>
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4"><div className="text-[10px] text-slate-500 font-mono uppercase">Last Cycle</div><div className="text-xs text-slate-300 mt-2">{autoStatus?.lastCycleResult || 'Waiting.'}</div></div>
+          <div className="flex flex-col md:flex-row gap-3 mb-[5px]">
+            <div className="w-full md:w-[20%] bg-slate-900 border border-slate-800 rounded-xl py-[5px] px-4"><div className="text-[10px] text-slate-500 font-mono uppercase">Active Positions</div><div className="text-2xl font-bold text-white mt-1">{runningTrades.length}</div></div>
+            <div className="w-full md:w-[20%] bg-slate-900 border border-slate-800 rounded-xl py-[5px] px-4"><div className="text-[10px] text-slate-500 font-mono uppercase">Actionable Signals</div><div className="text-2xl font-bold text-white mt-1">{visiblePlannedTrades.length}</div></div>
+            <div className="w-full md:w-[60%] bg-slate-900 border border-slate-800 rounded-xl py-[5px] px-4"><div className="text-[10px] text-slate-500 font-mono uppercase">Last Cycle</div><div className="text-xs text-slate-300 mt-1">{autoStatus?.lastCycleResult || 'Waiting.'}</div></div>
           </div>
 
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-xl px-4 pt-[5px] pb-[5px]">
             <div className="flex items-center justify-between mb-3">
               <div><div className="text-xs font-bold text-white font-mono uppercase">Active Positions</div><div className="text-[10px] text-slate-500 mt-1">Broker-authoritative · refreshes every 10 seconds</div></div>
               <button type="button" onClick={() => fetchRealPositions(false)} className="px-2.5 py-1 rounded-lg border border-slate-700 bg-slate-950 text-slate-300 text-[11px] font-mono">Refresh</button>

@@ -50,7 +50,7 @@ export const BalanceDisplay: React.FC<BalanceDisplayProps> = () => {
 
   useEffect(() => {
     fetchBalances();
-    const interval = setInterval(fetchBalances, 10000);
+    const interval = setInterval(fetchBalances, 30000);
     return () => clearInterval(interval);
   }, []);
 

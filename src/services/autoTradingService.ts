@@ -11,7 +11,7 @@ import { autoExecutionEngine, LIVE_AUTO_EXECUTION_ALLOWED, armAutonomousExecutio
 import { autoTradeReadinessService } from '../brokers/safety/AutoTradeReadiness';
 import { getSystemConfig } from './configService';
 import { killSwitch } from '../brokers/safety/KillSwitch';
-import { BrokerAdapter, ConnectionTestResult, NormalizedQuote, OrderRequest } from '../brokers/types';
+import { BrokerAdapter, ConnectionTestResult, NormalizedQuote, OrderRequest, NormalizedPosition } from '../brokers/types';
 import { liveRuntimeLog, tradeAuditLog } from './liveRuntimeLog';
 import { calculateForexPipTargets, normalizePriceToThreeDigits, normalizePriceToInstrumentDigits, sizeForexOrderToMaxTradeValue } from '../brokers/safety/TradeSizing';
 import { recordLiveTradeResearchSignal, updateLiveTradeResearchQuote, updateLiveTradeResearchExecution } from './liveTradeResearchService';
@@ -351,12 +351,12 @@ class AutoTradingService {
     return Math.max(1, Math.floor(Number(getSystemConfig().maxOpenPositions)));
   }
 
-  private async getAuthoritativePositionCapacity(): Promise<{ current: number; max: number; available: number }> {
+  private async getAuthoritativePositionCapacity(): Promise<{ current: number; max: number; available: number; positions: NormalizedPosition[] }> {
     const adapter = brokerRegistry.getAdapter('CTRADER', 'LIVE');
     const positions = await adapter.getPositions();
     const current = Array.isArray(positions) ? positions.length : 0;
     const max = this.getConfiguredMaxOpenPositions();
-    return { current, max, available: Math.max(0, max - current) };
+    return { current, max, available: Math.max(0, max - current), positions };
   }
 
   private pauseForPositionLimit(current: number, max: number, reason: string): void {
@@ -1235,8 +1235,7 @@ class AutoTradingService {
 
       // Persist the complete model state at decision time. This is research
       // telemetry only and does not participate in the execution decision.
-      try {
-      await recordLiveTradeResearchSignal({
+      recordLiveTradeResearchSignal({
         signalId: signal.id,
         symbol: pair,
         timestamp: signal.timestamp,
@@ -1269,15 +1268,14 @@ class AutoTradingService {
           lifecycleCapture: 'SIGNAL_TIME',
           marketTrend: marketTrendContext
         }
-      });
-      } catch (researchError: any) {
+      }).catch((researchError: any) => {
         liveRuntimeLog('WARN', 'LIVE_TRADE_RESEARCH_TELEMETRY_FAILED', {
           signalId: signal.id,
           pair,
           operation: 'SIGNAL',
           error: researchError?.message || String(researchError)
         });
-      }
+      });
 
       // The signal engine has multiple directional categories (BUY, STRONG_BUY,
       // WATCH_BUY and their SELL equivalents). The scanner already normalizes
@@ -1334,7 +1332,7 @@ return;
       // Re-check the authoritative account position count inside the serialized
       // execution lock. Another pair may have filled the final available slot
       // earlier in this same cycle.
-      const positionsBeforeExecution = await adapter.getPositions();
+      const positionsBeforeExecution = systemPositionCapacity.positions;
       const maxOpenPositions = Math.max(
         1,
         Math.min(100, Math.floor(Number(config.maxOpenPositions)))
@@ -1360,8 +1358,8 @@ return;
       }
 
       const quote = await adapter.getQuote(pair);
-      if (quote.status !== 'FRESH' || Date.now() - quote.timestamp >= LIVE_QUOTE_MAX_AGE_MS) {
-        const reason = 'Fresh broker quote unavailable at dispatch boundary.';
+      if (!(quote.status === 'FRESH' || quote.status === 'DELAYED') || Date.now() - quote.timestamp >= 300_000) {
+        const reason = 'Fresh or authoritative fallback broker quote unavailable at dispatch boundary.';
         this.lastActions.push({ pair, result: 'BLOCKED', signalId: signal.id, reason });
                 tradeAuditLog('QUOTE_BLOCKED', { pair, signalId: signal.id, score: signal.score, reason });
 return;
@@ -1376,8 +1374,7 @@ return;
       }
       const entryPrice = signalSide === 'BUY' ? quote.ask : quote.bid;
 
-      try {
-      await updateLiveTradeResearchQuote({
+      updateLiveTradeResearchQuote({
         signalId: signal.id,
         quote: {
           bid: quote.bid,
@@ -1391,15 +1388,14 @@ return;
           selectedEntrySide: signalSide,
           selectedEntryPrice: entryPrice
         }
-      });
-      } catch (researchError: any) {
+      }).catch((researchError: any) => {
         liveRuntimeLog('WARN', 'LIVE_TRADE_RESEARCH_TELEMETRY_FAILED', {
           signalId: signal.id,
           pair,
           operation: 'QUOTE',
           error: researchError?.message || String(researchError)
         });
-      }
+      });
 
       // Auto Live submits a MARKET order using the authoritative broker quote
       // available at the dispatch boundary. The signal entry zone is an
@@ -1564,7 +1560,7 @@ return;
 
       const quantity = sizing.quantity;
 
-      await updateLiveTradeResearchQuote({
+      updateLiveTradeResearchQuote({
         signalId: signal.id,
         quote: {
           bid: quote.bid,
@@ -1586,6 +1582,13 @@ return;
           directQuantity: sizing.directQuantity,
           sizingAdjusted: sizing.adjusted
         }
+      }).catch((researchError: any) => {
+        liveRuntimeLog('WARN', 'LIVE_TRADE_RESEARCH_TELEMETRY_FAILED', {
+          signalId: signal.id,
+          pair,
+          operation: 'QUOTE_SIZED',
+          error: researchError?.message || String(researchError)
+        });
       });
 
       this.setExecutionStatus({
@@ -1695,8 +1698,7 @@ return;
         }
       );
 
-      try {
-      await updateLiveTradeResearchExecution({
+      updateLiveTradeResearchExecution({
         signalId: signal.id,
         status: result.executed ? 'FILLED' : 'BLOCKED',
         code: result.code,
@@ -1708,15 +1710,14 @@ return;
         commission: result.order?.commission,
         brokerStatus: result.order?.status,
         executionTimestamp: result.order?.timestamp || Date.now()
-      });
-      } catch (researchError: any) {
+      }).catch((researchError: any) => {
         liveRuntimeLog('WARN', 'LIVE_TRADE_RESEARCH_TELEMETRY_FAILED', {
           signalId: signal.id,
           pair,
           operation: 'EXECUTION',
           error: researchError?.message || String(researchError)
         });
-      }
+      });
 
       if (result.executed) {
         this.finishExecution('TRADE_EXECUTED', pair + ' ' + order.side + ' trade confirmed by the execution engine.', {

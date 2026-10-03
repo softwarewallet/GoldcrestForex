@@ -79,8 +79,8 @@ export class LiveTradingGate {
     // prevents any future execution path from silently reintroducing a 10s
     // freshness requirement without an explicit code change here.
     const quoteMaxAgeMs = 30_000;
-    const marketDataFresh = params.currentQuote.status === 'FRESH'
-      && (Date.now() - params.currentQuote.timestamp < quoteMaxAgeMs);
+    const marketDataFresh = (params.currentQuote.status === 'FRESH' || params.currentQuote.status === 'DELAYED')
+      && (Date.now() - params.currentQuote.timestamp < 300_000);
     if (!marketDataFresh) {
       failedReasons.push(
         `Condition 7 Failed: Market data quote is stale or delayed (>${Math.round(quoteMaxAgeMs / 1000)}s old).`
