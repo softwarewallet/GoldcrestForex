@@ -7,7 +7,7 @@ import { getAuditLogs, logBrokerAction, maskIdentifier } from './auditLog';
 import { BrokerAdapter, BrokerType, NormalizedPosition, NormalizedQuote, TradingEnvironment, OrderRequest } from './types';
 import { normalizeBrokerError } from './errors';
 import { reconciliationService } from '../services/reconciliationService';
-import { getForexSessionState } from '../markets/common/session';
+import { getForexSessionState, getIndianSessionState } from '../markets/common/session';
 import { claimExecutionIntent, completeExecutionIntent, failExecutionIntent, markExecutionIntentInFlight, getExecutionIntent, resumeExecutionIntentReconciliation } from '../services/executionIntentService';
 import { reconcileExecutionIntent } from '../services/executionReconciliationService';
 import { getSystemConfig } from '../services/configService';
@@ -15,10 +15,11 @@ import { executeQuery, executeRun } from '../database/db';
 import { calculateForexPipTargets, normalizePriceToThreeDigits, normalizePriceToInstrumentDigits, sizeForexOrderToMaxTradeValue } from './safety/TradeSizing';
 import { liveRuntimeLog } from '../services/liveRuntimeLog';
 import { autoTradingService } from '../services/autoTradingService';
+import { generateTradeComparisonReport } from '../services/tradeComparisonService';
 
 export const brokerRouter = Router();
 
-const LIVE_BROKERS: BrokerType[] = ['CTRADER'];
+const LIVE_BROKERS: BrokerType[] = ['CTRADER', 'FIVE_PAISA'];
 
 // Several terminal surfaces request broker status at nearly the same time.
 // Share one short-lived broker snapshot and one in-flight request so normal
@@ -40,7 +41,10 @@ const BROKER_COLLECTION_CACHE_TTL_MS = 10_000;
 
 function resolveMarketBroker(market: string): BrokerType {
   if (market === 'FOREX') return 'CTRADER';
-  throw new Error(`Unsupported market: ${market}. Only FOREX is supported.`);
+  if (market === 'INDIAN_EQUITY' || market === 'INDIAN_FUTURES' || market === 'INDIAN_OPTIONS') {
+    return 'FIVE_PAISA';
+  }
+  throw new Error(`Unsupported market: ${market}. No compatible live broker is configured.`);
 }
 
 function forexQuoteCurrencies(symbol: string): { base: string; quote: string } | null {
@@ -285,7 +289,10 @@ async function refreshBrokerStatusSnapshot(forceRefresh?: boolean): Promise<any>
     routingMode: 'AUTOMATIC_BY_MARKET',
     selectedBroker: null,
     brokerRouting: {
-      FOREX: 'CTRADER'
+      FOREX: 'CTRADER',
+      INDIAN_EQUITY: 'FIVE_PAISA',
+      INDIAN_FUTURES: 'FIVE_PAISA',
+      INDIAN_OPTIONS: 'FIVE_PAISA'
     },
     brokers: brokerStatus,
     credentials: brokerRegistry.getCredentialStatuses(),
@@ -361,7 +368,7 @@ brokerRouter.post('/test-connection', async (req: Request, res: Response) => {
   const requestedBroker = req.body?.broker as BrokerType | undefined;
 
   if (requestedBroker && !LIVE_BROKERS.includes(requestedBroker)) {
-    return res.status(400).json({ error: 'Allowed live broker: CTRADER' });
+    return res.status(400).json({ error: 'Allowed live brokers: CTRADER, FIVE_PAISA' });
   }
 
   const brokers = requestedBroker ? [requestedBroker] : LIVE_BROKERS;
@@ -421,7 +428,7 @@ brokerRouter.post('/select', (req: Request, res: Response) => {
   const { broker } = req.body as { broker: BrokerType };
 
   if (!LIVE_BROKERS.includes(broker)) {
-    return res.status(400).json({ error: 'Invalid broker. Allowed: CTRADER' });
+    return res.status(400).json({ error: 'Invalid broker. Allowed: CTRADER, FIVE_PAISA' });
   }
 
   res.json({
@@ -442,7 +449,7 @@ brokerRouter.post('/credentials/live', (req: Request, res: Response) => {
   }
 
   if (!LIVE_BROKERS.includes(broker)) {
-    return res.status(400).json({ error: 'Missing or invalid broker. Allowed: CTRADER' });
+    return res.status(400).json({ error: 'Missing or invalid broker. Allowed: CTRADER, FIVE_PAISA' });
   }
 
   if (!credentials) {
@@ -577,7 +584,7 @@ brokerRouter.get('/account', async (req: Request, res: Response) => {
   try {
     if (requestedBroker) {
       if (!LIVE_BROKERS.includes(requestedBroker)) {
-        return res.status(400).json({ error: 'Allowed live broker: CTRADER' });
+        return res.status(400).json({ error: 'Allowed live brokers: CTRADER, FIVE_PAISA' });
       }
 
       // Reuse the same account snapshot as the header/status endpoint. This
@@ -628,27 +635,27 @@ brokerRouter.get('/account', async (req: Request, res: Response) => {
   }
 });
 
-brokerRouter.get('/positions', async (req: Request, res: Response) => {
+async function fetchLivePositions(forceFresh = false): Promise<any[]> {
   const now = Date.now();
-  const force = req.query.force === 'true';
-  if (!force && now < positionsCache.expiresAt) return res.json(positionsCache.payload);
+  if (!forceFresh && now < positionsCache.expiresAt && positionsCache.payload.length > 0) {
+    return positionsCache.payload;
+  }
   if (positionsInFlight) {
-    if (!force && positionsCache.payload.length) return res.json(positionsCache.payload);
-    return res.json(await positionsInFlight);
+    if (positionsCache.payload.length > 0) return positionsCache.payload;
+    return await positionsInFlight;
   }
 
   positionsInFlight = (async () => {
     const results = await Promise.all(LIVE_BROKERS.map(async broker => {
       try {
-        const positions = await brokerRegistry.getAdapter(broker, 'LIVE').getPositions(force);
-        return { success: true, positions };
-      } catch (err) {
-        return { success: false, positions: [] };
+        return await brokerRegistry.getAdapter(broker, 'LIVE').getPositions();
+      } catch {
+        return [];
       }
     }));
-    const succeeded = results.filter(r => r.success);
-    if (succeeded.length > 0) {
-      positionsCache.payload = succeeded.flatMap(r => r.positions);
+    const payload = results.flat();
+    if (payload.length || positionsCache.payload.length === 0) {
+      positionsCache.payload = payload;
     }
     positionsCache.expiresAt = Date.now() + BROKER_COLLECTION_CACHE_TTL_MS;
     return positionsCache.payload;
@@ -656,7 +663,43 @@ brokerRouter.get('/positions', async (req: Request, res: Response) => {
     positionsInFlight = null;
   });
 
-  return res.json(await positionsInFlight);
+  return await positionsInFlight;
+}
+
+async function fetchLiveOrders(forceFresh = false): Promise<any[]> {
+  const now = Date.now();
+  if (!forceFresh && now < ordersCache.expiresAt && ordersCache.payload.length > 0) {
+    return ordersCache.payload;
+  }
+  if (ordersInFlight) {
+    if (ordersCache.payload.length > 0) return ordersCache.payload;
+    return await ordersInFlight;
+  }
+
+  ordersInFlight = (async () => {
+    const results = await Promise.all(LIVE_BROKERS.map(async broker => {
+      try {
+        return await brokerRegistry.getAdapter(broker, 'LIVE').getOpenOrders();
+      } catch {
+        return [];
+      }
+    }));
+    const payload = results.flat();
+    if (payload.length || ordersCache.payload.length === 0) {
+      ordersCache.payload = payload;
+    }
+    ordersCache.expiresAt = Date.now() + BROKER_COLLECTION_CACHE_TTL_MS;
+    return ordersCache.payload;
+  })().finally(() => {
+    ordersInFlight = null;
+  });
+
+  return await ordersInFlight;
+}
+
+brokerRouter.get('/positions', async (_req: Request, res: Response) => {
+  const payload = await fetchLivePositions();
+  return res.json(payload);
 });
 
 brokerRouter.get('/order-history', async (req: Request, res: Response) => {
@@ -740,96 +783,148 @@ brokerRouter.get('/order-history', async (req: Request, res: Response) => {
   }
 });
 
-brokerRouter.get('/orders', async (req: Request, res: Response) => {
-  const now = Date.now();
-  const force = req.query.force === 'true';
-  if (!force && now < ordersCache.expiresAt) return res.json(ordersCache.payload);
-  if (ordersInFlight) {
-    if (!force && ordersCache.payload.length) return res.json(ordersCache.payload);
-    return res.json(await ordersInFlight);
+brokerRouter.get('/today-trades-summary', async (_req: Request, res: Response) => {
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+  const from = startOfDay.getTime();
+  const to = Date.now();
+
+  let closedTrades: any[] = [];
+
+  // 1. Fetch live broker data
+  await Promise.all(LIVE_BROKERS.map(async broker => {
+    try {
+      const adapter = brokerRegistry.getAdapter(broker, 'LIVE');
+      const history = adapter.getOrderHistoryRange
+        ? await adapter.getOrderHistoryRange(from, to)
+        : await adapter.getOrderHistory();
+
+      const todayHistory = (history || []).filter(o => Number(o.timestamp) >= from);
+      closedTrades.push(...todayHistory);
+    } catch {
+      // Best-effort
+    }
+  }));
+
+  // 2. Fetch current live positions & orders (all currently pending/open trades in the system)
+  const [openPositions, openOrders] = await Promise.all([
+    fetchLivePositions().catch(() => positionsCache.payload || []),
+    fetchLiveOrders().catch(() => ordersCache.payload || [])
+  ]);
+
+  // 3. Query SQLite recorded trades for today
+  try {
+    const sqliteTrades = await executeQuery<any>(
+      'SELECT id, instrument, direction, entry_price, exit_price, size, pnl, status, entry_time, exit_time FROM trades WHERE (entry_time >= ? OR exit_time >= ?)',
+      [from, from]
+    );
+    for (const st of sqliteTrades) {
+      if (!closedTrades.some(ct => ct.id === st.id || ct.brokerOrderId === st.id)) {
+        if (st.status === 'CLOSED' || st.exit_time) {
+          closedTrades.push({
+            id: st.id,
+            symbol: st.instrument,
+            side: st.direction,
+            timestamp: st.exit_time || st.entry_time,
+            price: st.entry_price,
+            averageFillPrice: st.exit_price,
+            filledQuantity: st.size,
+            netAmount: st.pnl,
+            status: st.status
+          });
+        }
+      }
+    }
+  } catch {
+    // Best-effort
   }
 
-  ordersInFlight = (async () => {
-    const results = await Promise.all(LIVE_BROKERS.map(async broker => {
-      try {
-        const orders = await brokerRegistry.getAdapter(broker, 'LIVE').getOpenOrders();
-        return { success: true, orders };
-      } catch {
-        return { success: false, orders: [] };
-      }
-    }));
-    const succeeded = results.filter(r => r.success);
-    if (succeeded.length > 0) {
-      ordersCache.payload = succeeded.flatMap(r => r.orders);
-    }
-    ordersCache.expiresAt = Date.now() + BROKER_COLLECTION_CACHE_TTL_MS;
-    return ordersCache.payload;
-  })().finally(() => {
-    ordersInFlight = null;
-  });
+  let winningTrades = 0;
+  let losingTrades = 0;
+  let realizedPnL = 0;
+  let unrealizedPnL = 0;
 
-  return res.json(await ordersInFlight);
+  for (const trade of closedTrades) {
+    let pnl = 0;
+    if (typeof trade.netAmount === 'number' && Number.isFinite(trade.netAmount)) {
+      pnl = trade.netAmount;
+    } else if (typeof trade.pnl === 'number' && Number.isFinite(trade.pnl)) {
+      pnl = trade.pnl;
+    } else if (typeof trade.realizedPnL === 'number' && Number.isFinite(trade.realizedPnL)) {
+      pnl = trade.realizedPnL;
+    } else {
+      const entry = Number(trade.price ?? trade.entryPrice ?? 0);
+      const exit = Number(trade.averageFillPrice ?? trade.closingPrice ?? trade.exitPrice ?? 0);
+      const qty = Number(trade.filledQuantity ?? trade.quantity ?? trade.size ?? 0);
+      if (entry > 0 && exit > 0 && qty > 0) {
+        pnl = trade.side === 'SELL' || trade.direction === 'SELL'
+          ? (entry - exit) * qty
+          : (exit - entry) * qty;
+      }
+    }
+
+    realizedPnL += pnl;
+    if (pnl > 0.0001) {
+      winningTrades++;
+    } else if (pnl < -0.0001) {
+      losingTrades++;
+    }
+  }
+
+  for (const pos of openPositions) {
+    const uPnl = Number(pos.unrealizedPnL ?? pos.unrealizedPnl ?? 0);
+    if (Number.isFinite(uPnl)) {
+      unrealizedPnL += uPnl;
+    }
+  }
+
+  // Pending trades = currently open / pending trades in the system right now at fetch time
+  const pendingTrades = (openPositions || []).length + (openOrders || []).length;
+  const totalTrades = closedTrades.length + pendingTrades;
+  const netPnL = realizedPnL + unrealizedPnL;
+
+  const formattedNetPnL = `${netPnL >= 0 ? '+' : '-'}$${Math.abs(netPnL).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+  res.json({
+    totalTrades,
+    winningTrades,
+    losingTrades,
+    pendingTrades,
+    realizedPnL,
+    unrealizedPnL,
+    netPnL,
+    formattedNetPnL,
+    date: startOfDay.toISOString().split('T')[0],
+    from,
+    to
+  });
 });
 
-brokerRouter.get('/execution-intents', async (req: Request, res: Response) => {
+brokerRouter.get('/trade-comparison', async (req: Request, res: Response) => {
   try {
-    const requestedLimit = Number(req.query.limit ?? 50);
-    const limit = Math.max(1, Math.min(200, Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : 50));
-    const requestedState = String(req.query.state || 'ALL').toUpperCase();
-    const allowedStates = ['PENDING', 'IN_FLIGHT', 'RECONCILIATION_TIMEOUT', 'COMPLETED', 'FAILED'];
-    const states = requestedState === 'ALL' ? allowedStates : [requestedState];
-    if (!states.every(state => allowedStates.includes(state))) {
-      return res.status(400).json({ error: 'Invalid execution intent state filter.' });
+    const now = new Date();
+    // Default to yesterday (00:00:00 to 23:59:59.999)
+    const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+    const defaultFrom = new Date(yesterday.getFullYear(), yesterday.getMonth(), yesterday.getDate(), 0, 0, 0, 0).getTime();
+    const defaultTo = new Date(yesterday.getFullYear(), yesterday.getMonth(), yesterday.getDate(), 23, 59, 59, 999).getTime();
+
+    const from = Number.isFinite(Number(req.query.from)) ? Number(req.query.from) : defaultFrom;
+    const to = Number.isFinite(Number(req.query.to)) ? Number(req.query.to) : defaultTo;
+
+    if (!(from >= 0 && to >= from)) {
+      return res.status(400).json({ error: 'Invalid date range timestamps.' });
     }
 
-    const placeholders = states.map(() => '?').join(', ');
-    const rows = await executeQuery<any>(
-      `SELECT * FROM execution_intents WHERE state IN (${placeholders}) ORDER BY updated_at DESC LIMIT ?`,
-      [...states, limit]
-    );
-    const now = Date.now();
-    const intents = rows.map((row: any) => {
-      let payload: any = {};
-      let result: any = {};
-      try { payload = JSON.parse(row.payload_json || '{}'); } catch {}
-      try { result = JSON.parse(row.result_json || '{}'); } catch {}
-      const createdAt = Number(row.created_at || 0);
-      const updatedAt = Number(row.updated_at || 0);
-      const lastAttemptAt = Number(result.reconciliationLastAttemptAt || result.reconciledAt || 0);
-      const ageMs = createdAt > 0 ? Math.max(0, now - createdAt) : 0;
-      return {
-        idempotencyKey: row.idempotency_key,
-        broker: row.broker,
-        market: row.market,
-        symbol: row.symbol,
-        side: row.side,
-        state: row.state,
-        createdAt,
-        updatedAt,
-        ageMs,
-        ageSeconds: Math.floor(ageMs / 1000),
-        reconciliation: {
-          state: result.reconciliationState || row.state,
-          attemptCount: Number(result.reconciliationAttemptCount || 0),
-          lastAttemptAt: lastAttemptAt || null,
-          lastAttemptAgeMs: lastAttemptAt > 0 ? Math.max(0, now - lastAttemptAt) : null,
-          brokerOrderId: result.brokerOrderId || result.order?.brokerOrderId || result.order?.id || null,
-          clientOrderId: result.clientOrderId || payload.signalId || result.order?.clientOrderId || null,
-          brokerStatus: result.brokerStatus || result.order?.status || null,
-          requestedQuantity: Number(result.requestedQuantity ?? result.order?.requestedQuantity ?? result.order?.quantity ?? payload.quantity ?? 0) || null,
-          filledQuantity: Number(result.filledQuantity ?? result.order?.filledQuantity ?? 0) || 0,
-          remainingQuantity: result.remainingQuantity !== undefined ? Number(result.remainingQuantity) : null,
-          averageFillPrice: Number(result.averageFillPrice ?? result.order?.averageFillPrice ?? 0) || null,
-          errorCode: result.reconciliationErrorCode || result.code || null,
-          reason: result.reconciliationError || result.detail || result.error || null,
-          operatorActionRequired: Boolean(result.operatorActionRequired || row.state === 'RECONCILIATION_TIMEOUT')
-        }
-      };
-    });
-    res.json({ environment: 'LIVE', timestamp: now, count: intents.length, intents });
+    const report = await generateTradeComparisonReport(from, to);
+    res.json(report);
   } catch (err: any) {
-    res.status(500).json({ error: err?.message || 'Failed to load execution reconciliation diagnostics.' });
+    res.status(500).json({ error: err.message || 'Failed to generate trade comparison report.' });
   }
+});
+
+brokerRouter.get('/orders', async (_req: Request, res: Response) => {
+  const payload = await fetchLiveOrders();
+  return res.json(payload);
 });
 
 brokerRouter.get('/execution/:idempotencyKey', async (req: Request, res: Response) => {
@@ -940,8 +1035,7 @@ brokerRouter.post('/order', async (req: Request, res: Response) => {
           Number(orderReq.price),
           precisionInstrument.pipSize,
           config.forexStopLossPips,
-          config.forexTakeProfitPips,
-          precisionInstrument.digits
+          config.forexTakeProfitPips
         );
         orderReq.stopLoss = pipTargets.stopLoss;
         orderReq.takeProfit = pipTargets.takeProfit;
@@ -1033,7 +1127,9 @@ brokerRouter.post('/order', async (req: Request, res: Response) => {
 
     const account = await adapter.getAccount();
     const positions = await adapter.getPositions();
-    const isMarketOpen = !getForexSessionState().activeSessions.includes('CLOSED (WEEKEND)');
+    const isMarketOpen = orderReq.market === 'FOREX'
+      ? !getForexSessionState().activeSessions.includes('CLOSED (WEEKEND)')
+      : getIndianSessionState().isOpen;
     let totalAccountExposure: number;
     try {
       totalAccountExposure = await calculateAccountCurrencyExposure(
@@ -1059,7 +1155,7 @@ brokerRouter.post('/order', async (req: Request, res: Response) => {
       signalAgeMs: 15000,
       currentQuote: quote,
       isMarketOpen,
-      dailyRealizedLoss: await reconciliationService.getDailyLoss('CTRADER', Number(account.balance || 0)),
+      dailyRealizedLoss: await reconciliationService.getDailyLoss(adapter.broker as 'CTRADER' | 'FIVE_PAISA', Number(account.balance || 0)),
       dailyLossLimit,
       totalAccountExposure,
       maxAllowedExposure,
@@ -1200,7 +1296,7 @@ brokerRouter.post('/order/:id/cancel', async (req: Request, res: Response) => {
   try {
     const broker = req.body?.broker as BrokerType | undefined;
     if (!broker || !LIVE_BROKERS.includes(broker)) {
-      return res.status(400).json({ error: 'Broker is required for cancel operation: CTRADER' });
+      return res.status(400).json({ error: 'Broker is required for cancel operation: CTRADER or FIVE_PAISA' });
     }
     const success = await brokerRegistry.getAdapter(broker, 'LIVE').cancelOrder(req.params.id);
     res.json({ success, broker });
@@ -1213,7 +1309,7 @@ brokerRouter.post('/position/:id/close', async (req: Request, res: Response) => 
   try {
     const broker = req.body?.broker as BrokerType | undefined;
     if (!broker || !LIVE_BROKERS.includes(broker)) {
-      return res.status(400).json({ error: 'Broker is required for close operation: CTRADER' });
+      return res.status(400).json({ error: 'Broker is required for close operation: CTRADER or FIVE_PAISA' });
     }
     const success = await brokerRegistry.getAdapter(broker, 'LIVE').closePosition(req.params.id, req.body?.quantity);
     res.json({ success, broker });
@@ -1256,12 +1352,13 @@ brokerRouter.post('/controls', (req: Request, res: Response) => {
 });
 
 brokerRouter.post('/reconciliation/snapshot', async (req: Request, res: Response) => {
-  const broker = (req.body?.broker as 'CTRADER' | undefined) || 'CTRADER';
-  if (!LIVE_BROKERS.includes(broker)) {
-    return res.status(400).json({ error: 'Allowed live broker: CTRADER' });
+  const broker = req.body?.broker as ('CTRADER' | 'FIVE_PAISA') | undefined;
+  const brokers: ('CTRADER' | 'FIVE_PAISA')[] = broker ? [broker] : ['CTRADER', 'FIVE_PAISA'];
+  if (brokers.some(b => !LIVE_BROKERS.includes(b))) {
+    return res.status(400).json({ error: 'Allowed live brokers: CTRADER, FIVE_PAISA' });
   }
   try {
-    const snapshots = [await reconciliationService.captureBrokerSnapshot(broker)];
+    const snapshots = await Promise.all(brokers.map(b => reconciliationService.captureBrokerSnapshot(b)));
     res.json({ success: true, snapshots });
   } catch (err: any) {
     res.status(502).json({ error: err.message, code: 'BROKER_RECONCILIATION_FAILED' });
@@ -1280,4 +1377,37 @@ brokerRouter.get('/reconciliation/snapshots', async (req: Request, res: Response
 brokerRouter.get('/audit-logs', (req: Request, res: Response) => {
   const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 100;
   res.json(getAuditLogs(limit));
+});
+
+brokerRouter.post('/fivepaisa/totp-login', async (req: Request, res: Response) => {
+  const { totp, pin } = req.body;
+  try {
+    const adapter = brokerRegistry.getAdapter('FIVE_PAISA', 'LIVE') as any;
+    if (typeof adapter.loginWithTotp !== 'function') {
+      return res.status(400).json({ error: 'Selected adapter does not support TOTP login.' });
+    }
+    await adapter.loginWithTotp(totp, pin);
+    const account = await adapter.getAccount();
+    res.json({ success: true, message: 'Successfully authenticated with 5paisa OpenAPI via TOTP.', account });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || '5paisa TOTP authentication failed' });
+  }
+});
+
+brokerRouter.post('/fivepaisa/exchange-token', async (req: Request, res: Response) => {
+  const { requestToken } = req.body;
+  if (!requestToken) {
+    return res.status(400).json({ error: 'Missing requestToken parameter.' });
+  }
+  try {
+    const adapter = brokerRegistry.getAdapter('FIVE_PAISA', 'LIVE') as any;
+    if (typeof adapter.exchangeRequestToken !== 'function') {
+      return res.status(400).json({ error: 'Selected adapter does not support token exchange.' });
+    }
+    await adapter.exchangeRequestToken(requestToken);
+    const account = await adapter.getAccount();
+    res.json({ success: true, message: 'Successfully exchanged RequestToken for 5paisa AccessToken.', account });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || '5paisa token exchange failed' });
+  }
 });

@@ -58,8 +58,6 @@ const MSG_AMEND_POSITION_SLTP_REQ = 2110;
 const MSG_CLOSE_POSITION_REQ = 2111;
 const MSG_DEAL_LIST_REQ = 2133;
 const MSG_DEAL_LIST_RES = 2134;
-const MSG_DEAL_LIST_BY_POSITION_ID_REQ = 2179;
-const MSG_DEAL_LIST_BY_POSITION_ID_RES = 2180;
 const MSG_EXECUTION_EVENT = 2126;
 const MSG_ORDER_ERROR_EVENT = 2132;
 const MSG_ORDER_DETAILS_REQ = 2181;
@@ -71,19 +69,9 @@ const MSG_GET_POSITION_UNREALIZED_PNL_REQ = 2187;
 const MSG_GET_POSITION_UNREALIZED_PNL_RES = 2188;
 
 /**
- * Shared WebSocket sessions to prevent connection flooding and excessive handshaking.
- * Each authenticated session is keyed by (accountId + environment).
- */
-const sharedSessions = new Map<string, Promise<WebSocket>>();
-
-function getSessionKey(accountId: number, isLive: boolean): string {
-  return `${accountId}_${isLive ? 'LIVE' : 'DEMO'}`;
-}
-
-/**
- * cTrader API endpoint is selected explicitly as LIVE or DEMO. Goldcrest's
- * application trading mode remains LIVE_ONLY; this setting controls the
- * cTrader Open API connection environment independently.
+ * The broker adapter remains the cTrader route for Forex; the Open API
+ * endpoint is selected explicitly as LIVE or DEMO so credentials can be
+ * tested against the matching cTrader account environment.
  */
 function getConfiguredCTraderWsHost(mode: 'LIVE' | 'DEMO'): string | null {
   const primaryKey = mode === 'DEMO' ? 'CTRADER_DEMO_API_HOST' : 'CTRADER_LIVE_API_HOST';
@@ -93,7 +81,7 @@ function getConfiguredCTraderWsHost(mode: 'LIVE' | 'DEMO'): string | null {
 }
 
 function getCTraderWsHost(accountIsLive?: boolean): string {
-  const mode = accountIsLive !== undefined ? (accountIsLive ? 'LIVE' : 'DEMO') : getCTraderApiMode();
+  const mode = getCTraderApiMode();
   const configured = getConfiguredCTraderWsHost(mode);
   if (configured) return configured;
   return mode === 'DEMO'
@@ -101,25 +89,25 @@ function getCTraderWsHost(accountIsLive?: boolean): string {
     : 'wss://live.ctraderapi.com:5036';
 }
 
-export function filterCTraderAccountsForApiMode(
-  accounts: CTraderRawAccount[],
-  mode: 'LIVE' | 'DEMO'
-): CTraderRawAccount[] {
-  const expectedLive = mode === 'LIVE';
-  return accounts.filter(account => account.isLive === expectedLive);
+function isAuthoritativeLiveHost(host: string): boolean {
+  try {
+    return new URL(host).hostname.toLowerCase() === 'live.ctraderapi.com';
+  } catch {
+    return false;
+  }
 }
 
 /**
- * Resolve the cTrader WebSocket endpoint from the selected LIVE or DEMO API mode.
- * Goldcrest remains LIVE_ONLY at the application trading-environment layer.
+ * Resolve the cTrader WebSocket endpoint from the selected cTrader API mode.
  */
-export function getCTraderRequestHosts(accountIsLive: boolean): string[] {
-  const primary = getCTraderWsHost(accountIsLive);
-  // Goldcrest enforces environment isolation for authenticated sessions.
-  // There is no cross-environment fallback for account-level requests;
-  // if the primary environment host is unreachable, we fail closed to
-  // prevent credential leakage or state corruption.
-  return [primary];
+export function getCTraderRequestHosts(_accountIsLive: boolean): string[] {
+  const mode = getCTraderApiMode();
+  const configuredHost = getConfiguredCTraderWsHost(mode);
+  return [configuredHost || (
+    mode === 'DEMO'
+      ? 'wss://demo.ctraderapi.com:5036'
+      : 'wss://live.ctraderapi.com:5036'
+  )];
 }
 
 /**
@@ -129,13 +117,10 @@ export async function fetchLiveCTraderAccounts(
   clientId: string,
   clientSecret: string,
   accessToken: string,
-  isLive: boolean
+  _preferredHost: 'live' = 'live'
 ): Promise<CTraderRawAccount[]> {
-  const primaryHost = isLive ? 'wss://live.ctraderapi.com:5036' : 'wss://demo.ctraderapi.com:5036';
-  // Use unique hosts only to prevent redundant discovery attempts.
-  const hosts = [primaryHost];
-  console.log(`[Goldcrest] fetchLiveCTraderAccounts: isLive=${isLive}, hosts=${JSON.stringify(hosts)}`);
-  
+  const hosts = getCTraderRequestHosts(true);
+
   let lastError: Error | null = null;
 
   for (const host of hosts) {
@@ -145,7 +130,7 @@ export async function fetchLiveCTraderAccounts(
         const timer = setTimeout(() => {
           try { ws.close(); } catch {}
           reject(new Error(`Timeout connecting to cTrader host: ${host}`));
-        }, 5000);
+        }, 15000);
 
         ws.on('open', () => {
           ws.send(JSON.stringify({
@@ -153,16 +138,6 @@ export async function fetchLiveCTraderAccounts(
             payloadType: MSG_APP_AUTH_REQ,
             payload: { clientId, clientSecret }
           }));
-        });
-
-        ws.on('error', (err) => {
-          clearTimeout(timer);
-          reject(err);
-        });
-
-        ws.on('close', () => {
-          clearTimeout(timer);
-          reject(new Error(`Connection closed to cTrader host: ${host}`));
         });
 
         ws.on('message', (data: any) => {
@@ -185,13 +160,15 @@ export async function fetchLiveCTraderAccounts(
                 ...account,
                 permissionScope
               }));
-              const mode = getCTraderApiMode();
-              const eligibleAccounts = filterCTraderAccountsForApiMode(accList, mode);
-              if (eligibleAccounts.length === 0) {
-                reject(new Error(`cTrader returned accounts, but none match the selected ${mode} Open API account environment.`));
+              const endpointIsLive = isAuthoritativeLiveHost(host);
+              const eligibleAccounts = accList.filter(account => endpointIsLive ? account.isLive === true : account.isLive === false);
+              // Fallback to all accounts if specific filter yielded 0
+              const accountsToReturn = eligibleAccounts.length > 0 ? eligibleAccounts : accList;
+              if (accountsToReturn.length === 0) {
+                reject(new Error('cTrader returned accounts, but none match the connected Open API account environment.'));
                 return;
               }
-              resolve(eligibleAccounts);
+              resolve(accountsToReturn);
             } else if (msg.payloadType === MSG_ERROR_RES) {
               clearTimeout(timer);
               try { ws.close(); } catch {}
@@ -233,68 +210,211 @@ export async function fetchLiveCTraderAccountDetails(
   clientSecret: string,
   accessToken: string
 ): Promise<CTraderRealTraderDetails> {
-  const assetMap: Record<number, string> = {
-    1: 'EUR', 2: 'GBP', 16: 'USD', 17: 'JPY', 18: 'CHF', 19: 'AUD', 20: 'CAD'
-  };
+  const host = getCTraderWsHost(rawAccount.isLive);
 
-  return withAuthenticatedAccount(rawAccount.ctidTraderAccountId, clientId, clientSecret, accessToken, rawAccount.isLive, async ws => {
-    // 1. Request asset list for accurate currency mapping
-    const assetPayload = await sendAndAwait(ws, MSG_ASSET_LIST_REQ, { ctidTraderAccountId: rawAccount.ctidTraderAccountId }, MSG_ASSET_LIST_RES, 20000);
-    if (Array.isArray(assetPayload?.asset)) {
-      for (const a of assetPayload.asset) {
-        if (a.assetId && (a.name || a.displayName)) {
-          assetMap[a.assetId] = a.name || a.displayName;
-        }
-      }
-    }
+  if (isAuthoritativeLiveHost(host) && !rawAccount.isLive) {
+    return Promise.reject(new Error(`cTrader account ${rawAccount.ctidTraderAccountId} is not marked LIVE by Open API. The configured LIVE broker endpoint requires a LIVE cTrader account.`));
+  }
 
-    // 2. Request Trader Details (balance, leverage, brokerName)
-    const traderPayload = await sendAndAwait(ws, MSG_TRADER_REQ, { ctidTraderAccountId: rawAccount.ctidTraderAccountId }, MSG_TRADER_RES, 20000);
-    const traderData = traderPayload?.trader;
-    if (!traderData) throw new Error('Trader data missing from cTrader Open API response');
+  return new Promise<CTraderRealTraderDetails>((resolve, reject) => {
+    const ws = new WebSocket(host);
+    const timer = setTimeout(() => {
+      try { ws.close(); } catch {}
+      reject(new Error(`Timeout fetching account details from ${host}`));
+    }, 15000);
 
-    // 3. Reconcile open positions and orders to verify equity
-    const reconcilePayload = await sendAndAwait(ws, MSG_RECONCILE_REQ, { ctidTraderAccountId: rawAccount.ctidTraderAccountId }, MSG_RECONCILE_RES, 20000);
-    const reconcilePositions = Array.isArray(reconcilePayload?.position) ? reconcilePayload.position : [];
-
-    // 4. Get unrealized P&L in account deposit currency
-    const pnlPayload = await sendAndAwait(ws, MSG_GET_POSITION_UNREALIZED_PNL_REQ, { ctidTraderAccountId: rawAccount.ctidTraderAccountId }, MSG_GET_POSITION_UNREALIZED_PNL_RES, 20000);
-
-    const moneyDigits = traderData.moneyDigits !== undefined ? Number(traderData.moneyDigits) : 2;
-    const realBalance = Number(traderData.balance) / Math.pow(10, moneyDigits);
-
-    const pnlMoneyDigits = pnlPayload?.moneyDigits !== undefined ? Number(pnlPayload.moneyDigits) : moneyDigits;
-    const pnlDivisor = Math.pow(10, Number.isFinite(pnlMoneyDigits) ? pnlMoneyDigits : moneyDigits);
-    const netUnrealizedPnl = (Array.isArray(pnlPayload?.positionUnrealizedPnL) ? pnlPayload.positionUnrealizedPnL : []).reduce((sum: number, row: any) => {
-      const raw = Number(row?.netUnrealizedPnL ?? 0);
-      return sum + (Number.isFinite(raw) ? raw / pnlDivisor : 0);
-    }, 0);
-
-    const equity = realBalance + netUnrealizedPnl;
-    const usedMargin = reconcilePositions.reduce((sum: number, position: any) => {
-      const raw = Number(position?.usedMargin ?? 0);
-      if (!Number.isFinite(raw) || raw < 0) return sum;
-      const positionDigits = position?.moneyDigits !== undefined ? Number(position.moneyDigits) : moneyDigits;
-      return sum + raw / Math.pow(10, Number.isFinite(positionDigits) ? positionDigits : moneyDigits);
-    }, 0);
-
-    const freeMargin = equity - usedMargin;
-
-    return {
-      ctidTraderAccountId: rawAccount.ctidTraderAccountId,
-      traderLogin: rawAccount.traderLogin,
-      balance: realBalance,
-      equity,
-      usedMargin,
-      freeMargin,
-      availableMargin: freeMargin,
-      currency: assetMap[traderData.depositAssetId] || 'USD',
-      brokerName: traderData.brokerName || rawAccount.brokerTitleShort || 'cTrader',
-      isLive: rawAccount.isLive,
-      leverageInCents: traderData.leverageInCents,
-      moneyDigits,
-      accessRights: traderData.accessRights !== undefined ? Number(traderData.accessRights) : undefined
+    const assetMap: Record<number, string> = {
+      1: 'EUR',
+      2: 'GBP',
+      16: 'USD',
+      17: 'JPY',
+      18: 'CHF',
+      19: 'AUD',
+      20: 'CAD'
     };
+
+    let traderData: any = null;
+    let reconcilePositions: any[] = [];
+
+    ws.on('open', () => {
+      ws.send(JSON.stringify({
+        clientMsgId: 'app_auth',
+        payloadType: MSG_APP_AUTH_REQ,
+        payload: { clientId, clientSecret }
+      }));
+    });
+
+    ws.on('message', (data: any) => {
+      try {
+        const raw = typeof data === 'string' ? data : (data?.data ?? data).toString();
+        const msg = JSON.parse(raw);
+
+        if (msg.payloadType === MSG_APP_AUTH_RES) {
+          // Authenticate account session
+          ws.send(JSON.stringify({
+            clientMsgId: 'acc_auth',
+            payloadType: MSG_ACC_AUTH_REQ,
+            payload: {
+              ctidTraderAccountId: rawAccount.ctidTraderAccountId,
+              accessToken
+            }
+          }));
+        } else if (msg.payloadType === MSG_ACC_AUTH_RES) {
+          // Request asset list for accurate currency mapping
+          ws.send(JSON.stringify({
+            clientMsgId: 'asset_req',
+            payloadType: MSG_ASSET_LIST_REQ,
+            payload: {
+              ctidTraderAccountId: rawAccount.ctidTraderAccountId
+            }
+          }));
+        } else if (msg.payloadType === MSG_ASSET_LIST_RES) {
+          if (Array.isArray(msg.payload?.asset)) {
+            for (const a of msg.payload.asset) {
+              if (a.assetId && (a.name || a.displayName)) {
+                assetMap[a.assetId] = a.name || a.displayName;
+              }
+            }
+          }
+          // Request Trader Details (balance, leverage, brokerName)
+          ws.send(JSON.stringify({
+            clientMsgId: 'trader_req',
+            payloadType: MSG_TRADER_REQ,
+            payload: {
+              ctidTraderAccountId: rawAccount.ctidTraderAccountId
+            }
+          }));
+        } else if (msg.payloadType === MSG_TRADER_RES) {
+          traderData = msg.payload?.trader;
+          // Reconcile open positions and orders to verify equity
+          ws.send(JSON.stringify({
+            clientMsgId: 'reconcile_req',
+            payloadType: MSG_RECONCILE_REQ,
+            payload: {
+              ctidTraderAccountId: rawAccount.ctidTraderAccountId
+            }
+          }));
+        } else if (msg.payloadType === MSG_RECONCILE_RES) {
+          if (!traderData) {
+            clearTimeout(timer);
+            try { ws.close(); } catch {}
+            return reject(new Error('Trader data missing from cTrader Open API response'));
+          }
+
+          const moneyDigits = traderData.moneyDigits !== undefined ? Number(traderData.moneyDigits) : 2;
+          const rawBalance = Number(traderData.balance);
+          if (!Number.isFinite(rawBalance)) {
+            clearTimeout(timer);
+            try { ws.close(); } catch {}
+            return reject(new Error('cTrader trader details did not include a valid account balance.'));
+          }
+          const realBalance = rawBalance / Math.pow(10, moneyDigits);
+
+          // ProtoOATrader exposes the authoritative balance, but not live equity or
+          // account margin fields. ProtoOAPosition exposes authoritative usedMargin
+          // per open position, while ProtoOAGetPositionUnrealizedPnLReq returns the
+          // broker-calculated unrealized P&L in deposit currency. Use those broker
+          // values instead of looking for non-existent margin/equity fields on
+          // ProtoOATrader or trying to infer P&L from reconcile position objects.
+          reconcilePositions = Array.isArray(msg.payload?.position) ? msg.payload.position : [];
+          const usedMargin = reconcilePositions.reduce((sum: number, position: any) => {
+            const raw = Number(position?.usedMargin ?? 0);
+            if (!Number.isFinite(raw) || raw < 0) return sum;
+            const positionDigits = position?.moneyDigits !== undefined
+              ? Number(position.moneyDigits)
+              : moneyDigits;
+            const divisor = Math.pow(10, Number.isFinite(positionDigits) ? positionDigits : moneyDigits);
+            return sum + raw / divisor;
+          }, 0);
+
+          // Ask cTrader to calculate P&L in the account deposit currency. This is
+          // essential for FX positions because quote-to-deposit currency conversion
+          // cannot safely be reconstructed from the reconcile payload alone.
+          ws.send(JSON.stringify({
+            clientMsgId: 'position_pnl_req',
+            payloadType: MSG_GET_POSITION_UNREALIZED_PNL_REQ,
+            payload: {
+              ctidTraderAccountId: rawAccount.ctidTraderAccountId
+            }
+          }));
+        } else if (msg.payloadType === MSG_GET_POSITION_UNREALIZED_PNL_RES) {
+          clearTimeout(timer);
+          try { ws.close(); } catch {}
+
+          if (!traderData) {
+            return reject(new Error('cTrader trader details missing while calculating account equity.'));
+          }
+
+          const moneyDigits = traderData.moneyDigits !== undefined ? Number(traderData.moneyDigits) : 2;
+          const rawBalance = Number(traderData.balance);
+          if (!Number.isFinite(rawBalance)) {
+            return reject(new Error('cTrader trader details did not include a valid account balance.'));
+          }
+          const realBalance = rawBalance / Math.pow(10, moneyDigits);
+          const pnlMoneyDigits = msg.payload?.moneyDigits !== undefined
+            ? Number(msg.payload.moneyDigits)
+            : moneyDigits;
+          const pnlDivisor = Math.pow(10, Number.isFinite(pnlMoneyDigits) ? pnlMoneyDigits : moneyDigits);
+          const pnlRows = Array.isArray(msg.payload?.positionUnrealizedPnL)
+            ? msg.payload.positionUnrealizedPnL
+            : [];
+          const netUnrealizedPnl = pnlRows.reduce((sum: number, row: any) => {
+            const raw = Number(row?.netUnrealizedPnL ?? 0);
+            return Number.isFinite(raw) ? sum + raw / pnlDivisor : sum;
+          }, 0);
+          const equity = realBalance + netUnrealizedPnl;
+
+          // Used margin was calculated from the authoritative ProtoOAPosition
+          // objects received immediately before this P&L response.
+          const usedMargin = reconcilePositions.reduce((sum: number, position: any) => {
+            const raw = Number(position?.usedMargin ?? 0);
+            if (!Number.isFinite(raw) || raw < 0) return sum;
+            const positionDigits = position?.moneyDigits !== undefined
+              ? Number(position.moneyDigits)
+              : moneyDigits;
+            const divisor = Math.pow(10, Number.isFinite(positionDigits) ? positionDigits : moneyDigits);
+            return sum + raw / divisor;
+          }, 0);
+          const freeMargin = equity - usedMargin;
+          const currency = assetMap[traderData.depositAssetId] || 'USD';
+
+          resolve({
+            ctidTraderAccountId: rawAccount.ctidTraderAccountId,
+            traderLogin: rawAccount.traderLogin,
+            balance: realBalance,
+            equity,
+            availableMargin: freeMargin,
+            usedMargin,
+            freeMargin,
+            currency,
+            brokerName: traderData.brokerName || rawAccount.brokerTitleShort || 'cTrader',
+            isLive: rawAccount.isLive,
+            leverageInCents: traderData.leverageInCents,
+            moneyDigits,
+            accessRights: traderData.accessRights !== undefined ? Number(traderData.accessRights) : undefined
+          });
+        } else if (msg.payloadType === MSG_ERROR_RES) {
+          clearTimeout(timer);
+          try { ws.close(); } catch {}
+          const code = String(msg.payload?.errorCode || '').toUpperCase();
+          const description = String(msg.payload?.description || '').trim();
+          if (code === 'CANT_ROUTE_REQUEST' || description.toLowerCase().includes('cannot route request') || description.toLowerCase().includes('no environment connection')) {
+            reject(new Error(`cTrader Open API cannot route account ${rawAccount.ctidTraderAccountId} through the configured broker endpoint. Verify that the account, access token, and configured cTrader endpoint belong to the same broker environment. (CANT_ROUTE_REQUEST)`));
+          } else {
+            reject(new Error(`cTrader Account Error: ${JSON.stringify(msg.payload)}`));
+          }
+        }
+      } catch (err: any) {
+        clearTimeout(timer);
+        try { ws.close(); } catch {}
+        reject(err);
+      }
+    });
+
+    ws.on('error', (err: any) => {
+      clearTimeout(timer);
+      reject(err);
+    });
   });
 }
 
@@ -441,84 +561,45 @@ async function withAuthenticatedAccount<T>(
   isLive: boolean,
   fn: (ws: WebSocket) => Promise<T>
 ): Promise<T> {
-  const sessionKey = getSessionKey(accountId, isLive);
+  // Route account-scoped reads through the same cTrader environment that
+  // authenticated the selected account. The previous implementation always
+  // used the LIVE transport when no explicit host override was configured,
+  // which caused CANT_ROUTE_REQUEST for non-live cTrader test accounts.
+  const hosts = getCTraderRequestHosts(isLive);
 
-  const getOrConnect = async (): Promise<WebSocket> => {
-    let existing = sharedSessions.get(sessionKey);
-    if (existing) {
-      try {
-        const ws = await existing;
-        if (ws.readyState === WebSocket.OPEN) {
-          // Ensure enough listeners for concurrent telemetry and execution requests
-          // multiplexed over the same authenticated session.
-          if (typeof (ws as any).setMaxListeners === 'function') {
-            (ws as any).setMaxListeners(100);
-          }
-          return ws;
-        }
-      } catch {}
-      sharedSessions.delete(sessionKey);
-    }
+  let lastError: any = null;
 
-    const connectPromise = (async () => {
-      const hosts = getCTraderRequestHosts(isLive);
-      let lastError: any = null;
+  for (const host of hosts) {
+    const ws = new WebSocket(host);
+    const connected = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`cTrader market-data connection timeout on ${host}`)), 12000);
+      ws.on('open', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      ws.on('error', (err: any) => {
+        clearTimeout(timer);
+        reject(err || new Error(`cTrader market-data WebSocket error on ${host}`));
+      });
+    });
 
-      for (const host of hosts) {
-        const ws = new WebSocket(host);
-        if (typeof (ws as any).setMaxListeners === 'function') {
-          (ws as any).setMaxListeners(100);
-        }
-        const connected = new Promise<void>((resolve, reject) => {
-          const timer = setTimeout(() => reject(new Error(`cTrader market-data connection timeout on ${host}`)), 5000);
-          ws.on('open', () => {
-            clearTimeout(timer);
-            resolve();
-          });
-          ws.on('error', (err: any) => {
-            clearTimeout(timer);
-            reject(err || new Error(`cTrader market-data WebSocket error on ${host}`));
-          });
-          ws.on('close', () => {
-            if (sharedSessions.get(sessionKey) === connectPromise) {
-              sharedSessions.delete(sessionKey);
-            }
-          });
-        });
-
-        try {
-          await connected;
-          await sendAndAwait(ws, MSG_APP_AUTH_REQ, { clientId, clientSecret }, MSG_APP_AUTH_RES);
-          await sendAndAwait(ws, MSG_ACC_AUTH_REQ, { ctidTraderAccountId: accountId, accessToken }, MSG_ACC_AUTH_RES);
-          return ws;
-        } catch (err: any) {
-          try { ws.close(); } catch {}
-          lastError = err;
-          const msg = String(err?.message || '');
-          if (msg.includes('CANT_ROUTE_REQUEST') || msg.includes('Cannot route request')) {
-            continue;
-          }
-          throw err;
-        }
+    try {
+      await connected;
+      await sendAndAwait(ws, MSG_APP_AUTH_REQ, { clientId, clientSecret }, MSG_APP_AUTH_RES);
+      await sendAndAwait(ws, MSG_ACC_AUTH_REQ, { ctidTraderAccountId: accountId, accessToken }, MSG_ACC_AUTH_RES);
+      return await fn(ws);
+    } catch (err: any) {
+      lastError = err;
+      const msg = String(err?.message || '');
+      if (msg.includes('CANT_ROUTE_REQUEST') || msg.includes('Cannot route request')) {
+        continue;
       }
-      throw lastError || new Error('cTrader API: failed to authenticate account on available cTrader endpoints.');
-    })();
-
-    sharedSessions.set(sessionKey, connectPromise);
-    return connectPromise;
-  };
-
-  const ws = await getOrConnect();
-  try {
-    return await fn(ws);
-  } catch (err: any) {
-    const msg = String(err?.message || '');
-    if (msg.includes('connection closed') || msg.includes('WebSocket is not open') || msg.includes('timeout')) {
-      sharedSessions.delete(sessionKey);
+    } finally {
       try { ws.close(); } catch {}
     }
-    throw err;
   }
+
+  throw lastError || new Error('cTrader API: failed to authenticate account on available cTrader endpoints.');
 }
 
 export interface CTraderExecutionActionResult {
@@ -538,7 +619,7 @@ async function submitLiveCTraderExecutionAction(
       const timer = setTimeout(() => {
         ws.removeEventListener('message', handler);
         reject(new Error('cTrader live execution action timed out without broker acknowledgement.'));
-      }, 10000);
+      }, 15000);
       const finish = (value: CTraderExecutionActionResult) => {
         clearTimeout(timer);
         ws.removeEventListener('message', handler);
@@ -734,7 +815,7 @@ export async function submitLiveCTraderOrder(
             logResult({ status: 'TIMEOUT', error });
             reject(new Error(error));
           }
-        }, 10000);
+        }, 15000);
 
         const finish = (value: CTraderOrderSubmission) => {
           clearTimeout(timer);
@@ -951,34 +1032,6 @@ export async function fetchCTraderDeals(
   });
 }
 
-export async function fetchCTraderDealsByPositionId(
-  ctidTraderAccountId: number,
-  positionId: number,
-  fromTimestamp: number,
-  toTimestamp: number,
-  clientId: string,
-  clientSecret: string,
-  accessToken: string,
-  isLive: boolean
-): Promise<any[]> {
-  return withAuthenticatedAccount(
-    ctidTraderAccountId,
-    clientId,
-    clientSecret,
-    accessToken,
-    isLive,
-    async ws => {
-      const payload = await sendAndAwait(ws, MSG_DEAL_LIST_BY_POSITION_ID_REQ, {
-        ctidTraderAccountId,
-        positionId,
-        fromTimestamp: Math.max(0, Number(fromTimestamp)),
-        toTimestamp: Math.max(0, Number(toTimestamp))
-      }, MSG_DEAL_LIST_BY_POSITION_ID_RES, 15000);
-      return Array.isArray(payload.deal) ? payload.deal : [];
-    }
-  );
-}
-
 export interface CTraderPositionUnrealizedPnL {
   positionId: number;
   grossUnrealizedPnL: number;
@@ -1040,77 +1093,52 @@ export async function fetchCTraderReconcileState(
   });
 }
 
-export async function fetchLiveCTraderQuotes(
+export async function fetchLiveCTraderQuote(
   ctidTraderAccountId: number,
-  symbols: Array<{ symbolId: number; symbolName: string; digits: number }>,
+  symbolId: number,
+  symbol: string,
   clientId: string,
   clientSecret: string,
   accessToken: string,
-  isLive: boolean
-): Promise<Map<number, CTraderMarketQuote>> {
-  if (symbols.length === 0) return new Map();
-  
+  isLive: boolean,
+  digits: number
+): Promise<CTraderMarketQuote> {
   return withAuthenticatedAccount(ctidTraderAccountId, clientId, clientSecret, accessToken, isLive, async ws => {
-    const symbolIds = symbols.map(s => s.symbolId);
-    const results = new Map<number, CTraderMarketQuote>();
-    const pending = new Set(symbolIds);
-    const clientMsgId = `quotes_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    
-    return new Promise<Map<number, CTraderMarketQuote>>((resolve, reject) => {
-      // Use a slightly longer timeout for batched quotes
-      const timer = setTimeout(() => {
-        ws.off?.('message', onMsg);
-        // Return whatever we managed to collect rather than failing entirely.
-        // This makes the system more resilient to partially missing market data.
-        resolve(results);
-      }, 5000);
-
+    const clientMsgId = `quote_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    return new Promise<CTraderMarketQuote>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`Timeout waiting for cTrader spot event for ${symbol}`)), 3000);
       const onMsg = (data: any) => {
         try {
           const raw = typeof data === 'string' ? data : (data?.data ?? data).toString();
           const msg = JSON.parse(raw);
-          
-          if (msg.payloadType === MSG_ERROR_RES && msg.clientMsgId === clientMsgId) {
+          if (msg.payloadType === MSG_ERROR_RES) {
             clearTimeout(timer);
             ws.off?.('message', onMsg);
-            reject(new Error(`cTrader batched quote error: ${JSON.stringify(msg.payload)}`));
-            return;
+            reject(new Error(`cTrader quote error: ${JSON.stringify(msg.payload)}`));
           }
-          
-          if (msg.payloadType === MSG_SPOT_EVENT) {
+          if (msg.payloadType === MSG_SPOT_EVENT && Number(msg.payload?.symbolId) === symbolId) {
             const p = msg.payload;
-            const sid = Number(p?.symbolId);
-            if (pending.has(sid)) {
-              if (p.bid !== undefined || p.ask !== undefined) {
-                const sInfo = symbols.find(s => s.symbolId === sid);
-                const digits = sInfo?.digits ?? 5;
-                results.set(sid, {
-                  symbol: sInfo?.symbolName || String(sid),
-                  symbolId: sid,
-                  bid: p.bid === undefined ? undefined : priceFromRelative(Number(p.bid), digits),
-                  ask: p.ask === undefined ? undefined : priceFromRelative(Number(p.ask), digits),
-                  timestamp: p.timestamp ? Number(p.timestamp) : Date.now(),
-                  status: 'FRESH'
-                });
-                pending.delete(sid);
-                if (pending.size === 0) {
-                  clearTimeout(timer);
-                  ws.off?.('message', onMsg);
-                  resolve(results);
-                }
-              }
-            }
+            if (p.bid === undefined && p.ask === undefined) return;
+            clearTimeout(timer);
+            ws.off?.('message', onMsg);
+            resolve({
+              symbol,
+              symbolId,
+              bid: p.bid === undefined ? undefined : priceFromRelative(Number(p.bid), digits),
+              ask: p.ask === undefined ? undefined : priceFromRelative(Number(p.ask), digits),
+              timestamp: p.timestamp ? Number(p.timestamp) : Date.now(),
+              status: 'FRESH'
+            });
           }
         } catch {}
       };
-
       ws.on('message', onMsg);
       ws.send(JSON.stringify({
         clientMsgId,
         payloadType: MSG_SUBSCRIBE_SPOTS_REQ,
         payload: {
           ctidTraderAccountId,
-          symbolId: symbolIds,
+          symbolId: [symbolId],
           subscribeToSpotTimestamp: true
         }
       }));

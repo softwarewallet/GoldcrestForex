@@ -5,8 +5,6 @@ import {
   BrokerAccountInfo,
   BrokerInstrument,
   BrokerStatus,
-  NormalizedPositionClose,
-  OrderSide,
   BrokerType,
   ConnectionTestResult,
   NormalizedOrder,
@@ -25,13 +23,12 @@ import {
   fetchLiveCTraderAccounts,
   fetchLiveCTraderAccountDetails,
   fetchCTraderSymbols,
-  fetchLiveCTraderQuotes,
+  fetchLiveCTraderQuote,
   submitLiveCTraderOrder,
   fetchCTraderTrendbars,
   fetchCTraderReconcileState,
   fetchCTraderPositionUnrealizedPnL,
   fetchCTraderDeals,
-  fetchCTraderDealsByPositionId,
   fetchCTraderOrderDetails,
   fetchCTraderAssets,
   fetchCTraderConversionSymbols,
@@ -40,17 +37,6 @@ import {
   closeLiveCTraderPosition,
   CTraderRawAccount
 } from './cTraderApiClient';
-
-export function resolveLivePositionPrice(
-  side: 'BUY' | 'SELL',
-  quote: { status: NormalizedQuote['status']; bid?: number; ask?: number }
-): { currentPrice: number; currentPriceStatus: 'LIVE' | 'UNAVAILABLE' } {
-  const currentPrice = side === 'BUY' ? Number(quote.bid) : Number(quote.ask);
-  if (quote.status !== 'FRESH' || !(currentPrice > 0) || !Number.isFinite(currentPrice)) {
-    return { currentPrice: 0, currentPriceStatus: 'UNAVAILABLE' };
-  }
-  return { currentPrice, currentPriceStatus: 'LIVE' };
-}
 
 export interface CTraderConfig {
   clientId?: string;
@@ -80,24 +66,11 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
   // Re-fetching them for every candle/quote request created dozens of extra
   // authenticated WebSocket sessions during Auto Live preparation.
   private rawAccountCache: { expiresAt: number; account: CTraderRawAccount } | null = null;
-  private ordersCache: { expiresAt: number; orders: NormalizedOrder[] } | null = null;
   private symbolCache: { expiresAt: number; accountKey: string; symbols: Awaited<ReturnType<typeof fetchCTraderSymbols>> } | null = null;
-  private positionsCache: { expiresAt: number; positions: NormalizedPosition[] } | null = null;
-  private instrumentsCache: { expiresAt: number; instruments: BrokerInstrument[] } | null = null;
-  private quoteCache = new Map<string, { expiresAt: number; quote: NormalizedQuote }>();
-  private candleCache = new Map<string, { expiresAt: number; candles: any[] }>();
-  private dailyRealizedPnLCache: { expiresAt: number; value: number } | null = null;
   private static readonly RAW_ACCOUNT_CACHE_TTL_MS = 60 * 1000;
   private static readonly SYMBOL_CACHE_TTL_MS = 5 * 60 * 1000;
   private static readonly ACCOUNT_DATA_CACHE_TTL_MS = 10 * 1000;
-  private static readonly POSITIONS_CACHE_TTL_MS = 3 * 1000;
-  private static readonly INSTRUMENTS_CACHE_TTL_MS = 30 * 60 * 1000;
-  private static readonly QUOTE_CACHE_TTL_MS = 2500;
-  private static readonly CANDLE_CACHE_TTL_MS = 60 * 1000;
-  private static readonly DAILY_REALIZED_PNL_CACHE_TTL_MS = 15 * 1000;
   private accountFetchInFlight: Promise<BrokerAccountInfo> | null = null;
-  private rawAccountDiscoveryInFlight: Promise<CTraderRawAccount[]> | null = null;
-  private symbolFetchInFlight: Map<number, Promise<Awaited<ReturnType<typeof fetchCTraderSymbols>>>> = new Map();
   private lastKnownApiMode: string | null = null;
 
   /**
@@ -124,17 +97,9 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
   public clearCache(): void {
     this.accountData = null;
     this.rawAccountCache = null;
-    this.rawAccountDiscoveryInFlight = null;
-    this.symbolFetchInFlight.clear();
-    this.ordersCache = null;
     this.symbolCache = null;
     this.conversionAssetCache = null;
     this.conversionChainCache.clear();
-    this.positionsCache = null;
-    this.instrumentsCache = null;
-    this.quoteCache.clear();
-    this.candleCache.clear();
-    this.dailyRealizedPnLCache = null;
   }
 
   /**
@@ -208,15 +173,10 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
       const account = await this.getAccount();
       const latency = Date.now() - start;
 
-      const apiMode = this.environment === 'LIVE' ? 'LIVE' : getCTraderApiMode();
-      const apiEndpoint = this.environment === 'LIVE' ? 'wss://live.ctraderapi.com:5036' : (apiMode === 'DEMO' ? 'wss://demo.ctraderapi.com:5036' : 'wss://live.ctraderapi.com:5036');
-
       const res: ConnectionTestResult = {
         broker: 'CTRADER',
         environment: this.environment,
         connected: true,
-        apiMode,
-        apiEndpoint,
         account: account.accountId,
         accountType: account.accountType,
         balance: account.balance,
@@ -238,17 +198,12 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
       this.status = 'AUTHENTICATION_FAILED';
       this.lastError = err.message;
 
-      const apiMode = this.environment === 'LIVE' ? 'LIVE' : getCTraderApiMode();
-      const apiEndpoint = this.environment === 'LIVE' ? 'wss://live.ctraderapi.com:5036' : (apiMode === 'DEMO' ? 'wss://demo.ctraderapi.com:5036' : 'wss://live.ctraderapi.com:5036');
-
       const res: ConnectionTestResult = {
         broker: 'CTRADER',
         environment: this.environment,
         connected: false,
-        apiMode,
-        apiEndpoint,
         account: maskIdentifier(this.config.accountId),
-        accountType: apiMode,
+        accountType: 'LIVE',
         error: err.message,
         timestamp: Date.now(),
         latency: Date.now() - start
@@ -287,7 +242,7 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
         clientId,
         clientSecret,
         accessToken,
-        this.isLive
+        'live'
       );
 
       if (!liveAccounts || liveAccounts.length === 0) {
@@ -311,7 +266,7 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
 
           results.push({
             accountId: String(details.traderLogin),
-            accountType: details.isLive ? 'LIVE' : 'DEMO',
+            accountType: 'LIVE',
             balance: details.balance,
             equity: details.equity,
             availableMargin: details.availableMargin,
@@ -391,20 +346,57 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
 
     this.accountFetchInFlight = (async () => {
       try {
-        const matched = await this.resolveRawAccount();
-        const { clientId, clientSecret, accessToken } = this.config;
+        const liveAccounts = await fetchLiveCTraderAccounts(
+          clientId,
+          clientSecret,
+          accessToken,
+          'live'
+        );
+
+        if (!liveAccounts || liveAccounts.length === 0) {
+          throw new BrokerError(
+            'ACCOUNT_NOT_FOUND',
+            'No cTrader accounts found for authenticated credentials.',
+            'CTRADER',
+            this.environment
+          );
+        }
+
+        let matched: CTraderRawAccount | undefined;
+        if (targetId) {
+          matched = liveAccounts.find(
+            a => String(a.traderLogin) === String(targetId) || String(a.ctidTraderAccountId) === String(targetId)
+          );
+          if (!matched) {
+            throw new BrokerError(
+              'ACCOUNT_NOT_FOUND',
+              `Configured cTrader account ID ${targetId} was not found among authenticated accounts (${liveAccounts.map(a => a.traderLogin).join(', ')}).`,
+              'CTRADER',
+              this.environment
+            );
+          }
+        } else if (liveAccounts.length === 1) {
+          matched = liveAccounts[0];
+        } else {
+          throw new BrokerError(
+            'ACCOUNT_NOT_FOUND',
+            'Multiple cTrader accounts exist. Please select a specific account ID in configuration.',
+            'CTRADER',
+            this.environment
+          );
+        }
 
         const details = await fetchLiveCTraderAccountDetails(
           matched,
-          clientId!,
-          clientSecret!,
-          accessToken!
+          clientId,
+          clientSecret,
+          accessToken
         );
 
         this.status = 'CONNECTED';
         const authoritativeAccount: BrokerAccountInfo = {
           accountId: String(details.traderLogin),
-          accountType: details.isLive ? 'LIVE' : 'DEMO',
+          accountType: 'LIVE',
           balance: details.balance,
           equity: details.equity,
           availableMargin: details.availableMargin,
@@ -423,31 +415,6 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
         this.accountData = authoritativeAccount;
         return authoritativeAccount;
       } catch (err: any) {
-        const isTimeoutOrConnError = err?.message?.includes('Timeout') || err?.message?.includes('connect') || err?.message?.includes('unreachable');
-        if (isTimeoutOrConnError) {
-          console.warn(`[Goldcrest] WebSocket connection failed or timed out. Initiating secure sandbox fallback mode: ${err?.message || String(err)}`);
-          const fallbackAccount: BrokerAccountInfo = {
-            accountId: targetId || '10114397',
-            accountType: 'DEMO',
-            balance: 3458.89,
-            equity: 3458.72,
-            availableMargin: 3456.46,
-            usedMargin: 2.26,
-            freeMargin: 3456.46,
-            currency: 'USD',
-            broker: 'CTRADER',
-            environment: this.environment,
-            connectionStatus: 'CONNECTED',
-            server: 'cTrader-Sandbox-Fallback',
-            permissions: ['READ', 'TRADE'],
-            lastUpdate: Date.now(),
-            isLiveAccount: false
-          };
-          this.status = 'CONNECTED';
-          this.accountData = fallbackAccount;
-          return fallbackAccount;
-        }
-
         if (err instanceof BrokerError) throw err;
         throw new BrokerError(
           'ACCOUNT_DATA_UNAVAILABLE',
@@ -611,60 +578,45 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
       }
     }
 
-    if (this.rawAccountDiscoveryInFlight) {
-      const accounts = await this.rawAccountDiscoveryInFlight;
-      return this.matchDiscoveryResult(accounts, accountId);
-    }
-
-    this.rawAccountDiscoveryInFlight = fetchLiveCTraderAccounts(
+    const liveAccounts = await fetchLiveCTraderAccounts(
       clientId!,
       clientSecret!,
       accessToken!,
-      this.isLive
+      'live'
     );
-
-    try {
-      const liveAccounts = await this.rawAccountDiscoveryInFlight;
-      const matched = this.matchDiscoveryResult(liveAccounts, accountId);
-
-      this.rawAccountCache = {
-        account: matched,
-        expiresAt: Date.now() + CTraderBrokerAdapter.RAW_ACCOUNT_CACHE_TTL_MS
-      };
-      return matched;
-    } finally {
-      this.rawAccountDiscoveryInFlight = null;
-    }
-  }
-
-  private matchDiscoveryResult(liveAccounts: CTraderRawAccount[], accountId?: string | number): CTraderRawAccount {
     if (!liveAccounts || liveAccounts.length === 0) {
-      throw new BrokerError('ACCOUNT_NOT_FOUND', 'No cTrader accounts found for authenticated credentials.', 'CTRADER', this.environment);
+      throw new BrokerError('ACCOUNT_NOT_FOUND', 'No cTrader accounts found.', 'CTRADER', this.environment);
     }
 
+    let matched: CTraderRawAccount | undefined;
     if (accountId) {
-      const matched = liveAccounts.find(
+      matched = liveAccounts.find(
         a => String(a.traderLogin) === String(accountId) || String(a.ctidTraderAccountId) === String(accountId)
       );
       if (!matched) {
         throw new BrokerError(
           'ACCOUNT_NOT_FOUND',
-          `Configured cTrader account ID ${accountId} was not found among authenticated accounts (${liveAccounts.map(a => a.traderLogin).join(', ')}).`,
+          `Configured cTrader LIVE account ID ${accountId} was not found among authenticated accounts.`,
           'CTRADER',
           this.environment
         );
       }
-      return matched;
     } else if (liveAccounts.length === 1) {
-      return liveAccounts[0];
+      matched = liveAccounts[0];
     } else {
       throw new BrokerError(
         'ACCOUNT_NOT_FOUND',
-        'Multiple cTrader accounts exist. Please select a specific account ID in configuration.',
+        'Multiple cTrader accounts exist. A specific LIVE account ID is required.',
         'CTRADER',
         this.environment
       );
     }
+
+    this.rawAccountCache = {
+      account: matched,
+      expiresAt: Date.now() + CTraderBrokerAdapter.RAW_ACCOUNT_CACHE_TTL_MS
+    };
+    return matched;
   }
 
   private async getCachedCTraderSymbols(raw: CTraderRawAccount): Promise<Awaited<ReturnType<typeof fetchCTraderSymbols>>> {
@@ -674,38 +626,22 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
       return cached.symbols;
     }
 
-    const accountId = raw.ctidTraderAccountId;
-    let inFlight = this.symbolFetchInFlight.get(accountId);
-    if (inFlight) return inFlight;
-
-    inFlight = fetchCTraderSymbols(
-      accountId,
+    const symbols = await fetchCTraderSymbols(
+      raw.ctidTraderAccountId,
       this.config.clientId!,
       this.config.clientSecret!,
       this.config.accessToken!,
       raw.isLive
     );
-    this.symbolFetchInFlight.set(accountId, inFlight);
-
-    try {
-      const symbols = await inFlight;
-      this.symbolCache = {
-        accountKey,
-        symbols,
-        expiresAt: Date.now() + CTraderBrokerAdapter.SYMBOL_CACHE_TTL_MS
-      };
-      return symbols;
-    } finally {
-      this.symbolFetchInFlight.delete(accountId);
-    }
+    this.symbolCache = {
+      accountKey,
+      symbols,
+      expiresAt: Date.now() + CTraderBrokerAdapter.SYMBOL_CACHE_TTL_MS
+    };
+    return symbols;
   }
 
-  async getPositions(forceRefresh?: boolean): Promise<NormalizedPosition[]> {
-    const now = Date.now();
-    if (!forceRefresh && this.positionsCache && now < this.positionsCache.expiresAt) {
-      return this.positionsCache.positions;
-    }
-
+  async getPositions(): Promise<NormalizedPosition[]> {
     const raw = await this.resolveRawAccount();
     const state = await fetchCTraderReconcileState(
       raw.ctidTraderAccountId,
@@ -761,29 +697,28 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
 
     // Current price is the executable side of a fresh broker quote:
     // BUY positions close at bid, SELL positions close at ask.
-    const quoteMap = await fetchLiveCTraderQuotes(
-      raw.ctidTraderAccountId,
-      positions.map(p => ({
-        symbolId: Number(p.symbolInfo.symbolId),
-        symbolName: p.symbolInfo.symbolName,
-        digits: Number(p.symbolInfo.digits || 5)
-      })),
-      this.config.clientId!,
-      this.config.clientSecret!,
-      this.config.accessToken!,
-      raw.isLive
-    );
-
-    const enriched = positions.map(position => {
-      const quote = quoteMap.get(Number(position.symbolInfo.symbolId));
-      if (quote) {
-        const livePrice = resolveLivePositionPrice(position.side, quote);
-        return { position, ...livePrice };
+    const enriched = await Promise.all(positions.map(async position => {
+      try {
+        const quote = await fetchLiveCTraderQuote(
+          raw.ctidTraderAccountId,
+          Number(position.symbolInfo.symbolId),
+          position.symbolInfo.symbolName,
+          this.config.clientId!,
+          this.config.clientSecret!,
+          this.config.accessToken!,
+          raw.isLive,
+          Number(position.symbolInfo.digits || 5)
+        );
+        return {
+          position,
+          currentPrice: position.side === 'BUY' ? Number(quote.bid || 0) : Number(quote.ask || 0)
+        };
+      } catch {
+        return { position, currentPrice: position.entryPrice };
       }
-      return { position, currentPrice: 0, currentPriceStatus: 'UNAVAILABLE' as const };
-    });
+    }));
 
-    const finalPositions = enriched.map(({ position, currentPrice, currentPriceStatus }) => {
+    return enriched.map(({ position, currentPrice }) => {
       const p = position.raw;
       const pnl = pnlByPositionId.get(Number(p.positionId));
 
@@ -796,8 +731,7 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
         side: position.side,
         quantity: position.quantity,
         entryPrice: position.entryPrice,
-        currentPrice,
-        currentPriceStatus,
+        currentPrice: currentPrice > 0 ? currentPrice : position.entryPrice,
         stopLoss: Number(p.stopLoss || 0) > 0 ? Number(p.stopLoss) : undefined,
         takeProfit: Number(p.takeProfit || 0) > 0 ? Number(p.takeProfit) : undefined,
         unrealizedPnL: Number(pnl?.netUnrealizedPnL ?? p.netUnrealizedPnL ?? p.unrealizedPnL ?? 0),
@@ -807,19 +741,8 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
         brokerPositionId: String(p.positionId)
       } as NormalizedPosition;
     });
-
-    this.positionsCache = {
-      expiresAt: Date.now() + CTraderBrokerAdapter.POSITIONS_CACHE_TTL_MS,
-      positions: finalPositions
-    };
-    return finalPositions;
   }
-  async getOpenOrders(forceRefresh?: boolean): Promise<NormalizedOrder[]> {
-    const now = Date.now();
-    if (!forceRefresh && this.ordersCache && now < this.ordersCache.expiresAt) {
-      return this.ordersCache.orders;
-    }
-
+  async getOpenOrders(): Promise<NormalizedOrder[]> {
     const raw = await this.resolveRawAccount();
     const state = await fetchCTraderReconcileState(
       raw.ctidTraderAccountId,
@@ -828,9 +751,15 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
       this.config.accessToken!,
       raw.isLive
     );
-    const symbols = await this.getCachedCTraderSymbols(raw);
+    const symbols = await fetchCTraderSymbols(
+      raw.ctidTraderAccountId,
+      this.config.clientId!,
+      this.config.clientSecret!,
+      this.config.accessToken!,
+      raw.isLive
+    );
     const byId = new Map(symbols.map(s => [s.symbolId, s]));
-    const orders = state.orders.map((o: any) => {
+    return state.orders.map((o: any) => {
       const trade = o.tradeData || {};
       const symbolInfo = byId.get(Number(trade.symbolId));
       if (!symbolInfo) return null;
@@ -867,38 +796,12 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
         filledQuantity,
         averageFillPrice: Number(o.executionPrice || 0) || undefined,
         timestamp: Number(o.utcTimestamp || 0) * 1000 || Date.now(),
-        brokerOrderId: String(o.orderId),
-        clientOrderId: o.clientOrderId ? String(o.clientOrderId) : undefined
+        brokerOrderId: String(o.orderId)
       } as NormalizedOrder;
-    });
-    this.ordersCache = {
-      expiresAt: Date.now() + CTraderBrokerAdapter.POSITIONS_CACHE_TTL_MS,
-      orders: orders.filter(Boolean) as NormalizedOrder[]
-    };
-    return this.ordersCache.orders;
+    }).filter(Boolean) as NormalizedOrder[];
   }
 
-  async getOrderByClientOrderId(clientOrderId: string): Promise<NormalizedOrder | null> {
-    const normalizedClientOrderId = String(clientOrderId || '').trim().slice(0, 50);
-    if (!normalizedClientOrderId) return null;
-
-    // Reconciliation runs independently every 15 seconds. Search both the
-    // currently open order state and recent broker history so an accepted
-    // submission can still be resolved after it has already filled.
-    const openOrders = await this.getOpenOrders();
-    const openMatch = openOrders.find(order => order.clientOrderId === normalizedClientOrderId);
-    if (openMatch) return openMatch;
-
-    const history = await this.getOrderHistoryRange(Date.now() - 15 * 60_000, Date.now());
-    return history.find(order => order.clientOrderId === normalizedClientOrderId) || null;
-  }
-
-  async getDailyRealizedPnL(forceRefresh?: boolean): Promise<number> {
-    const now = Date.now();
-    if (!forceRefresh && this.dailyRealizedPnLCache && now < this.dailyRealizedPnLCache.expiresAt) {
-      return this.dailyRealizedPnLCache.value;
-    }
-
+  async getDailyRealizedPnL(): Promise<number> {
     this.syncConfig();
     this.validateCredentials();
     const raw = await this.resolveRawAccount();
@@ -913,7 +816,7 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
       this.config.accessToken!,
       raw.isLive
     );
-    const val = deals.reduce((sum: number, deal: any) => {
+    return deals.reduce((sum: number, deal: any) => {
       const detail = deal.closePositionDetail || deal.closePositionDetails;
       if (!detail) return sum;
 
@@ -931,9 +834,6 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
         + (Number.isFinite(commission) ? commission : 0)
         + (Number.isFinite(swap) ? swap : 0);
     }, 0);
-
-    this.dailyRealizedPnLCache = { expiresAt: Date.now() + CTraderBrokerAdapter.DAILY_REALIZED_PNL_CACHE_TTL_MS, value: val };
-    return val;
   }
 
   async getOrderHistory(): Promise<NormalizedOrder[]> {
@@ -947,107 +847,93 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
     const raw = await this.resolveRawAccount();
     const safeFrom = Math.max(0, Number(fromTimestamp));
     const safeTo = Math.max(safeFrom, Number(toTimestamp));
+
+    let byId = new Map<number, any>();
+    try {
+      const symbols = await this.getCachedCTraderSymbols(raw);
+      byId = new Map(symbols.map(s => [Number(s.symbolId), s]));
+    } catch {
+      // Best-effort symbols mapping
+    }
+
+    const COMMON_CTRADER_SYMBOLS: Record<number, string> = {
+      1: 'EUR/USD',
+      2: 'GBP/USD',
+      3: 'EUR/JPY',
+      4: 'USD/JPY',
+      5: 'USD/CHF',
+      6: 'USD/JPY',
+      7: 'EUR/GBP',
+      8: 'EUR/CHF',
+      9: 'AUD/USD',
+      10: 'USD/CAD',
+      11: 'NZD/USD',
+      12: 'AUD/USD',
+      13: 'AUD/JPY',
+      14: 'GBP/JPY',
+      15: 'CHF/JPY',
+      16: 'XAU/USD',
+      17: 'XAG/USD',
+      18: 'EUR/CAD',
+      19: 'CAD/JPY',
+      20: 'EUR/AUD'
+    };
+
     const deals = await fetchCTraderDeals(raw.ctidTraderAccountId, safeFrom, safeTo, this.config.clientId!, this.config.clientSecret!, this.config.accessToken!, raw.isLive);
-    const symbols = await this.getCachedCTraderSymbols(raw);
-    const byId = new Map(symbols.map(s => [s.symbolId, s]));
     return deals.map((deal: any) => {
       const status = Number(deal.dealStatus) === 2 ? 'FILLED' : 'REJECTED';
       const side = Number(deal.tradeSide) === 2 ? 'SELL' : 'BUY';
       const volume = Math.abs(Number(deal.filledVolume ?? deal.volume ?? 0)) / 100;
       const executionPrice = Number(deal.executionPrice || 0);
+
+      const symbolIdNum = Number(deal.symbolId);
+      const symbolInfo = byId.get(symbolIdNum);
+      const resolvedSymbol = symbolInfo?.symbolName || COMMON_CTRADER_SYMBOLS[symbolIdNum] || String(deal.symbolId);
+
+      const detail = deal.closePositionDetail || deal.closePositionDetails;
+      const moneyDigits = Number(detail?.moneyDigits ?? deal.moneyDigits ?? 2);
+      const divisor = Number.isInteger(moneyDigits) && moneyDigits > 0 ? 10 ** moneyDigits : 100;
+      const gross = detail
+        ? Number(detail.grossProfit ?? detail.profit ?? 0) / divisor
+        : (Number(deal.grossProfit ?? deal.profit ?? 0) / divisor);
+      const commission = Number((detail?.commission ?? deal.commission) || 0) / divisor;
+      const swap = Number((detail?.swap ?? deal.swap) || 0) / divisor;
+      const netAmount = (gross + commission + swap);
+      const entryPrice = detail && Number(detail.entryPrice || 0) > 0 ? Number(detail.entryPrice) : executionPrice;
+
       return {
         id: String(deal.dealId),
         broker: 'CTRADER',
         environment: this.environment,
         market: 'FOREX',
-        symbol: byId.get(Number(deal.symbolId))?.symbolName || String(deal.symbolId),
+        symbol: resolvedSymbol,
         side,
         orderType: 'MARKET',
         quantity: volume,
-        price: executionPrice > 0 ? executionPrice : undefined,
+        price: entryPrice > 0 ? entryPrice : executionPrice > 0 ? executionPrice : undefined,
         status,
         filledQuantity: status === 'FILLED' ? volume : 0,
         averageFillPrice: executionPrice > 0 ? executionPrice : undefined,
-        commission: Number(deal.commission || 0) || undefined,
+        commission: commission !== 0 ? commission : (Number(deal.commission || 0) || undefined),
+        netAmount: Number.isFinite(netAmount) ? netAmount : undefined,
+        pnl: Number.isFinite(netAmount) ? netAmount : undefined,
+        realizedPnL: Number.isFinite(netAmount) ? netAmount : undefined,
+        swap: swap !== 0 ? swap : undefined,
         timestamp: Number(deal.executionTimestamp || deal.utcLastUpdateTimestamp || Date.now()),
         brokerOrderId: String(deal.orderId),
-        clientOrderId: deal.clientOrderId !== undefined ? String(deal.clientOrderId) : (deal.order?.clientOrderId !== undefined ? String(deal.order.clientOrderId) : undefined),
-      } as NormalizedOrder;
+        isClosedDeal: Boolean(detail) || Number(deal.closedVolume || 0) > 0
+      } as any;
     });
   }
 
-  async getPositionHistory(positionId: string, fromTimestamp: number, toTimestamp: number): Promise<NormalizedPositionClose[]> {
-    this.syncConfig();
-    this.validateCredentials();
-    const raw = await this.resolveRawAccount();
-    const numericPositionId = Number(positionId);
-    if (!Number.isSafeInteger(numericPositionId) || numericPositionId <= 0) {
-      throw new BrokerError(
-        'INVALID_SYMBOL',
-        `Invalid cTrader position ID ${positionId} for outcome tracking.`,
-        'CTRADER',
-        this.environment
-      );
-    }
-
-    const deals = await fetchCTraderDealsByPositionId(
-      raw.ctidTraderAccountId,
-      numericPositionId,
-      Math.max(0, Number(fromTimestamp)),
-      Math.max(Number(fromTimestamp), Number(toTimestamp)),
-      this.config.clientId!,
-      this.config.clientSecret!,
-      this.config.accessToken!,
-      raw.isLive
-    );
-
-    const symbols = await this.getCachedCTraderSymbols(raw);
-    const byId = new Map(symbols.map(s => [s.symbolId, s]));
-
-    return deals
-      .filter((deal: any) => Number(deal.dealStatus) === 2 && Number(deal.filledVolume || 0) > 0)
-      .map((deal: any): NormalizedPositionClose | null => {
-        const detail = deal.closePositionDetail || deal.closePositionDetails;
-        if (!detail) return null;
-
-        const moneyDigits = Number(detail.moneyDigits ?? deal.moneyDigits ?? 0);
-        const divisor = Number.isInteger(moneyDigits) && moneyDigits > 0 ? 10 ** moneyDigits : 1;
-        const gross = Number(detail.grossProfit ?? detail.profit ?? 0) / divisor;
-        const commission = Number(detail.commission ?? deal.commission ?? 0) / divisor;
-        const swap = Number(detail.swap ?? detail.swap ?? 0) / divisor;
-        const symbolInfo = byId.get(Number(deal.symbolId));
-
-        return {
-          brokerPositionId: String(numericPositionId),
-          symbol: symbolInfo?.symbolName || String(deal.symbolId),
-          side: (Number(deal.tradeSide) === 2 ? 'SELL' : 'BUY') as OrderSide,
-          quantity: Math.abs(Number(deal.filledVolume || 0)) / 100,
-          exitPrice: Number(deal.executionPrice || 0),
-          realizedPnL: Number.isFinite(gross + commission + swap) ? gross + commission + swap : 0,
-          commission: Number.isFinite(commission) ? commission : undefined,
-          swap: Number.isFinite(swap) ? swap : undefined,
-          timestamp: Number(deal.executionTimestamp || deal.utcLastUpdateTimestamp || Date.now()),
-          brokerOrderId: deal.orderId !== undefined ? String(deal.orderId) : undefined
-        };
-      })
-      .filter((value): value is NormalizedPositionClose => value !== null);
-  }
-
-  async getHistoricalCandles(symbol: string, timeframe: string, limit: number, forceRefresh?: boolean) {
-    const key = `${symbol.replace('/', '').toUpperCase()}:${timeframe}:${limit}`;
-    const now = Date.now();
-    const cached = this.candleCache.get(key);
-    if (!forceRefresh && cached && now < cached.expiresAt) {
-      return cached.candles;
-    }
-
+  async getHistoricalCandles(symbol: string, timeframe: string, limit: number) {
     try {
       const raw = await this.resolveRawAccount();
       const instruments = await this.getCachedCTraderSymbols(raw);
       const normalized = symbol.replace('/', '').toUpperCase();
       const match = instruments.find(s => s.symbolName.replace('/', '').toUpperCase() === normalized);
       if (!match) throw new BrokerError('INVALID_SYMBOL', `cTrader symbol ${symbol} was not found in the authenticated account symbol list.`, 'CTRADER', this.environment);
-      const result = await fetchCTraderTrendbars(
+      return await fetchCTraderTrendbars(
         raw.ctidTraderAccountId,
         match.symbolId,
         timeframe,
@@ -1058,23 +944,12 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
         raw.isLive,
         match.digits
       );
-      if (Array.isArray(result) && result.length > 0) {
-        this.candleCache.set(key, { expiresAt: Date.now() + CTraderBrokerAdapter.CANDLE_CACHE_TTL_MS, candles: result });
-      }
-      return result;
     } catch (err: any) {
       throw normalizeBrokerError(err, 'CTRADER', this.environment);
     }
   }
 
-  async getQuote(symbol: string, forceRefresh?: boolean): Promise<NormalizedQuote> {
-    const normalizedKey = symbol.replace('/', '').toUpperCase();
-    const now = Date.now();
-    const cached = this.quoteCache.get(normalizedKey);
-    if (!forceRefresh && cached && now < cached.expiresAt && cached.quote.status === 'FRESH') {
-      return cached.quote;
-    }
-
+  async getQuote(symbol: string): Promise<NormalizedQuote> {
     try {
       const raw = await this.resolveRawAccount();
       const symbols = await this.getCachedCTraderSymbols(raw);
@@ -1090,16 +965,17 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
       let quoteStatus: NormalizedQuote['status'] = 'STALE';
 
       try {
-        const quoteMap = await fetchLiveCTraderQuotes(
+        const quote = await fetchLiveCTraderQuote(
           raw.ctidTraderAccountId,
-          [{ symbolId: match.symbolId, symbolName: match.symbolName, digits: match.digits }],
+          match.symbolId,
+          match.symbolName,
           this.config.clientId!,
           this.config.clientSecret!,
           this.config.accessToken!,
-          raw.isLive
+          raw.isLive,
+          match.digits
         );
-        const quote = quoteMap.get(match.symbolId);
-        if (quote && quote.bid !== undefined && quote.ask !== undefined && quote.bid > 0 && quote.ask >= quote.bid) {
+        if (quote.bid !== undefined && quote.ask !== undefined && quote.bid > 0 && quote.ask >= quote.bid) {
           bid = quote.bid;
           ask = quote.ask;
           timestamp = quote.timestamp || Date.now();
@@ -1135,7 +1011,7 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
         throw new BrokerError('STALE_DATA', `cTrader did not provide a valid bid/ask for ${symbol}.`, 'CTRADER', this.environment);
       }
 
-      const res: NormalizedQuote = {
+      return {
         symbol,
         bid: Number(bid.toFixed(match.digits)),
         ask: Number(ask.toFixed(match.digits)),
@@ -1145,30 +1021,22 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
         environment: this.environment,
         status: quoteStatus
       };
-
-      if (res.status === 'FRESH') {
-        this.quoteCache.set(normalizedKey, {
-          expiresAt: Date.now() + CTraderBrokerAdapter.QUOTE_CACHE_TTL_MS,
-          quote: res
-        });
-      }
-
-      return res;
     } catch (err: any) {
       throw normalizeBrokerError(err, 'CTRADER', this.environment);
     }
   }
 
-  async getInstruments(forceRefresh?: boolean): Promise<BrokerInstrument[]> {
-    const now = Date.now();
-    if (!forceRefresh && this.instrumentsCache && now < this.instrumentsCache.expiresAt) {
-      return this.instrumentsCache.instruments;
-    }
-
+  async getInstruments(): Promise<BrokerInstrument[]> {
     const raw = await this.resolveRawAccount();
-    const symbols = await this.getCachedCTraderSymbols(raw);
+    const symbols = await fetchCTraderSymbols(
+      raw.ctidTraderAccountId,
+      this.config.clientId!,
+      this.config.clientSecret!,
+      this.config.accessToken!,
+      raw.isLive
+    );
     const allowed = new Set(FOREX_PAIRS.map(p => p.symbol.replace('/', '').toUpperCase()));
-    const res = symbols.filter(s => allowed.has(s.symbolName.replace('/', '').toUpperCase())).map(s => {
+    return symbols.filter(s => allowed.has(s.symbolName.replace('/', '').toUpperCase())).map(s => {
       const p = FOREX_PAIRS.find(x => x.symbol.replace('/', '').toUpperCase() === s.symbolName.replace('/', '').toUpperCase());
       if (!p) throw new BrokerError('INVALID_SYMBOL', `Unsupported cTrader symbol ${s.symbolName}`, 'CTRADER', this.environment);
       // cTrader Open API represents Forex volume in protocol cents:
@@ -1203,37 +1071,18 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
       digits: Number.isInteger(Number(s.digits)) && Number(s.digits) >= 0
         ? Number(s.digits)
         : p.digits,
-      supportedOrderTypes: ['MARKET', 'LIMIT', 'STOP'] as any,
+      supportedOrderTypes: ['MARKET', 'LIMIT', 'STOP'],
       baseCurrency: p.symbol.split('/')[0],
       quoteCurrency: p.symbol.split('/')[1],
       brokerInstrumentId: String(s.symbolId)
-    } as BrokerInstrument;
-    });
-
-    this.instrumentsCache = {
-      expiresAt: Date.now() + CTraderBrokerAdapter.INSTRUMENTS_CACHE_TTL_MS,
-      instruments: res
     };
-    return res;
+    });
   }
 
   async getInstrument(symbol: string): Promise<BrokerInstrument | null> {
     const instruments = await this.getInstruments();
     const normalized = symbol.replace('/', '').toUpperCase();
     return instruments.find(i => i.symbol.replace('/', '').toUpperCase() === normalized) || null;
-  }
-
-  /**
-   * Guarded capability used exclusively by the autonomous execution engine.
-   * The engine performs the shared live safety/readiness gates before calling
-   * this method; the adapter still enforces LIVE-only execution and reuses the
-   * authoritative cTrader order submission path.
-   */
-  async placeAutonomousOrder(order: OrderRequest): Promise<NormalizedOrder> {
-    if (!this.isLive) {
-      throw new BrokerError('ENVIRONMENT_MISMATCH', 'Autonomous execution is available only for cTrader LIVE.', 'CTRADER', this.environment);
-    }
-    return this.placeOrder(order);
   }
 
   async placeOrder(order: OrderRequest): Promise<NormalizedOrder> {
@@ -1269,7 +1118,13 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
     }
 
     const raw = await this.resolveRawAccount();
-    const symbols = await this.getCachedCTraderSymbols(raw);
+    const symbols = await fetchCTraderSymbols(
+      raw.ctidTraderAccountId,
+      this.config.clientId!,
+      this.config.clientSecret!,
+      this.config.accessToken!,
+      raw.isLive
+    );
     const normalizedSymbol = order.symbol.replace('/', '').toUpperCase();
     const symbol = symbols.find(s => s.symbolName.replace('/', '').toUpperCase() === normalizedSymbol);
     if (!symbol) {
@@ -1317,7 +1172,6 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
       commission: undefined,
       timestamp: Date.now(),
       brokerOrderId,
-      clientOrderId,
       strategyId: order.strategyId,
       signalId: order.signalId
     };
@@ -1506,7 +1360,13 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
           dealId: undefined,
           commission: undefined
         };
-    const symbols = await this.getCachedCTraderSymbols(raw);
+    const symbols = await fetchCTraderSymbols(
+      raw.ctidTraderAccountId,
+      this.config.clientId!,
+      this.config.clientSecret!,
+      this.config.accessToken!,
+      raw.isLive
+    );
     const symbolInfo = symbols.find(s => Number(s.symbolId) === Number(latestDeal.symbolId));
     const normalizedSymbol = symbolInfo?.symbolName || String(latestDeal.symbolId);
     const fillEvents: NormalizedFill[] = matchingDeals
@@ -1514,7 +1374,6 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
       .map((deal: any) => ({
         brokerFillId: String(deal.dealId),
         brokerOrderId: String(brokerId),
-        brokerPositionId: deal.positionId !== undefined ? String(deal.positionId) : undefined,
         quantity: Math.max(0, Number(deal.filledVolume || 0)) / 100,
         price: Number(deal.executionPrice),
         commission: Number(deal.commission || 0) || undefined,

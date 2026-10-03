@@ -2,7 +2,7 @@
 
 export type TradingEnvironment = 'LIVE';
 
-export type BrokerType = 'CTRADER';
+export type BrokerType = 'CTRADER' | 'FIVE_PAISA';
 
 export type BrokerStatus =
   | 'CONNECTED'
@@ -60,7 +60,7 @@ export type OrderStatus =
 
 export interface BrokerAccountInfo {
   accountId: string;
-  accountType: 'LIVE' | 'DEMO';
+  accountType: 'LIVE';
   balance: number;
   equity: number;
   availableMargin: number;
@@ -86,8 +86,6 @@ export interface NormalizedPosition {
   quantity: number;
   entryPrice: number;
   currentPrice: number;
-  /** Whether currentPrice came from a fresh broker quote or a broker-position fallback. */
-  currentPriceStatus?: 'LIVE' | 'FALLBACK' | 'UNAVAILABLE';
   stopLoss?: number;
   takeProfit?: number;
   unrealizedPnL: number;
@@ -100,25 +98,10 @@ export interface NormalizedPosition {
 export interface NormalizedFill {
   brokerFillId: string;
   brokerOrderId?: string;
-  /** Authoritative cTrader position ID associated with this fill, when available. */
-  brokerPositionId?: string;
   quantity: number;
   price: number;
   commission?: number;
   timestamp: number;
-}
-
-export interface NormalizedPositionClose {
-  brokerPositionId: string;
-  symbol: string;
-  side: OrderSide;
-  quantity: number;
-  exitPrice: number;
-  realizedPnL: number;
-  commission?: number;
-  swap?: number;
-  timestamp: number;
-  brokerOrderId?: string;
 }
 
 export interface NormalizedOrder {
@@ -141,8 +124,6 @@ export interface NormalizedOrder {
   commission?: number;
   timestamp: number;
   brokerOrderId?: string;
-  /** Broker-native client order identity used for exact submission reconciliation. */
-  clientOrderId?: string;
   strategyId?: string;
   signalId?: string;
   rejectionReason?: string;
@@ -202,10 +183,6 @@ export interface ConnectionTestResult {
   broker: BrokerType;
   environment: TradingEnvironment;
   connected: boolean;
-  /** cTrader Open API transport mode used by the connection test, when applicable. */
-  apiMode?: 'LIVE' | 'DEMO';
-  /** cTrader Open API WebSocket endpoint used by the connection test, when applicable. */
-  apiEndpoint?: string;
   account?: string;
   accountType?: string;
   balance?: number;
@@ -232,12 +209,10 @@ export interface BrokerAdapter {
   getBalance(): Promise<number>;
   getEquity(): Promise<number>;
   getMargin(): Promise<{ usedMargin: number; freeMargin: number; marginLevelPct?: number }>;
-  getPositions(forceRefresh?: boolean): Promise<NormalizedPosition[]>;
+  getPositions(): Promise<NormalizedPosition[]>;
   getOpenOrders(): Promise<NormalizedOrder[]>;
   getOrderHistory(): Promise<NormalizedOrder[]>;
   getOrderHistoryRange?(fromTimestamp: number, toTimestamp: number): Promise<NormalizedOrder[]>;
-  /** Optional authoritative closed-position outcome history. */
-  getPositionHistory?(positionId: string, fromTimestamp: number, toTimestamp: number): Promise<NormalizedPositionClose[]>;
   getQuote(symbol: string): Promise<NormalizedQuote>;
   /** Optional broker-native conversion path for multi-currency exposure checks. */
   getAccountCurrencyConversionRate?(fromCurrency: string, toCurrency: string): Promise<number>;
@@ -249,8 +224,6 @@ export interface BrokerAdapter {
   cancelOrder(orderId: string): Promise<boolean>;
   closePosition(positionId: string, quantity?: number): Promise<boolean>;
   getOrderStatus(orderId: string, requestedQuantity?: number): Promise<NormalizedOrder>;
-  /** Optional broker-native lookup using the client order identity submitted with an order. */
-  getOrderByClientOrderId?(clientOrderId: string): Promise<NormalizedOrder | null>;
   getTradingStatus(): Promise<BrokerStatus>;
   getDailyRealizedPnL?(): Promise<number>;
 }

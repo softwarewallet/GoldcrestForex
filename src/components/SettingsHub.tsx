@@ -13,9 +13,11 @@ import {
   Lock,
   Cpu,
   Activity,
-  Download
+  Download,
+  Sparkles
 } from 'lucide-react';
 import { BrokerSettingsPanel } from './BrokerSettingsPanel';
+import { StrategyPlanningSettings } from './StrategyPlanningSettings';
 import { BrokerType, TradingEnvironment } from '../brokers/types';
 
 interface SettingsHubProps {
@@ -191,203 +193,6 @@ const LiveRuntimeLogSettings: React.FC = () => {
   );
 };
 
-
-interface ResearchAiGatewayConfig {
-  enabled: boolean;
-  baseUrl: string;
-  llamaModel: string;
-  qwenModel: string;
-  healthPath: string;
-  predictPath: string;
-  timeoutMs: number;
-  authConfigured: boolean;
-  updatedAt: number | null;
-}
-
-const ResearchAiServerSettings: React.FC = () => {
-  const [config, setConfig] = useState<ResearchAiGatewayConfig>({
-    enabled: false,
-    baseUrl: '',
-    llamaModel: '',
-    qwenModel: '',
-    healthPath: '/health',
-    predictPath: '/predict',
-    timeoutMs: 10000,
-    authConfigured: false,
-    updatedAt: null
-  });
-  const [token, setToken] = useState('');
-  const [busy, setBusy] = useState<string | null>(null);
-  const [message, setMessage] = useState('');
-  const [testResult, setTestResult] = useState('');
-  const [predictionTestResult, setPredictionTestResult] = useState('');
-
-  const load = async () => {
-    try {
-      const res = await fetch('/api/research-ai/server', { cache: 'no-store' });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Unable to load AI gateway settings.');
-      if (data.server) setConfig(data.server);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Unable to load AI gateway settings.');
-    }
-  };
-
-  useEffect(() => { void load(); }, []);
-
-  const update = (patch: Partial<ResearchAiGatewayConfig>) => {
-    setConfig(prev => ({ ...prev, ...patch }));
-  };
-
-  const save = async () => {
-    setBusy('SAVE');
-    setMessage('');
-    try {
-      const body: Record<string, unknown> = {
-        enabled: config.enabled,
-        baseUrl: config.baseUrl,
-        llamaModel: config.llamaModel,
-        qwenModel: config.qwenModel,
-        healthPath: config.healthPath,
-        predictPath: config.predictPath,
-        timeoutMs: config.timeoutMs
-      };
-      if (token !== '') body.authToken = token;
-      const res = await fetch('/api/research-ai/server', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Unable to save AI gateway settings.');
-      setConfig(data.server);
-      setToken('');
-      setMessage('AI gateway settings saved.');
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Unable to save AI gateway settings.');
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const test = async () => {
-    setBusy('TEST');
-    setTestResult('Testing…');
-    try {
-      const res = await fetch('/api/research-ai/server/test', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      });
-      const data = await res.json();
-      setTestResult(data.ok
-        ? `CONNECTED · ${data.status} · ${data.latencyMs} ms`
-        : `NOT CONNECTED · ${data.message}`);
-    } catch (error) {
-      setTestResult(error instanceof Error ? error.message : 'Connection test failed.');
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const testPrediction = async () => {
-    setBusy('PREDICTION');
-    setPredictionTestResult('Testing prediction contract…');
-    try {
-      const res = await fetch('/api/research-ai/server/test-prediction', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      });
-      const data = await res.json();
-      setPredictionTestResult(data.ok
-        ? `PREDICTION OK · ${data.direction} · confidence ${Math.round(Number(data.confidence) * 100)}% · ${data.latencyMs} ms`
-        : `PREDICTION FAILED · ${data.message}`);
-    } catch (error) {
-      setPredictionTestResult(error instanceof Error ? error.message : 'Prediction contract test failed.');
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  return (
-    <div className="space-y-4">
-      <div className="bg-cyan-950/20 border border-cyan-900 rounded-xl p-4 text-xs text-slate-300">
-        <div className="font-bold text-cyan-300">Optional AI Research Gateway</div>
-        <div className="mt-2 leading-5">
-          Goldcrest uses one connection only. The remote server is Llama-hosted and may run Qwen internally.
-          Qwen and Llama therefore share the same gateway URL, authentication and network connection.
-          Both remain optional: Goldcrest works normally with this connector disabled or unavailable.
-          This gateway is research-only and is not part of Auto Live execution or broker safety decisions.
-        </div>
-      </div>
-
-      <div className="bg-slate-950 border border-slate-800 rounded-xl p-5">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <div className="flex items-center gap-2">
-              <Cpu className="w-5 h-5 text-cyan-400" />
-              <h3 className="text-sm font-bold text-white">LLAMA AI GATEWAY · QWEN + LLAMA</h3>
-            </div>
-            <p className="text-xs text-slate-500 mt-1">Single plug-and-play connection for the future external AI server.</p>
-          </div>
-          <label className="flex items-center gap-2 text-xs text-slate-300">
-            <input type="checkbox" checked={config.enabled} onChange={e => update({ enabled: e.target.checked })} />
-            ENABLED
-          </label>
-        </div>
-
-        <div className="grid md:grid-cols-2 gap-3 mt-4">
-          <label className="text-[10px] uppercase text-slate-500 font-mono">
-            SERVER BASE URL
-            <input value={config.baseUrl} onChange={e => update({ baseUrl: e.target.value })} placeholder="http://192.168.1.50:8000" className="mt-1 w-full rounded bg-slate-900 border border-slate-700 px-3 py-2 text-xs text-white" />
-          </label>
-          <label className="text-[10px] uppercase text-slate-500 font-mono">
-            LLAMA MODEL
-            <input value={config.llamaModel} onChange={e => update({ llamaModel: e.target.value })} placeholder="llama3.3" className="mt-1 w-full rounded bg-slate-900 border border-slate-700 px-3 py-2 text-xs text-white" />
-          </label>
-          <label className="text-[10px] uppercase text-slate-500 font-mono">
-            QWEN MODEL
-            <input value={config.qwenModel} onChange={e => update({ qwenModel: e.target.value })} placeholder="qwen3" className="mt-1 w-full rounded bg-slate-900 border border-slate-700 px-3 py-2 text-xs text-white" />
-          </label>
-          <label className="text-[10px] uppercase text-slate-500 font-mono">
-            HEALTH PATH
-            <input value={config.healthPath} onChange={e => update({ healthPath: e.target.value })} className="mt-1 w-full rounded bg-slate-900 border border-slate-700 px-3 py-2 text-xs text-white" />
-          </label>
-          <label className="text-[10px] uppercase text-slate-500 font-mono">
-            PREDICTION PATH
-            <input value={config.predictPath} onChange={e => update({ predictPath: e.target.value })} className="mt-1 w-full rounded bg-slate-900 border border-slate-700 px-3 py-2 text-xs text-white" />
-          </label>
-          <label className="text-[10px] uppercase text-slate-500 font-mono">
-            TIMEOUT (MS)
-            <input type="number" min={1000} max={60000} value={config.timeoutMs} onChange={e => update({ timeoutMs: Number(e.target.value) })} className="mt-1 w-full rounded bg-slate-900 border border-slate-700 px-3 py-2 text-xs text-white" />
-          </label>
-          <label className="text-[10px] uppercase text-slate-500 font-mono md:col-span-2">
-            AUTH TOKEN
-            <input type="password" value={token} onChange={e => setToken(e.target.value)} placeholder={config.authConfigured ? 'Configured · leave blank to keep' : 'Optional bearer token'} className="mt-1 w-full rounded bg-slate-900 border border-slate-700 px-3 py-2 text-xs text-white" />
-          </label>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2 mt-4">
-          <button onClick={() => void save()} disabled={busy !== null} className="px-4 py-2 rounded bg-emerald-700 border border-emerald-600 text-white text-xs font-bold disabled:opacity-50">
-            {busy === 'SAVE' ? 'SAVING…' : 'SAVE CONNECTION'}
-          </button>
-          <button onClick={() => void test()} disabled={busy !== null || !config.baseUrl} className="px-4 py-2 rounded bg-slate-800 border border-slate-700 text-slate-200 text-xs font-bold disabled:opacity-50">
-            {busy === 'TEST' ? 'TESTING…' : 'TEST CONNECTION'}
-          </button>
-          <button onClick={() => void testPrediction()} disabled={busy !== null || !config.baseUrl} className="px-4 py-2 rounded bg-cyan-900/50 border border-cyan-700 text-cyan-200 text-xs font-bold disabled:opacity-50">
-            {busy === 'PREDICTION' ? 'TESTING…' : 'TEST PREDICTION'}
-          </button>
-          <span className={`text-[10px] font-mono ${config.enabled ? 'text-emerald-300' : 'text-slate-500'}`}>
-            {config.enabled ? 'GATEWAY ENABLED · QWEN + LLAMA' : 'DISABLED · GOLDCREST WORKS WITHOUT IT'}
-          </span>
-        </div>
-        {testResult && <div className="mt-3 text-[10px] font-mono text-slate-300">{testResult}</div>}
-        {predictionTestResult && <div className="mt-2 text-[10px] font-mono text-cyan-300">{predictionTestResult}</div>}
-        {message && <div className="mt-2 text-[10px] text-slate-400 font-mono">{message}</div>}
-      </div>
-    </div>
-  );
-};
-
 export const SettingsHub: React.FC<SettingsHubProps> = ({
   currentEnvironment,
   selectedBroker,
@@ -395,7 +200,7 @@ export const SettingsHub: React.FC<SettingsHubProps> = ({
   onBrokerSelect,
   onRefreshGlobal
 }) => {
-  const [activeSettingsSection, setActiveSettingsSection] = useState<'BROKER_CONFIG' | 'LIVE_LOG' | 'RESEARCH_AI'>('BROKER_CONFIG');
+  const [activeSettingsSection, setActiveSettingsSection] = useState<'BROKER_CONFIG' | 'LIVE_LOG' | 'STRATEGY_PLANNING'>('BROKER_CONFIG');
 
   return (
     <div id="unified_settings_hub" className="space-y-4">
@@ -407,8 +212,8 @@ export const SettingsHub: React.FC<SettingsHubProps> = ({
           </span>
           {[
             { id: 'BROKER_CONFIG', label: 'BROKER & RISK CONFIGURATION', icon: Server },
-            { id: 'LIVE_LOG', label: 'LIVE RUNTIME LOG', icon: Activity },
-            { id: 'RESEARCH_AI', label: 'OPTIONAL AI SERVERS', icon: Cpu }
+            { id: 'STRATEGY_PLANNING', label: 'STRATEGY PLANNING & PRESETS', icon: Sparkles },
+            { id: 'LIVE_LOG', label: 'LIVE RUNTIME LOG', icon: Activity }
           ].map(tab => {
             const Icon = tab.icon;
             const isSel = activeSettingsSection === tab.id;
@@ -436,10 +241,12 @@ export const SettingsHub: React.FC<SettingsHubProps> = ({
         </div>
       </div>
 
-      {activeSettingsSection === 'RESEARCH_AI' && <ResearchAiServerSettings />}
-
       {activeSettingsSection === 'LIVE_LOG' && (
         <LiveRuntimeLogSettings />
+      )}
+
+      {activeSettingsSection === 'STRATEGY_PLANNING' && (
+        <StrategyPlanningSettings />
       )}
 
       {/* Render Selected Sub-Section */}
@@ -451,12 +258,6 @@ export const SettingsHub: React.FC<SettingsHubProps> = ({
           onBrokerSelect={onBrokerSelect}
           onRefreshGlobal={onRefreshGlobal}
         />
-      )}
-
-      {activeSettingsSection !== 'BROKER_CONFIG' && activeSettingsSection !== 'LIVE_LOG' && (
-        <div className="rounded-lg border border-slate-800 bg-slate-900 p-6 text-sm text-slate-300">
-          Retired research and model-governance workflows are not part of the LIVE production runtime.
-        </div>
       )}
     </div>
   );

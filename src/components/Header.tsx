@@ -1,13 +1,15 @@
 import React from 'react';
-import { AlertOctagon, BarChart2, Database, Globe, RefreshCw, ShieldAlert } from 'lucide-react';
-import { ForexSessionState } from '../markets/common/types';
+import { Activity, AlertOctagon, Database, Globe, RefreshCw, ShieldAlert } from 'lucide-react';
+import { ForexSessionState, IndianSessionState } from '../markets/common/types';
 import { BrokerType, TradingEnvironment } from '../brokers/types';
 import { BalanceDisplay } from './BalanceDisplay';
+import gfLogo from '../assets/GF_logo.png';
 
 interface HeaderProps {
   activeTab: string;
   setActiveTab: (tab: string) => void;
   forexSessions: ForexSessionState;
+  indianSession: IndianSessionState;
   onRefresh: () => void;
   isRefreshing: boolean;
   onOpenDiagnostics: () => void;
@@ -23,6 +25,7 @@ interface HeaderProps {
 export const Header: React.FC<HeaderProps> = ({
   activeTab,
   forexSessions,
+  indianSession,
   onRefresh,
   isRefreshing,
   onOpenDiagnostics,
@@ -34,18 +37,20 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const isLive = true;
   const activeArea =
-    activeTab === 'forex_terminal' ? 'FOREX TERMINAL' :
     activeTab === 'market_watch' ? 'MARKET WATCH' :
     activeTab === 'control_center' ? 'CONTROL CENTER' :
     activeTab === 'history' ? 'HISTORY' :
-    activeTab === 'trading' ? 'POSITIONS' :
+    activeTab === 'trading' ? 'COCKPIT' :
+    activeTab === 'database' ? 'DATABASE' :
     activeTab === 'signals' ? 'STRATEGY' :
     activeTab === 'research' ? 'BACKTEST' :
     activeTab === 'pnl' ? 'REPORTS' :
-    activeTab === 'settings' ? 'SETTINGS' : 'FOREX';
+    activeTab === 'alerts' || activeTab === 'analytics' ? 'ANALYTICS' :
+    activeTab === 'settings' ? 'SETTINGS' : 'MARKET WATCH';
 
   const fxOpen = forexSessions.activeSessions.length > 0 && !forexSessions.activeSessions.includes('CLOSED (WEEKEND)');
   const fxLabel = forexSessions.activeSessions.length ? forexSessions.activeSessions.join(' / ') : 'CLOSED (WEEKEND)';
+  const nseOpen = indianSession.isOpen;
 
   return (
     <header
@@ -59,7 +64,7 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="flex items-center gap-3 whitespace-nowrap min-w-0">
           <span>ACTIVE AREA: <b className="text-slate-200">{activeArea}</b></span>
           <span className="text-slate-700">|</span>
-          <span>BROKER: <b className="text-slate-200">cTrader Live</b></span>
+          <span>BROKER: <b className="text-slate-200">cTrader</b></span>
           <span className="text-slate-700">|</span>
           <span>ENVIRONMENT: <b className="text-rose-400">LIVE</b></span>
           <span className="text-slate-700">|</span>
@@ -91,29 +96,27 @@ export const Header: React.FC<HeaderProps> = ({
       </div>
 
       <div className="h-[99px] px-4 flex items-center gap-3 overflow-hidden">
-        <div className="flex items-center gap-3 min-w-[265px] shrink-0">
-          <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center shadow-inner">
-            <BarChart2 className="w-5 h-5 text-emerald-400" />
-          </div>
-          <div>
-            <h1 className="text-base font-bold tracking-tight text-white leading-tight">Goldcrest Finman - Forex AI</h1>
-            <div className="text-[10px] text-emerald-400 font-bold font-mono mt-1">QUANTITATIVE TRADING TERMINAL</div>
-          </div>
+        <div className="flex items-center min-w-[260px] max-w-[300px] shrink-0">
+          <img
+            src={gfLogo}
+            alt="Goldcrest Finman"
+            className="h-[54px] w-auto max-w-[280px] object-contain select-none"
+          />
         </div>
 
         <div className="shrink-0">
           <BalanceDisplay environment="LIVE" />
         </div>
 
-        <div className="flex flex-col gap-1.5 min-w-[280px] shrink-0">
+        <div className="flex flex-col justify-center min-w-[210px] shrink-0">
           <div
             id="header_fx_session_badge"
-            className={`h-7 flex items-center gap-1.5 px-2.5 rounded border text-[10px] font-mono ${
+            className={`h-8 flex items-center gap-1.5 px-2.5 rounded border text-[10px] font-mono ${
               fxOpen ? 'bg-emerald-950/40 border-emerald-800/60 text-emerald-300' : 'bg-slate-950 border-slate-800 text-slate-400'
             }`}
           >
             <Globe className={`w-3 h-3 ${fxOpen ? 'text-emerald-400' : 'text-slate-500'}`} />
-            <span className="text-slate-400 font-semibold">FOREX SESSIONS:</span>
+            <span className="text-slate-400 font-semibold">FX:</span>
             <span className={`w-2 h-2 rounded-full ${fxOpen ? 'bg-emerald-500' : 'bg-slate-500'}`} />
             <span className="truncate">{fxLabel}</span>
           </div>

@@ -4,20 +4,15 @@ import { FOREX_PAIRS, getForexPairConfig } from '../markets/forex/instruments';
 import { ForexSignalEngine } from '../markets/forex/signalEngine';
 import { getForexSessionState } from '../markets/common/session';
 import { getAutoLiveMarketGate, AutoLiveMarketGate } from './marketOpenGate';
-import { getMarketTrendContext } from './marketHistoryService';
 import { fetchLiveForexNews, LiveNewsSnapshot } from './liveNewsService';
 import { brokerRegistry } from '../brokers/registry';
-import { autoExecutionEngine, LIVE_AUTO_EXECUTION_ALLOWED, armAutonomousExecutionGate, refreshAutonomousExecutionPermission, disarmLocalAutonomousExecution } from '../brokers/safety/AutoExecutionEngine';
+import { autoExecutionEngine, refreshAutonomousExecutionPermission, disarmLocalAutonomousExecution } from '../brokers/safety/AutoExecutionEngine';
 import { autoTradeReadinessService } from '../brokers/safety/AutoTradeReadiness';
 import { getSystemConfig } from './configService';
 import { killSwitch } from '../brokers/safety/KillSwitch';
-import { BrokerAdapter, ConnectionTestResult, NormalizedQuote, OrderRequest, NormalizedPosition } from '../brokers/types';
+import { BrokerAdapter, NormalizedQuote, OrderRequest } from '../brokers/types';
 import { liveRuntimeLog, tradeAuditLog } from './liveRuntimeLog';
-import { calculateForexPipTargets, normalizePriceToThreeDigits, normalizePriceToInstrumentDigits, sizeForexOrderToMaxTradeValue } from '../brokers/safety/TradeSizing';
-import { recordLiveTradeResearchSignal, updateLiveTradeResearchQuote, updateLiveTradeResearchExecution } from './liveTradeResearchService';
-import { AUTO_LIVE_POSITION_CAPACITY_POLL_MS, AUTO_LIVE_RUNTIME_RECOVERY_POLL_MS, getAutoLiveParallelTradePolicy, hasPairPositionCapacity } from './autoLiveTradePolicy';
-import { mapForexSignal } from './scannerService';
-import { TradingSignal } from '../markets/common/types';
+import { calculateForexPipTargets, normalizePriceToThreeDigits, sizeForexOrderToMaxTradeValue } from '../brokers/safety/TradeSizing';
 
 const LIVE_QUOTE_MAX_AGE_MS = 30_000;
 
@@ -27,21 +22,6 @@ const AUTO_INTERVAL_MS = Math.max(
 );
 
 const DEFAULT_AUTO_FOREX_PAIRS = FOREX_PAIRS.map(pair => pair.symbol);
-
-export async function validateAutoLiveCTraderConnection(
-  adapter: Pick<BrokerAdapter, 'testConnection'>
-): Promise<{ ok: boolean; message: string; result: ConnectionTestResult }> {
-  try {
-    const result = await adapter.testConnection();
-    const selectedMode = result.apiMode || 'LIVE';
-    const endpoint = result.apiEndpoint || 'unknown endpoint';
-    if (!result.connected) return { ok:false, message:`cTrader ${selectedMode} API connection preflight failed: ${result.error || 'connection test failed'} (${endpoint}).`, result };
-    return { ok:true, message:`cTrader ${selectedMode} API connection preflight passed (${endpoint}).`, result };
-  } catch (error: any) {
-    const result = { broker:'CTRADER' as const, environment:'LIVE' as const, connected:false, error:error?.message || String(error), timestamp:Date.now() } satisfies ConnectionTestResult;
-    return { ok:false, message:`cTrader API connection preflight failed: ${result.error}.`, result };
-  }
-}
 
 function getConfiguredAutoForexPairs(): string[] {
   const configured = getSystemConfig().autoLiveForexPairs;
@@ -100,24 +80,12 @@ class LiveForexSignalProvider implements ForexDataProvider {
     }
 
     const timeframes: ForexTimeframe[] = ['5M', '15M', '1H', '4H', 'Daily'];
-    const rows: { timeframe: ForexTimeframe; data: any }[] = [];
-    for (const timeframe of timeframes) {
-      let data: any = null;
-      let lastErr: any = null;
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        try {
-          data = await adapter.getHistoricalCandles(pair, timeframe, 80);
-          break;
-        } catch (err: any) {
-          lastErr = err;
-          if (attempt < 2) {
-            await new Promise(r => setTimeout(r, 1000));
-          }
-        }
-      }
-      if (!data && lastErr) throw lastErr;
-      rows.push({ timeframe, data });
-    }
+    const rows = await Promise.all(
+      timeframes.map(async timeframe => ({
+        timeframe,
+        data: await adapter.getHistoricalCandles(pair, timeframe, 80)
+      }))
+    );
 
     for (const row of rows) {
       if (!Array.isArray(row.data) || row.data.length < 35) {
@@ -166,7 +134,7 @@ class LiveForexSignalProvider implements ForexDataProvider {
   }
 }
 
-export type AutoTradingState = 'STOPPED' | 'PREPARING' | 'RUNNING' | 'PAUSED_LIMIT' | 'PAUSED_RUNTIME' | 'BLOCKED';
+export type AutoTradingState = 'STOPPED' | 'PREPARING' | 'RUNNING' | 'PAUSED_LIMIT' | 'BLOCKED';
 export type AutoTradingExecutionStage = 'IDLE' | 'SCANNING_MARKET' | 'ANALYZING_SIGNAL' | 'PREPARING_ORDER' | 'SAFETY_GATE' | 'SUBMITTING_ORDER' | 'TRADE_EXECUTED' | 'REJECTED';
 
 export interface AutoTradingExecutionStatus {
@@ -187,6 +155,7 @@ export interface AutoTradingStatus {
   maxTradesPerPair: number;
   maxOpenPositions: number;
   pairs: string[];
+  indianUnderlyings: string[];
   lastCycleAt: number | null;
   lastCycleResult: string | null;
   lastActions: Array<{
@@ -200,9 +169,6 @@ export interface AutoTradingStatus {
   currentExecution: AutoTradingExecutionStatus;
   lastExecution: AutoTradingExecutionStatus | null;
   executionPausedByPositionLimit: boolean;
-  runtimeFaultReason?: string | null;
-  pairScores?: Record<string, { score: number; direction?: string; timestamp?: number }>;
-  activeQualifiedPairs?: string[];
   preOpenPreparation: {
     lastPreparedAt: number | null;
     trendPairsEvaluated: number;
@@ -215,8 +181,6 @@ export interface AutoTradingStatus {
 class AutoTradingService {
   private provider = new LiveForexSignalProvider();
   private signalEngine = new ForexSignalEngine(undefined, this.provider);
-  private pairScores = new Map<string, { score: number; direction: string; timestamp: number }>();
-  private pairSignals = new Map<string, any>();
   private timer: NodeJS.Timeout | null = null;
   private state: AutoTradingState = 'STOPPED';
   private lastCycleAt: number | null = null;
@@ -225,9 +189,6 @@ class AutoTradingService {
   private lastPreOpenPreparedAt: number | null = null;
   private preOpenTrendPairsEvaluated = 0;
   private preOpenNews: LiveNewsSnapshot | null = null;
-  // Snapshot of the authoritative news input used by the current Auto Live
-  // cycle. It is copied into the research ledger with each evaluated signal.
-  private currentCycleNews: LiveNewsSnapshot | null = null;
   private preOpenStatus: 'IDLE' | 'RUNNING' | 'READY' | 'UNAVAILABLE' = 'IDLE';
   private cycleInFlight = false;
   // When the authoritative system-wide live-position limit is full, Auto Live
@@ -235,10 +196,7 @@ class AutoTradingService {
   // count until a slot becomes available.
   private executionPausedByPositionLimit = false;
   private positionCapacityTimer: NodeJS.Timeout | null = null;
-  private runtimeRecoveryTimer: NodeJS.Timeout | null = null;
-  private runtimeFaultReason: string | null = null;
-  private readonly POSITION_CAPACITY_POLL_MS = AUTO_LIVE_POSITION_CAPACITY_POLL_MS;
-  private readonly RUNTIME_RECOVERY_POLL_MS = AUTO_LIVE_RUNTIME_RECOVERY_POLL_MS;
+  private readonly POSITION_CAPACITY_POLL_MS = 10_000;
   // Market analysis can run concurrently across the configured universe, but
   // broker-side execution is serialized so two pairs cannot race the same
   // account-position/exposure snapshot and bypass the global safety limits.
@@ -252,66 +210,6 @@ class AutoTradingService {
     updatedAt: Date.now()
   };
   private lastExecution: AutoTradingExecutionStatus | null = null;
-  // Once the operator has successfully started Auto Live in this process,
-  // STOP may disarm the runtime flags and a later explicit START is allowed
-  // to re-arm them. A fresh process still requires the configured execution
-  // flags, preserving the production safety boundary.
-  private hasCompletedExplicitStart = false;
-
-  private backgroundScannerTimer: NodeJS.Timeout | null = null;
-
-  private startBackgroundSignalScanner(): void {
-    if (this.backgroundScannerTimer) return;
-    this.backgroundScannerTimer = setInterval(() => {
-      void this.refreshBackgroundSignals();
-    }, 10_000);
-    this.backgroundScannerTimer.unref?.();
-    void this.refreshBackgroundSignals();
-  }
-
-  private stopBackgroundSignalScanner(): void {
-    if (this.backgroundScannerTimer) {
-      clearInterval(this.backgroundScannerTimer);
-      this.backgroundScannerTimer = null;
-    }
-  }
-
-  private async refreshBackgroundSignals(): Promise<void> {
-    if (this.state !== 'RUNNING' && this.state !== 'PREPARING') return;
-    try {
-      const configuredPairs = getConfiguredAutoForexPairs();
-      await Promise.all(
-        configuredPairs.map(async (pair) => {
-          try {
-            await this.provider.refreshPair(pair);
-            const signal = await this.signalEngine.generateSignal(pair);
-            this.pairScores.set(pair, {
-              score: signal.score,
-              direction: signal.direction,
-              timestamp: Date.now()
-            });
-            this.pairSignals.set(pair, signal);
-          } catch {
-            // Ignore background scan errors
-          }
-        })
-      );
-    } catch {
-      // Ignore background scan errors
-    }
-  }
-
-  public getSignals(): TradingSignal[] {
-    const configuredPairs = getConfiguredAutoForexPairs();
-    const list: TradingSignal[] = [];
-    for (const pair of configuredPairs) {
-      const rawSignal = this.pairSignals.get(pair);
-      if (rawSignal) {
-        list.push(mapForexSignal(rawSignal));
-      }
-    }
-    return list;
-  }
 
   private isRequested(): boolean {
     // Development mode is not itself an execution request. Autonomous live
@@ -351,12 +249,12 @@ class AutoTradingService {
     return Math.max(1, Math.floor(Number(getSystemConfig().maxOpenPositions)));
   }
 
-  private async getAuthoritativePositionCapacity(): Promise<{ current: number; max: number; available: number; positions: NormalizedPosition[] }> {
+  private async getAuthoritativePositionCapacity(): Promise<{ current: number; max: number; available: number }> {
     const adapter = brokerRegistry.getAdapter('CTRADER', 'LIVE');
     const positions = await adapter.getPositions();
     const current = Array.isArray(positions) ? positions.length : 0;
     const max = this.getConfiguredMaxOpenPositions();
-    return { current, max, available: Math.max(0, max - current), positions };
+    return { current, max, available: Math.max(0, max - current) };
   }
 
   private pauseForPositionLimit(current: number, max: number, reason: string): void {
@@ -395,99 +293,18 @@ class AutoTradingService {
     }
   }
 
-  private pauseForRuntimeFault(reason: string): void {
-    if (this.state === 'STOPPED' || this.state === 'BLOCKED') return;
-    this.runtimeFaultReason = reason;
-    this.state = 'PAUSED_RUNTIME';
-    const intervalSec = Math.round(this.RUNTIME_RECOVERY_POLL_MS / 1000);
-    this.lastCycleResult = `Auto Live paused: live broker/runtime health is unavailable (${reason}). System is automatically retrying recovery every ${intervalSec}s.`;
-    this.clearPositionCapacityPause();
-    liveRuntimeLog('WARN', 'AUTO_TRADING_RUNTIME_FAULT_PAUSED', {
-      reason,
-      recoveryPollIntervalMs: this.RUNTIME_RECOVERY_POLL_MS
-    });
-    tradeAuditLog('AUTO_TRADING_RUNTIME_FAULT_PAUSED', {
-      reason,
-      recoveryPollIntervalMs: this.RUNTIME_RECOVERY_POLL_MS
-    });
-    if (!this.runtimeRecoveryTimer) {
-      this.runtimeRecoveryTimer = setInterval(() => {
-        void this.checkRuntimeRecoveryAndResume();
-      }, this.RUNTIME_RECOVERY_POLL_MS);
-      this.runtimeRecoveryTimer.unref?.();
-    }
-  }
-
-  private async checkRuntimeRecoveryAndResume(runCycleAfterRecovery = true): Promise<void> {
-    if (this.state !== 'PAUSED_RUNTIME' || this.cycleInFlight) return;
-    try {
-      const capacity = await this.getAuthoritativePositionCapacity();
-      if (capacity.available <= 0) {
-        this.runtimeFaultReason = null;
-        this.state = 'PAUSED_LIMIT';
-        if (this.runtimeRecoveryTimer) {
-          clearInterval(this.runtimeRecoveryTimer);
-          this.runtimeRecoveryTimer = null;
-        }
-        this.pauseForPositionLimit(
-          capacity.current,
-          capacity.max,
-          'Broker connectivity has recovered, but the maximum system-wide live-position limit is still reached.'
-        );
-        return;
-      }
-
-      const previousReason = this.runtimeFaultReason;
-      this.runtimeFaultReason = null;
-      this.state = 'RUNNING';
-      if (this.runtimeRecoveryTimer) {
-        clearInterval(this.runtimeRecoveryTimer);
-        this.runtimeRecoveryTimer = null;
-      }
-      this.lastCycleResult = 'Auto Live resumed: live broker/runtime health has recovered and execution capacity is available.';
-      liveRuntimeLog('INFO', 'AUTO_TRADING_RUNTIME_FAULT_RECOVERED', {
-        previousReason,
-        currentOpenPositions: capacity.current,
-        maxOpenPositions: capacity.max,
-        availableSlots: capacity.available
-      });
-      tradeAuditLog('AUTO_TRADING_RUNTIME_FAULT_RECOVERED', {
-        previousReason,
-        currentOpenPositions: capacity.current,
-        maxOpenPositions: capacity.max,
-        availableSlots: capacity.available
-      });
-      if (runCycleAfterRecovery) void this.runCycle();
-    } catch (error: any) {
-      liveRuntimeLog('WARN', 'AUTO_TRADING_RUNTIME_RECOVERY_CHECK_FAILED', {
-        error: error?.message || String(error)
-      });
-    }
-  }
-
   getStatus(): AutoTradingStatus {
     const autonomousPermission = refreshAutonomousExecutionPermission();
-    const config = getSystemConfig();
-    const minScore = Number(config.autoLiveMinSignalScore);
-    const configuredPairs = getConfiguredAutoForexPairs();
-    const pairScoresObj: Record<string, { score: number; direction?: string; timestamp?: number }> = {};
-    for (const [p, val] of this.pairScores.entries()) {
-      pairScoresObj[p] = { ...val };
-    }
-    const activeQualifiedPairs = configuredPairs.filter(p => {
-      const entry = this.pairScores.get(p);
-      return entry !== undefined ? (entry.score >= minScore && Boolean(entry.direction && entry.direction !== 'NO_TRADE')) : false;
-    });
-
     return {
       state: this.state,
       enabledByEnvironment: this.isRequested(),
       autonomousPermission,
       intervalMs: AUTO_INTERVAL_MS,
-      minSignalScore: minScore,
-      maxTradesPerPair: Number(config.autoLiveMaxTradesPerPair),
-      maxOpenPositions: Number(config.maxOpenPositions),
-      pairs: configuredPairs,
+      minSignalScore: Number(getSystemConfig().autoLiveMinSignalScore),
+      maxTradesPerPair: Number(getSystemConfig().autoLiveMaxTradesPerPair),
+      maxOpenPositions: Number(getSystemConfig().maxOpenPositions),
+      pairs: getConfiguredAutoForexPairs(),
+      indianUnderlyings: [...getSystemConfig().autoLiveIndianUnderlyings],
       lastCycleAt: this.lastCycleAt,
       lastCycleResult: this.lastCycleResult,
       lastActions: [...this.lastActions],
@@ -495,9 +312,6 @@ class AutoTradingService {
       currentExecution: { ...this.currentExecution },
       lastExecution: this.lastExecution ? { ...this.lastExecution } : null,
       executionPausedByPositionLimit: this.executionPausedByPositionLimit,
-      runtimeFaultReason: this.runtimeFaultReason,
-      pairScores: pairScoresObj,
-      activeQualifiedPairs,
       preOpenPreparation: {
         lastPreparedAt: this.lastPreOpenPreparedAt,
         trendPairsEvaluated: this.preOpenTrendPairsEvaluated,
@@ -533,52 +347,14 @@ class AutoTradingService {
       };
     }
 
-    // Production Auto Live must be unlocked through the dedicated execution
-    // gate first. The unlock endpoint performs the complete production
-    // activation preflight. Local development retains the existing explicit
-    // START -> arm behavior for broker-integrated testing.
-    if (process.env.NODE_ENV === 'production') {
-      if (!LIVE_AUTO_EXECUTION_ALLOWED) {
-        this.state = 'BLOCKED';
-        this.lastCycleResult = 'Execution gate is locked. Complete the Auto Live activation preflight and unlock the execution gate before starting Auto Live.';
-        liveRuntimeLog('WARN', 'AUTO_TRADING_START_BLOCKED', {
-          stage: 'EXECUTION_GATE',
-          reason: this.lastCycleResult
-        });
-        return this.getStatus();
-      }
-    } else {
-      if (!this.isRequested() && !this.hasCompletedExplicitStart) {
-        this.state = 'BLOCKED';
-        this.lastCycleResult = 'Autonomous execution is not enabled. Both GOLDCREST_AUTO_TRADING_ENABLED and GOLDCREST_AUTONOMOUS_LIVE_EXECUTION must be true.';
-        liveRuntimeLog('WARN', 'AUTO_TRADING_START_BLOCKED', {
-          stage: 'REQUEST_FLAGS',
-          reason: this.lastCycleResult
-        });
-        return this.getStatus();
-      }
-
-      const gateArm = armAutonomousExecutionGate();
-      if (!gateArm.success) {
-        this.state = 'BLOCKED';
-        this.lastCycleResult = gateArm.message;
-        liveRuntimeLog('WARN', 'AUTO_TRADING_START_BLOCKED', {
-          stage: 'REQUEST_FLAGS',
-          code: gateArm.code,
-          reason: gateArm.message
-        });
-        return this.getStatus();
-      }
-
-      if (!this.isRequested()) {
-        this.state = 'BLOCKED';
-        this.lastCycleResult = 'Autonomous execution is not enabled. Both GOLDCREST_AUTO_TRADING_ENABLED and GOLDCREST_AUTONOMOUS_LIVE_EXECUTION must be true.';
-        liveRuntimeLog('WARN', 'AUTO_TRADING_START_BLOCKED', {
-          stage: 'REQUEST_FLAGS',
-          reason: this.lastCycleResult
-        });
-        return this.getStatus();
-      }
+    if (!this.isRequested()) {
+      this.state = 'BLOCKED';
+      this.lastCycleResult = 'Autonomous execution is not enabled. Both GOLDCREST_AUTO_TRADING_ENABLED and GOLDCREST_AUTONOMOUS_LIVE_EXECUTION must be true.';
+      liveRuntimeLog('WARN', 'AUTO_TRADING_START_BLOCKED', {
+        stage: 'REQUEST_FLAGS',
+        reason: this.lastCycleResult
+      });
+      return this.getStatus();
     }
 
     const activation = autoExecutionEngine.enableAutomaticExecution();
@@ -617,7 +393,6 @@ class AutoTradingService {
     if (this.timer) return this.getStatus();
 
     if (marketGate.anyMarketOpen) {
-      this.hasCompletedExplicitStart = true;
       this.state = 'RUNNING';
       this.lastCycleResult = 'Auto-trading loop started.';
       liveRuntimeLog('SYSTEM', 'AUTO_TRADING_STARTED', {
@@ -627,9 +402,7 @@ class AutoTradingService {
       });
       void this.runCycle();
     } else {
-      this.hasCompletedExplicitStart = true;
-
-    this.state = 'PREPARING';
+      this.state = 'PREPARING';
       this.lastCycleResult = 'Markets are closed. Auto Live is armed; pre-open preparation is running and the system will begin evaluating trades as soon as a supported market opens.';
       this.preOpenStatus = 'RUNNING';
       liveRuntimeLog('SYSTEM', 'AUTO_TRADING_PRE_OPEN_ARMED', {
@@ -644,8 +417,6 @@ class AutoTradingService {
       void this.runScheduledCycle();
     }, AUTO_INTERVAL_MS);
     this.timer.unref?.();
-
-    this.startBackgroundSignalScanner();
 
     return this.getStatus();
   }
@@ -663,13 +434,7 @@ class AutoTradingService {
       clearInterval(this.timer);
       this.timer = null;
     }
-    this.stopBackgroundSignalScanner();
     this.clearPositionCapacityPause();
-    this.runtimeFaultReason = null;
-    if (this.runtimeRecoveryTimer) {
-      clearInterval(this.runtimeRecoveryTimer);
-      this.runtimeRecoveryTimer = null;
-    }
     this.state = 'STOPPED';
     this.lastCycleResult = reason;
     liveRuntimeLog('SYSTEM', 'AUTO_TRADING_STOPPED', { reason });
@@ -734,24 +499,23 @@ class AutoTradingService {
 
       return true;
     } catch (error: any) {
-      // A broker-position snapshot is also the authoritative runtime health
-      // signal for Auto Live. When it fails, do not label the outage as a
-      // position-limit condition; pause in a dedicated runtime-fault state and
-      // recover only after a fresh authoritative snapshot succeeds.
-      this.pauseForRuntimeFault(error?.message || String(error));
+      // Do not hammer the broker when the authoritative position snapshot is
+      // unavailable. Stay paused and retry on the next scheduled cycle.
+      this.state = 'PAUSED_LIMIT';
+      this.lastCycleResult =
+        'Auto Live paused: unable to verify current live-position capacity. Retrying on the next cycle.';
+      liveRuntimeLog('WARN', 'AUTO_TRADING_POSITION_LIMIT_CHECK_UNAVAILABLE', {
+        maxOpenPositions,
+        error: error?.message || String(error)
+      });
       return false;
     }
   }
 
   private async runScheduledCycle(): Promise<void> {
-    if (!['PREPARING', 'RUNNING', 'PAUSED_LIMIT', 'PAUSED_RUNTIME'].includes(this.state) || this.cycleInFlight) return;
+    if (!['PREPARING', 'RUNNING', 'PAUSED_LIMIT'].includes(this.state) || this.cycleInFlight) return;
 
     const marketGate = getAutoLiveMarketGate();
-
-    if (this.state === 'PAUSED_RUNTIME') {
-      await this.checkRuntimeRecoveryAndResume();
-      return;
-    }
 
     if (this.state === 'PAUSED_LIMIT') {
       const capacityAvailable = await this.checkSystemPositionCapacity();
@@ -804,19 +568,6 @@ class AutoTradingService {
     this.preOpenStatus = 'RUNNING';
 
     try {
-      const cTraderAdapter = brokerRegistry.getAdapter('CTRADER', 'LIVE');
-      const cTraderPreflight = await validateAutoLiveCTraderConnection(cTraderAdapter);
-      liveRuntimeLog(cTraderPreflight.ok ? 'INFO' : 'WARN', 'AUTO_TRADING_CTRADER_PREFLIGHT', {
-        ok: cTraderPreflight.ok, apiMode:cTraderPreflight.result.apiMode, apiEndpoint:cTraderPreflight.result.apiEndpoint,
-        account:cTraderPreflight.result.account, accountType:cTraderPreflight.result.accountType, error:cTraderPreflight.result.error
-      });
-      if (!cTraderPreflight.ok) {
-        this.state='BLOCKED'; this.lastCycleResult=cTraderPreflight.message;
-        this.setExecutionStatus({stage:'REJECTED', pair:null, side:null, signalId:null, message:cTraderPreflight.message});
-        liveRuntimeLog('WARN','AUTO_TRADING_BLOCKED_CTRADER_PREFLIGHT',{reason:cTraderPreflight.message,apiMode:cTraderPreflight.result.apiMode,apiEndpoint:cTraderPreflight.result.apiEndpoint});
-        return;
-      }
-
       if (killSwitch.isHalted()) {
         this.state = 'BLOCKED';
         this.lastCycleResult = 'Emergency kill switch is active.';
@@ -973,7 +724,6 @@ class AutoTradingService {
         pairs: getConfiguredAutoForexPairs()
       });
       this.preOpenNews = cycleNews;
-      this.currentCycleNews = cycleNews;
       this.preOpenStatus = cycleNews.status === 'LIVE' ? 'READY' : 'UNAVAILABLE';
 
       liveRuntimeLog(
@@ -1061,90 +811,16 @@ class AutoTradingService {
         });
       }
 
-      // 1. Pre-scan all configured non-blocked pairs so we evaluate exact current
-      // signals and scores before selecting trade execution candidates.
-      this.setExecutionStatus({
-        stage: 'SCANNING_MARKET',
-        pair: null,
-        side: null,
-        signalId: null,
-        message: 'Scanning live market signals across all configured Forex pairs...'
-      });
-
-      const scannedPairs = await Promise.all(
-        pairsToEvaluate.map(async (pair) => {
-          try {
-            await this.provider.refreshPair(pair);
-            const signal = await this.signalEngine.generateSignal(pair);
-            this.pairScores.set(pair, {
-              score: signal.score,
-              direction: signal.direction,
-              timestamp: Date.now()
-            });
-            this.pairSignals.set(pair, signal);
-            return { pair, signal };
-          } catch (err: any) {
-            return { pair, signal: null, error: err?.message || String(err) };
-          }
-        })
-      );
-
-      // Only pairs whose score meets or exceeds the minimum score set in settings
-      // AND have an actionable directional signal (BUY or SELL) with a trade plan
-      // are eligible for live order execution.
-      const config = getSystemConfig();
-      const minSignalScore = Math.max(0, Math.min(100, Math.round(Number(config.autoLiveMinSignalScore))));
-
-      const eligiblePairsMap = new Map<string, any>();
-      for (const item of scannedPairs) {
-        if (!item.signal) continue;
-        const isDirectional = item.signal.direction.includes('BUY') || item.signal.direction.includes('SELL');
-        if (item.signal.score >= minSignalScore && isDirectional && item.signal.tradePlan) {
-          eligiblePairsMap.set(item.pair, item.signal);
-        } else {
-          liveRuntimeLog('INFO', 'PAIR_INACTIVE_LOW_SCORE_OR_NON_DIRECTIONAL', {
-            pair: item.pair,
-            score: item.signal.score,
-            threshold: minSignalScore,
-            direction: item.signal.direction
-          });
-        }
-      }
-
-      const eligiblePairs = Array.from(eligiblePairsMap.keys());
-
-      if (eligiblePairs.length === 0) {
-        const message = `No trade executed this cycle: No scanned pairs met the minimum score threshold of ${minSignalScore}.`;
-        this.finishExecution('REJECTED', message, {
-          pair: null,
-          side: null,
-          signalId: null
-        });
-        this.lastCycleResult = 'Cycle completed. No pairs met minimum score threshold.';
-        return;
-      }
-
-      // Sort pairs with highest scores first so strongest conviction setups execute first
-      eligiblePairs.sort((a, b) => {
-        const scoreA = eligiblePairsMap.get(a)?.score ?? 50;
-        const scoreB = eligiblePairsMap.get(b)?.score ?? 50;
-        return scoreB - scoreA;
-      });
-
-      // Evaluate active eligible pairs sequentially to eliminate cTrader WebSocket handshake flooding
-      for (const pair of eligiblePairs) {
-        const preGeneratedSignal = eligiblePairsMap.get(pair);
-        await this.evaluatePair(pair, preGeneratedSignal);
-        const executed = this.lastActions.find(action => action.result === 'EXECUTED');
-        if (executed) {
-          break;
-        }
-      }
+      // Scan/analyze every eligible configured pair in parallel. Each pair is
+      // independently isolated, while the execution portion of evaluatePair
+      // is serialized by withExecutionLock(). This removes the old sequential
+      // scan bottleneck without weakening account-level safety gates.
+      await Promise.all(pairsToEvaluate.map(pair => this.evaluatePair(pair)));
 
       const executed = this.lastActions.find(action => action.result === 'EXECUTED');
       if (!executed) {
         const reasons = this.lastActions
-          .filter(action => action.result !== 'FILTERED' && action.reason)
+          .filter(action => action.reason)
           .map(action => `${action.pair}: ${action.reason}`)
           .slice(-8);
         const message = reasons.length
@@ -1169,7 +845,7 @@ class AutoTradingService {
     }
   }
 
-  private async evaluatePair(pair: string, preGeneratedSignal?: any): Promise<void> {
+  private async evaluatePair(pair: string): Promise<void> {
     try {
       this.setExecutionStatus({
         stage: 'SCANNING_MARKET',
@@ -1178,32 +854,9 @@ class AutoTradingService {
         signalId: null,
         message: 'Scanning live market data for ' + pair + '.'
       });
-      if (!preGeneratedSignal) {
-        await this.provider.refreshPair(pair);
-      }
+      await this.provider.refreshPair(pair);
       liveRuntimeLog('INFO', 'LIVE_DATA_REFRESHED', { pair });
-      const signal = preGeneratedSignal || await this.signalEngine.generateSignal(pair);
-      let marketTrendContext: Awaited<ReturnType<typeof getMarketTrendContext>> | null = null;
-      try {
-        marketTrendContext = await getMarketTrendContext(pair);
-        liveRuntimeLog('INFO', 'MARKET_TREND_CONTEXT_CAPTURED', {
-          pair,
-          signalId: signal.id,
-          direction: marketTrendContext.direction,
-          returns: {
-            days7: marketTrendContext.horizon.days7.returnPct,
-            days30: marketTrendContext.horizon.days30.returnPct,
-            days90: marketTrendContext.horizon.days90.returnPct,
-            days365: marketTrendContext.horizon.days365.returnPct
-          }
-        });
-      } catch (trendError: any) {
-        liveRuntimeLog('WARN', 'MARKET_TREND_CONTEXT_UNAVAILABLE', {
-          pair,
-          signalId: signal.id,
-          error: trendError?.message || String(trendError)
-        });
-      }
+      const signal = await this.signalEngine.generateSignal(pair);
       const isDirectionalSignal = signal.direction.includes('BUY') || signal.direction.includes('SELL');
       const signalSide: 'BUY' | 'SELL' | null = signal.direction.includes('BUY')
         ? 'BUY'
@@ -1226,55 +879,6 @@ class AutoTradingService {
         status: signal.status,
         hasTradePlan: Boolean(signal.tradePlan),
         strategyId: signal.strategyVersion
-      });
-      this.pairScores.set(pair, {
-        score: signal.score,
-        direction: signal.direction,
-        timestamp: Date.now()
-      });
-
-      // Persist the complete model state at decision time. This is research
-      // telemetry only and does not participate in the execution decision.
-      recordLiveTradeResearchSignal({
-        signalId: signal.id,
-        symbol: pair,
-        timestamp: signal.timestamp,
-        direction: signal.direction,
-        signalCategory: signal.signalCategory,
-        score: signal.score,
-        scoreBreakdown: signal.scoreBreakdown,
-        strategyVersion: signal.strategyVersion,
-        modelVersion: signal.modelVersion,
-        marketRegime: signal.marketRegime,
-        session: signal.session,
-        dataStatus: signal.dataStatus,
-        tradePlan: signal.tradePlan ? {
-          entryMin: signal.tradePlan.entryMin,
-          entryMax: signal.tradePlan.entryMax,
-          entryPreferred: signal.tradePlan.entryPreferred,
-          entryType: signal.tradePlan.entryType,
-          stopLoss: signal.tradePlan.stopLoss,
-          takeProfit1: signal.tradePlan.takeProfit1.targetPrice,
-          takeProfit2: signal.tradePlan.takeProfit2.targetPrice,
-          takeProfit3: signal.tradePlan.takeProfit3.targetPrice,
-          riskReward: signal.tradePlan.riskReward
-        } : null,
-        reasons: signal.reasons,
-        noTradeReasons: signal.noTradeReasons,
-        news: this.currentCycleNews,
-        context: {
-          autoLiveCycleTimestamp: this.lastCycleAt,
-          source: 'AUTO_LIVE',
-          lifecycleCapture: 'SIGNAL_TIME',
-          marketTrend: marketTrendContext
-        }
-      }).catch((researchError: any) => {
-        liveRuntimeLog('WARN', 'LIVE_TRADE_RESEARCH_TELEMETRY_FAILED', {
-          signalId: signal.id,
-          pair,
-          operation: 'SIGNAL',
-          error: researchError?.message || String(researchError)
-        });
       });
 
       // The signal engine has multiple directional categories (BUY, STRONG_BUY,
@@ -1305,10 +909,8 @@ return;
       // signal was waiting in the serialized execution queue. Do not make
       // another broker position request or run the remaining execution work
       // once the service has already entered PAUSED_LIMIT.
-      if (this.state === 'PAUSED_LIMIT' || this.state === 'PAUSED_RUNTIME') {
-        const reason = this.state === 'PAUSED_RUNTIME'
-          ? 'Auto Live execution paused because live broker/runtime health is unavailable. Waiting for authoritative recovery.'
-          : 'Auto Live execution paused because the maximum system-wide live-position limit has been reached. Waiting for a slot to become available.';
+      if (this.state === 'PAUSED_LIMIT') {
+        const reason = 'Auto Live execution paused because the maximum system-wide live-position limit has been reached. Waiting for a slot to become available.';
         this.lastActions.push({ pair, result: 'PAUSED', signalId: signal.id, reason });
         liveRuntimeLog('INFO', 'AUTO_TRADING_POSITION_LIMIT_QUEUE_PAUSED', {
           pair,
@@ -1332,7 +934,7 @@ return;
       // Re-check the authoritative account position count inside the serialized
       // execution lock. Another pair may have filled the final available slot
       // earlier in this same cycle.
-      const positionsBeforeExecution = systemPositionCapacity.positions;
+      const positionsBeforeExecution = await adapter.getPositions();
       const maxOpenPositions = Math.max(
         1,
         Math.min(100, Math.floor(Number(config.maxOpenPositions)))
@@ -1358,8 +960,8 @@ return;
       }
 
       const quote = await adapter.getQuote(pair);
-      if (!(quote.status === 'FRESH' || quote.status === 'DELAYED') || Date.now() - quote.timestamp >= 300_000) {
-        const reason = 'Fresh or authoritative fallback broker quote unavailable at dispatch boundary.';
+      if (quote.status !== 'FRESH' || Date.now() - quote.timestamp >= LIVE_QUOTE_MAX_AGE_MS) {
+        const reason = 'Fresh broker quote unavailable at dispatch boundary.';
         this.lastActions.push({ pair, result: 'BLOCKED', signalId: signal.id, reason });
                 tradeAuditLog('QUOTE_BLOCKED', { pair, signalId: signal.id, score: signal.score, reason });
 return;
@@ -1373,29 +975,6 @@ return;
         return;
       }
       const entryPrice = signalSide === 'BUY' ? quote.ask : quote.bid;
-
-      updateLiveTradeResearchQuote({
-        signalId: signal.id,
-        quote: {
-          bid: quote.bid,
-          ask: quote.ask,
-          spread: quote.spread,
-          timestamp: quote.timestamp,
-          status: quote.status
-        },
-        context: {
-          dispatchQuoteAgeMs: Math.max(0, Date.now() - quote.timestamp),
-          selectedEntrySide: signalSide,
-          selectedEntryPrice: entryPrice
-        }
-      }).catch((researchError: any) => {
-        liveRuntimeLog('WARN', 'LIVE_TRADE_RESEARCH_TELEMETRY_FAILED', {
-          signalId: signal.id,
-          pair,
-          operation: 'QUOTE',
-          error: researchError?.message || String(researchError)
-        });
-      });
 
       // Auto Live submits a MARKET order using the authoritative broker quote
       // available at the dispatch boundary. The signal entry zone is an
@@ -1443,19 +1022,22 @@ return;
       // Condition 13B remains authoritative and can still block the order when
       // the system-wide live-position limit has been reached.
       const score = Number(signal.score);
-      const scorePolicy = getAutoLiveParallelTradePolicy(score);
-      const configuredPairLimit = Math.max(
-        1,
-        Math.min(100, Math.floor(Number(config.autoLiveMaxTradesPerPair)))
-      );
-      const maxTradesPerPair = Math.min(scorePolicy.maxTradesPerPair, configuredPairLimit);
-      const scoreParallelTradeTier = scorePolicy.tier;
+      const maxTradesPerPair =
+        score > 78 ? 5 :
+        score > 70 ? 2 :
+        score >= 65 ? 1 :
+        0;
+      const scoreParallelTradeTier =
+        score > 78 ? '5_TRADES' :
+        score > 70 ? '2_TRADES' :
+        score >= 65 ? '1_TRADE' :
+        'BELOW_65';
 
       const positions = positionsBeforeExecution;
       const activePairPositionsCount = positions.filter(position =>
         String(position.symbol || '').toUpperCase() === pair.toUpperCase()
       ).length;
-      if (maxTradesPerPair <= 0 || !hasPairPositionCapacity(activePairPositionsCount, maxTradesPerPair)) {
+      if (maxTradesPerPair <= 0 || activePairPositionsCount >= maxTradesPerPair) {
         const reason = maxTradesPerPair <= 0
           ? `Auto Live score ${score.toFixed(2)} is below the minimum parallel-trade threshold of 65.`
           : `Maximum simultaneous Auto Live trades for ${pair} is ${maxTradesPerPair}; ${activePairPositionsCount} position(s) are already open.`;
@@ -1480,12 +1062,10 @@ return;
       }
 
       // Operator-configured Forex pip margins are authoritative for every
-      // new Auto Live order. Calculate SL/TP from the exact instrument-precision
-      // execution price that will be placed in the broker packet.
-      const targetDigits = typeof instrument.digits === 'number' && Number.isInteger(instrument.digits) && instrument.digits >= 0
-        ? instrument.digits
-        : (instrument.pipSize < 0.001 ? 5 : 3);
-      const executionEntryPrice = normalizePriceToInstrumentDigits(entryPrice, targetDigits);
+      // new Auto Live order. Calculate SL/TP from the exact three-decimal
+      // execution price that will be placed in the broker packet, rather than
+      // from the signal engine's analytical trade-plan levels.
+      const executionEntryPrice = normalizePriceToThreeDigits(entryPrice);
       let configuredTargets;
       try {
         configuredTargets = calculateForexPipTargets(
@@ -1493,8 +1073,7 @@ return;
           executionEntryPrice,
           instrument.pipSize,
           config.forexStopLossPips,
-          config.forexTakeProfitPips,
-          targetDigits
+          config.forexTakeProfitPips
         );
       } catch (targetError: any) {
         const reason = targetError?.message || String(targetError);
@@ -1559,37 +1138,6 @@ return;
       }
 
       const quantity = sizing.quantity;
-
-      updateLiveTradeResearchQuote({
-        signalId: signal.id,
-        quote: {
-          bid: quote.bid,
-          ask: quote.ask,
-          spread: quote.spread,
-          timestamp: quote.timestamp,
-          status: quote.status
-        },
-        requestedRiskQuantity: riskQuantity,
-        configuredQuantity: sizing.maxTradeValueUsd,
-        context: {
-          dispatchQuoteAgeMs: Math.max(0, Date.now() - quote.timestamp),
-          selectedEntrySide: signalSide,
-          selectedEntryPrice: entryPrice,
-          executionEntryPrice,
-          stopLossPips: configuredTargets.stopLossPips,
-          takeProfitPips: configuredTargets.takeProfitPips,
-          pipSize: configuredTargets.pipSize,
-          directQuantity: sizing.directQuantity,
-          sizingAdjusted: sizing.adjusted
-        }
-      }).catch((researchError: any) => {
-        liveRuntimeLog('WARN', 'LIVE_TRADE_RESEARCH_TELEMETRY_FAILED', {
-          signalId: signal.id,
-          pair,
-          operation: 'QUOTE_SIZED',
-          error: researchError?.message || String(researchError)
-        });
-      });
 
       this.setExecutionStatus({
         stage: 'PREPARING_ORDER',
@@ -1698,27 +1246,6 @@ return;
         }
       );
 
-      updateLiveTradeResearchExecution({
-        signalId: signal.id,
-        status: result.executed ? 'FILLED' : 'BLOCKED',
-        code: result.code,
-        reason: result.reason,
-        brokerOrderId: result.order?.brokerOrderId || result.order?.id,
-        brokerPositionId: result.order?.fillEvents?.find((fill: any) => fill?.brokerPositionId)?.brokerPositionId,
-        executedEntryPrice: result.order?.averageFillPrice ?? result.order?.price,
-        executedQuantity: result.order?.filledQuantity ?? result.order?.quantity,
-        commission: result.order?.commission,
-        brokerStatus: result.order?.status,
-        executionTimestamp: result.order?.timestamp || Date.now()
-      }).catch((researchError: any) => {
-        liveRuntimeLog('WARN', 'LIVE_TRADE_RESEARCH_TELEMETRY_FAILED', {
-          signalId: signal.id,
-          pair,
-          operation: 'EXECUTION',
-          error: researchError?.message || String(researchError)
-        });
-      });
-
       if (result.executed) {
         this.finishExecution('TRADE_EXECUTED', pair + ' ' + order.side + ' trade confirmed by the execution engine.', {
           pair,
@@ -1744,26 +1271,13 @@ return;
       });
     } catch (error: any) {
       const reason = error?.message || String(error);
-      this.lastActions.push({
+            this.lastActions.push({
         pair,
         result: 'ERROR',
         reason
       });
       liveRuntimeLog('ERROR', 'PAIR_EVALUATION_ERROR', { pair, error: reason });
       tradeAuditLog('PAIR_EVALUATION_ERROR', { pair, reason });
-
-      const runtimeErrorText = String(reason).toLowerCase();
-      if (
-        runtimeErrorText.includes('timeout')
-        || runtimeErrorText.includes('network')
-        || runtimeErrorText.includes('econn')
-        || runtimeErrorText.includes('socket')
-        || runtimeErrorText.includes('unavailable')
-        || runtimeErrorText.includes('connection')
-        || runtimeErrorText.includes('broker')
-      ) {
-        this.pauseForRuntimeFault(reason);
-      }
     }
   }
 }

@@ -201,14 +201,18 @@ export class TradeValidator {
       }
     }
 
-    // 6. Maximum trade value hard limit for Forex (USD).
-    const maxTradeValue = config.maxTradeValueForexUsd;
+    // 6. Per-broker maximum trade value hard limit.
+    // This check runs in TradeValidator because the signal-driven execution
+    // pipeline must enforce the same limit even when it does not invoke the
+    // HTTP broker route /api/brokers/order.
+    const isForex = input.market === 'FOREX';
+    const maxTradeValue = isForex ? config.maxTradeValueForexUsd : config.maxTradeValueIndianInr;
     const referencePrice = order.price && order.price > 0 ? order.price : input.currentPrice;
-    const quoteCurrency = input.symbol.replace(/[^A-Z]/g, '').slice(-3);
+    const quoteCurrency = isForex ? input.symbol.replace(/[^A-Z]/g, '').slice(-3) : 'INR';
     const tradeValue = Number(order.quantity) * Number(referencePrice);
     let maximumTradeValuePassed = Number.isFinite(maxTradeValue) && maxTradeValue > 0 && Number.isFinite(tradeValue) && tradeValue > 0;
 
-    if (maximumTradeValuePassed && quoteCurrency !== 'USD') {
+    if (maximumTradeValuePassed && isForex && quoteCurrency !== 'USD') {
       maximumTradeValuePassed = false;
       return {
         valid: false,
@@ -221,7 +225,7 @@ export class TradeValidator {
       maximumTradeValuePassed = false;
       return {
         valid: false,
-        rejectionReason: `MAX_TRADE_VALUE_EXCEEDED: Trade value ${tradeValue.toFixed(2)} USD exceeds the configured maximum of ${maxTradeValue.toFixed(2)} USD for cTrader.`,
+        rejectionReason: `MAX_TRADE_VALUE_EXCEEDED: Trade value ${tradeValue.toFixed(2)} ${isForex ? 'USD' : 'INR'} exceeds the configured maximum of ${maxTradeValue.toFixed(2)} ${isForex ? 'USD' : 'INR'} for ${isForex ? 'cTrader' : '5paisa'}.`,
         checks: { ...checks, maximumTradeValuePassed }
       };
     }

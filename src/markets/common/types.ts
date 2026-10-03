@@ -1,4 +1,4 @@
-export type MarketType = 'FOREX';
+export type MarketType = 'FOREX' | 'INDIA_EQUITY' | 'INDIA_OPTIONS';
 
 export type DataSourceStatus = 'LIVE' | 'DELAYED' | 'STALE' | 'UNKNOWN';
 
@@ -14,6 +14,12 @@ export type SignalCategory =
   | 'WATCH_SELL'
   | 'SELL'
   | 'STRONG_SELL'
+  | 'LONG_CALL'
+  | 'LONG_PUT'
+  | 'BULL_CALL_SPREAD'
+  | 'BEAR_PUT_SPREAD'
+  | 'BULL_PUT_SPREAD'
+  | 'BEAR_CALL_SPREAD'
   | 'WAIT'
   | 'NO_TRADE';
 
@@ -29,6 +35,8 @@ export type SignalStatus =
   | 'EXPIRED'
   | 'CANCELLED'
   | 'INVALIDATED';
+
+export type OptionType = 'CALL' | 'PUT';
 
 export interface Candle {
   timestamp: number;
@@ -48,7 +56,7 @@ export interface MarketSessionInfo {
   nextSessionName?: string;
   isOverlapping?: boolean;
   statusText: string;
-  currentUtcTime?: string;
+  currentIstTime?: string;
 }
 
 export interface ForexSessionState {
@@ -58,6 +66,14 @@ export interface ForexSessionState {
   newYork: boolean;
   isLondonNyOverlap: boolean;
   activeSessions: string[];
+}
+
+export interface IndianSessionState {
+  currentPhase: 'PRE_MARKET' | 'MARKET_OPEN' | 'REGULAR' | 'NEAR_CLOSE' | 'EXPIRY_SESSION' | 'CLOSED';
+  isOpen: boolean;
+  istTime: string;
+  minutesToClose: number;
+  isExpiryDay: boolean;
 }
 
 export interface TechnicalFeatures {
@@ -84,6 +100,89 @@ export interface MarketStructure {
   swingHigh: number;
   swingLow: number;
   liquidityZone?: { min: number; max: number; note: string };
+}
+
+export interface GreeksData {
+  delta: number;
+  gamma: number;
+  theta: number;
+  vega: number;
+  rho: number;
+  iv: number;
+  modelDerived: boolean;
+}
+
+export interface OptionContract {
+  symbol: string;
+  underlying: string;
+  expiry: string;
+  strike: number;
+  optionType: OptionType;
+  lotSize: number;
+  tickSize: number;
+  contractMultiplier: number;
+  ltp: number;
+  change: number;
+  changePercent: number;
+  oi: number;
+  changeOI: number;
+  volume: number;
+  bid: number;
+  ask: number;
+  spread: number;
+  iv: number;
+  greeks: GreeksData;
+  /** Authoritative 5paisa scrip code for live option execution. */
+  brokerInstrumentId?: string;
+  /** Broker exchange/segment metadata for exact derivative routing. */
+  exchange?: string;
+  exchangeType?: string;
+  isATM?: boolean;
+  isITM?: boolean;
+}
+
+export interface OptionChainStrikeRow {
+  strike: number;
+  isATM: boolean;
+  distanceFromAtm: number; // e.g. -2, -1, 0, 1, 2
+  call: OptionContract;
+  put: OptionContract;
+}
+
+export interface OptionChainSummary {
+  underlying: string;
+  spotPrice: number;
+  atmStrike: number;
+  expiry: string;
+  availableExpiries: string[];
+  totalCallOI: number;
+  totalPutOI: number;
+  pcr: number;
+  callResistanceStrike: number;
+  putSupportStrike: number;
+  highOIStrikeCall: number;
+  highOIStrikePut: number;
+  rows: OptionChainStrikeRow[];
+  isBlank?: boolean;
+  error?: string;
+  timestamp: number;
+}
+
+export interface StrategyPayoffPoint {
+  underlyingPrice: number;
+  pnl: number;
+}
+
+export interface StrategyPayoff {
+  strategyName: string;
+  underlying: string;
+  maxProfit: number;
+  maxLoss: number;
+  breakeven: number[];
+  riskRewardRatio: number;
+  netDebitOrCredit: number; // Positive = Debit, Negative = Credit
+  capitalRequired: number;
+  payoffPoints: StrategyPayoffPoint[];
 }
 
 export interface SignalScoreBreakdown {

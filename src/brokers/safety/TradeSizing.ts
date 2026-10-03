@@ -1,6 +1,5 @@
 import { BrokerInstrument } from '../types';
 import { getSystemConfig } from '../../services/configService';
-import { AUTO_LIVE_XAU_VOLUME_DIVISOR } from '../../services/autoLiveTradePolicy';
 
 export interface ForexSizingResult {
   requestedQuantity: number;
@@ -34,17 +33,16 @@ export function normalizePriceToThreeDigits(price: number): number {
 }
 
 /**
- * Normalizes an execution price to the broker instrument's exact digit precision.
- * Standard Forex pairs use 5 decimals; JPY pairs and indices use 3 decimals.
+ * Backward-compatible name used by existing execution code.
  */
 export function normalizePriceToInstrumentDigits(price: number, digits?: number): number {
   if (!Number.isFinite(price) || price <= 0) {
     throw new Error('INVALID_PRICE: Price must be a positive finite number.');
   }
-  const d = typeof digits === 'number' && Number.isInteger(digits) && digits >= 0
-    ? digits
-    : (price < 10 ? 5 : 3);
-  return Number(price.toFixed(d));
+  // The optional digits argument is retained for API compatibility, but
+  // executable Goldcrest prices are always normalized to three decimals.
+  void digits;
+  return Number(price.toFixed(GOLD_CREST_PRICE_DIGITS));
 }
 
 export interface ForexPipTargets {
@@ -66,14 +64,15 @@ export interface ForexPipTargets {
  * SELL:
  *   SL = entry + stopLossPips * pipSize
  *   TP = entry - takeProfitPips * pipSize
+ *
+ * The resulting prices use Goldcrest's global three-decimal execution policy.
  */
 export function calculateForexPipTargets(
   side: 'BUY' | 'SELL',
   entryPrice: number,
   pipSize: number,
   stopLossPips: number,
-  takeProfitPips: number,
-  digits?: number
+  takeProfitPips: number
 ): ForexPipTargets {
   if (side !== 'BUY' && side !== 'SELL') {
     throw new Error('INVALID_SIDE: Forex side must be BUY or SELL.');
@@ -91,10 +90,6 @@ export function calculateForexPipTargets(
     throw new Error('INVALID_TAKE_PROFIT_PIPS: Take Profit in pips must be greater than zero.');
   }
 
-  const targetDigits = typeof digits === 'number' && Number.isInteger(digits) && digits >= 0
-    ? digits
-    : (pipSize < 0.001 ? 5 : 3);
-
   const stopDistance = stopLossPips * pipSize;
   const takeProfitDistance = takeProfitPips * pipSize;
   const stopLoss = side === 'BUY'
@@ -109,8 +104,8 @@ export function calculateForexPipTargets(
   }
 
   return {
-    stopLoss: normalizePriceToInstrumentDigits(stopLoss, targetDigits),
-    takeProfit: normalizePriceToInstrumentDigits(takeProfit, targetDigits),
+    stopLoss: normalizePriceToThreeDigits(stopLoss),
+    takeProfit: normalizePriceToThreeDigits(takeProfit),
     stopLossPips,
     takeProfitPips,
     pipSize
@@ -166,7 +161,7 @@ export async function sizeForexOrderToMaxTradeValue(
   const isXauPair = normalizedSymbol
     .split('/')
     .some(part => part === 'XAU');
-  const xauVolumeDivisor = AUTO_LIVE_XAU_VOLUME_DIVISOR;
+  const xauVolumeDivisor = 1000;
   const configuredExecutionQuantity = isXauPair
     ? Math.floor(configuredQuantity / xauVolumeDivisor)
     : Math.floor(configuredQuantity);

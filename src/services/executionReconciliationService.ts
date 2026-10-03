@@ -10,7 +10,7 @@ import {
 } from './executionIntentService';
 
 const TERMINAL_STATES: OrderStatus[] = ['FILLED', 'CANCELLED', 'REJECTED', 'EXPIRED'];
-export const EXECUTION_RECONCILIATION_MAX_AGE_MS = 15 * 60_000;
+const MAX_AGE_MS = 15 * 60_000;
 
 function parseResult(raw: any): any {
   if (!raw) return {};
@@ -30,60 +30,14 @@ export async function reconcileExecutionIntent(idempotencyKey: string): Promise<
   if (!row || !['PENDING', 'IN_FLIGHT', 'RECONCILIATION_TIMEOUT'].includes(String(row.state))) return null;
 
   const stored = parseResult(row.result_json);
-  const reconciliationAttemptCount = Math.max(0, Number(stored?.reconciliationAttemptCount || 0)) + 1;
-  const attemptStartedAt = Date.now();
-  await executeRun(
-    'UPDATE execution_intents SET result_json = ?, updated_at = ? WHERE idempotency_key = ? AND state IN (?, ?, ?)',
-    [JSON.stringify({ ...stored, reconciliationAttemptCount, reconciliationLastAttemptAt: attemptStartedAt }), attemptStartedAt, idempotencyKey, 'PENDING', 'IN_FLIGHT', 'RECONCILIATION_TIMEOUT']
-  );
+  const brokerOrderId = brokerOrderIdFromResult(stored);
+  if (!brokerOrderId) return null;
+
   const broker = String(row.broker) as BrokerType;
   if (broker !== 'CTRADER' && broker !== 'FIVE_PAISA') return null;
 
-  const adapter = brokerRegistry.getAdapter(broker, 'LIVE');
-  let brokerOrderId = brokerOrderIdFromResult(stored);
-
-  // An ambiguous submission can lose the broker response before an order ID
-  // reaches Goldcrest. Recover the authoritative broker order using the
-  // stable client order identity first, then continue through the existing
-  // cumulative fill reconciliation path. The native lookup itself is a broker
-  // transport call, so it must remain inside the fail-closed reconciliation
-  // boundary. A network timeout here must never escape to the scheduler and
-  // bypass the existing 15-minute reconciliation-timeout policy.
-  const intentAgeMs = Date.now() - Number(row.created_at || Date.now());
-
   try {
-    if (!brokerOrderId && adapter.getOrderByClientOrderId) {
-      const payload = parseResult(row.payload_json);
-      const clientOrderId = String(payload?.signalId || '').trim().replace(/[^A-Za-z0-9._-]/g, '').slice(0, 50);
-      if (clientOrderId) {
-        const nativeOrder = await adapter.getOrderByClientOrderId(clientOrderId);
-        if (nativeOrder?.brokerOrderId || nativeOrder?.id) {
-          brokerOrderId = nativeOrder.brokerOrderId || nativeOrder.id;
-          stored.brokerOrderId = brokerOrderId;
-          stored.clientOrderId = nativeOrder.clientOrderId || clientOrderId;
-        }
-      }
-    }
-
-    // An old intent with no authoritative broker order ID is still ambiguous.
-    // Once the reconciliation age policy is reached, persist the timeout rather
-    // than leaving the row in PENDING forever.
-    if (!brokerOrderId) {
-      if (intentAgeMs >= EXECUTION_RECONCILIATION_MAX_AGE_MS) {
-        const timedOut = {
-          ...stored,
-          reconciliationTimedOutAt: stored.reconciliationTimedOutAt || Date.now(),
-          reconciliationTimeoutAgeMs: intentAgeMs,
-          reconciliationState: 'RECONCILIATION_TIMEOUT',
-          reconciliationErrorCode: stored.reconciliationErrorCode || 'BROKER_ORDER_NOT_RESOLVED',
-          operatorActionRequired: true,
-          reconciliationAttemptCount,
-          reconciliationLastAttemptAt: attemptStartedAt
-        };
-        await markExecutionIntentReconciliationTimeout(idempotencyKey, timedOut);
-      }
-      return null;
-    }
+    const adapter = brokerRegistry.getAdapter(broker, 'LIVE');
     const requestedQuantityHint = Number(stored?.requestedQuantity ?? stored?.quantity ?? stored?.order?.quantity ?? 0);
     const status = await adapter.getOrderStatus(
       String(brokerOrderId),
@@ -133,8 +87,6 @@ export async function reconcileExecutionIntent(idempotencyKey: string): Promise<
       averageFillPrice: status.averageFillPrice,
       commission: status.commission,
       reconciledAt: Date.now(),
-      reconciliationAttemptCount,
-      reconciliationLastAttemptAt: attemptStartedAt,
       order: status
     };
 
@@ -203,7 +155,7 @@ export async function reconcileExecutionIntent(idempotencyKey: string): Promise<
       merged.operatorActionRequired = false;
       merged.resolvedAfterTimeoutAt = Date.now();
     }
-    if (age >= EXECUTION_RECONCILIATION_MAX_AGE_MS && !TERMINAL_STATES.includes(status.status)) {
+    if (age >= MAX_AGE_MS && !TERMINAL_STATES.includes(status.status)) {
       const timedOut = {
         ...merged,
         reconciliationTimedOutAt: merged.reconciliationTimedOutAt || Date.now(),
@@ -253,12 +205,10 @@ export async function reconcileExecutionIntent(idempotencyKey: string): Promise<
       brokerOrderId,
       reconciliationError: normalized.message,
       reconciliationErrorCode: normalized.code,
-      reconciledAt: Date.now(),
-      reconciliationAttemptCount,
-      reconciliationLastAttemptAt: attemptStartedAt
+      reconciledAt: Date.now()
     };
 
-    if (age >= EXECUTION_RECONCILIATION_MAX_AGE_MS) {
+    if (age >= MAX_AGE_MS) {
       merged.reconciliationTimedOutAt = merged.reconciliationTimedOutAt || Date.now();
       merged.reconciliationTimeoutAgeMs = age;
       merged.reconciliationState = 'RECONCILIATION_TIMEOUT';

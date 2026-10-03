@@ -7,23 +7,26 @@ import { TradingOperationsDashboard } from './components/TradingOperationsDashbo
 import { TradingControlCenter } from './components/TradingControlCenter';
 import { HistoryPage } from './components/HistoryPage';
 import { DatabaseExplorerPage } from './components/DatabaseExplorerPage';
+import { AlertsPage } from './components/AlertsPage';
 import { SettingsHub } from './components/SettingsHub';
-import { ForexTerminalDashboard } from './components/ForexTerminalDashboard';
 import { GlobalAppShell } from './components/GlobalAppShell';
 import { SignalModal } from './components/SignalModal';
 import { DiagnosticsModal } from './components/DiagnosticsModal';
 import { OrderConfirmationModal } from './components/OrderConfirmationModal';
-import { TradingSignal, Candle, ForexSessionState } from './markets/common/types';
-import { getForexSessionState } from './markets/common/session';
+import { TradingSignal, Candle, ForexSessionState, IndianSessionState } from './markets/common/types';
+import { getForexSessionState, getIndianSessionState } from './markets/common/session';
 import { BrokerType, TradingEnvironment, OrderRequest } from './brokers/types';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<string>('settings');
   const [forexPairs, setForexPairs] = useState<any[]>([]);
   const [forexSessions, setForexSessions] = useState<ForexSessionState>(() => getForexSessionState(new Date()));
+  const [indianUnderlyings, setIndianUnderlyings] = useState<any[]>([]);
+  const [indianSession, setIndianSession] = useState<IndianSessionState>(() => getIndianSessionState(new Date()));
   const [signals, setSignals] = useState<TradingSignal[]>([]);
   const [candlesMap, setCandlesMap] = useState<Record<string, Candle[]>>({});
   const [selectedSignal, setSelectedSignal] = useState<TradingSignal | null>(null);
+  const [selectedOptionUnderlying, setSelectedOptionUnderlying] = useState<string>('NIFTY');
   const [showDiagnostics, setShowDiagnostics] = useState<boolean>(false);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [loadingInitial, setLoadingInitial] = useState<boolean>(true);
@@ -39,6 +42,9 @@ export default function App() {
   const [autoTradingStatus, setAutoTradingStatus] = useState<any | null>(null);
   const [activeForexUniverse, setActiveForexUniverse] = useState<string[]>([
     'EUR/USD', 'GBP/USD', 'USD/JPY', 'USD/CHF', 'AUD/USD'
+  ]);
+  const [activeIndianUniverse, setActiveIndianUniverse] = useState<string[]>([
+    'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX'
   ]);
 
   // Order confirmation modal; Goldcrest operates in LIVE_ONLY mode.
@@ -70,6 +76,7 @@ export default function App() {
     }
   }, []);
 
+  // Fetch all primary terminal data
   // Fetch all primary terminal data. Background refreshes are serialized
   // and never replace valid state with an empty/error fallback.
   const refreshTerminalData = useCallback(async (showSpinner = true) => {
@@ -93,8 +100,9 @@ export default function App() {
           return fallback;
         };
 
-        const [fxPairs, sigs, autoStatus, config] = await Promise.all([
+        const [fxPairs, inUnder, sigs, autoStatus, config] = await Promise.all([
           safeFetchJson('/api/forex/pairs'),
+          safeFetchJson('/api/india/underlyings'),
           safeFetchJson('/api/signals/all'),
           safeFetchJson('/api/auto-trading/status', null),
           safeFetchJson('/api/config', null)
@@ -104,10 +112,16 @@ export default function App() {
           if (Array.isArray(config.autoLiveForexPairs)) {
             setActiveForexUniverse(config.autoLiveForexPairs);
           }
+          if (Array.isArray(config.autoLiveIndianUnderlyings)) {
+            setActiveIndianUniverse(config.autoLiveIndianUnderlyings);
+          }
         }
 
         const selectedForex = Array.isArray(config?.autoLiveForexPairs)
           ? new Set(config.autoLiveForexPairs.map((symbol: any) => String(symbol).toUpperCase()))
+          : null;
+        const selectedIndia = Array.isArray(config?.autoLiveIndianUnderlyings)
+          ? new Set(config.autoLiveIndianUnderlyings.map((symbol: any) => String(symbol).toUpperCase()))
           : null;
 
         if (Array.isArray(fxPairs) && fxPairs.length > 0) {
@@ -116,14 +130,26 @@ export default function App() {
             : fxPairs);
         }
 
+        if (Array.isArray(inUnder) && inUnder.length > 0) {
+          setIndianUnderlyings(selectedIndia
+            ? inUnder.filter((row: any) => selectedIndia.has(String(row?.symbol || '').toUpperCase()))
+            : inUnder);
+        }
+
         if (Array.isArray(sigs) && sigs.length > 0) setSignals(sigs);
         if (autoStatus && typeof autoStatus === 'object') setAutoTradingStatus(autoStatus);
 
-        const eurCandles = await safeFetchJson('/api/candles/EUR%2FUSD');
+        const [eurCandles, niftyCandles] = await Promise.all([
+          safeFetchJson('/api/candles/EUR%2FUSD'),
+          safeFetchJson('/api/candles/NIFTY')
+        ]);
 
         // Preserve valid chart data during transient broker/API errors.
         if (Array.isArray(eurCandles) && eurCandles.length > 0) {
           setCandlesMap(prev => ({ ...prev, 'EUR/USD': eurCandles }));
+        }
+        if (Array.isArray(niftyCandles) && niftyCandles.length > 0) {
+          setCandlesMap(prev => ({ ...prev, 'NIFTY': niftyCandles }));
         }
       } catch (err) {
         console.error('Failed to load terminal data:', err);
@@ -254,12 +280,16 @@ export default function App() {
     <GlobalAppShell
       activeTab={activeTab}
       setActiveTab={setActiveTab}
+      forexPairs={forexPairs}
       forexSessions={forexSessions}
+      indianSession={indianSession}
+      indianUnderlyings={indianUnderlyings}
       header={
         <Header
           activeTab={activeTab}
           setActiveTab={setActiveTab}
           forexSessions={forexSessions}
+          indianSession={indianSession}
           onRefresh={refreshTerminalData}
           isRefreshing={isRefreshing}
           onOpenDiagnostics={() => setShowDiagnostics(true)}
@@ -273,7 +303,8 @@ export default function App() {
         />
       }
     >
-      <main className="min-h-[calc(100vh-162px)] w-full px-[10px] pt-[10px] pb-5 space-y-4 bg-[#03070d] text-slate-100">
+      {/* Fixed global shell content outlet: view components render here. */}
+      <main className="min-h-[calc(100vh-162px)] w-full px-4 sm:px-6 lg:px-8 py-5 space-y-4 bg-[#03070d] text-slate-100">
         {loadingInitial ? (
           <div className="flex flex-col items-center justify-center min-h-[50vh] space-y-3 font-mono">
             <div className="w-10 h-10 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin"></div>
@@ -282,83 +313,85 @@ export default function App() {
           </div>
         ) : (
           <>
+            {/* Market Watch / scanners */}
             {activeTab === 'market_watch' && (
               <MarketHub
                 forexPairs={forexPairs}
+                indianUnderlyings={indianUnderlyings}
                 candlesMap={candlesMap}
                 onSelectSignal={(sig) => setSelectedSignal(sig)}
                 onEnsureCandles={ensureCandlesLoaded}
+                initialOptionSymbol={selectedOptionUnderlying}
                 environment={environment}
               />
             )}
 
-              {activeTab === 'signals' && (
-                <SignalsView
-                  signals={signals}
-                  onSelectSignal={(sig) => setSelectedSignal(sig)}
-                />
-              )}
+            {activeTab === 'signals' && (
+              <SignalsView
+                signals={signals}
+                onSelectSignal={(sig) => setSelectedSignal(sig)}
+              />
+            )}
 
-              {activeTab === 'trading' && (
-                <TradingHub
-                  environment={environment}
-                  selectedBroker={selectedBroker}
-                  maskedAccount={maskedAccount}
-                  balance={balance}
-                  currency={currency}
-                  isEmergencyHalted={isEmergencyHalted}
-                  onRequestEnvironmentChange={handleRequestEnvironmentChange}
-                />
-              )}
+            {activeTab === 'trading' && (
+              <TradingHub
+                environment={environment}
+                selectedBroker={selectedBroker}
+                maskedAccount={maskedAccount}
+                balance={balance}
+                currency={currency}
+                isEmergencyHalted={isEmergencyHalted}
+                onRequestEnvironmentChange={handleRequestEnvironmentChange}
+              />
+            )}
 
-              {(activeTab === 'pnl' || activeTab === 'accounting') && (
-                <TradingControlCenter
-                  initialSection="MARKET_INTELLIGENCE"
-                  reportsMode={true}
-                  onSelectSignalModal={(sig) => setSelectedSignal(sig)}
-                  autoTradingStatus={autoTradingStatus}
-                  onAutoTradingStatusChange={setAutoTradingStatus}
-                />
-              )}
+            {(activeTab === 'pnl' || activeTab === 'accounting') && (
+              <TradingControlCenter
+              initialSection="ALL_OVERVIEW"
+              onSelectSignalModal={(sig) => setSelectedSignal(sig)}
+              autoTradingStatus={autoTradingStatus}
+              onAutoTradingStatusChange={setAutoTradingStatus}
+            />
+            )}
 
-              {(activeTab === 'research' || activeTab === 'ml') && (
-                <div className="rounded-lg border border-slate-800 bg-slate-900 p-6 text-sm text-slate-300">
-                  Research and ML training interfaces are retired from the LIVE production runtime.
-                </div>
-              )}
+            {(activeTab === 'research' || activeTab === 'ml') && (
+              <div className="rounded-lg border border-slate-800 bg-slate-900 p-6 text-sm text-slate-300">
+                Research and ML training interfaces are retired from the LIVE production runtime.
+              </div>
+            )}
 
-              {(activeTab === 'control_center' || activeTab === 'operations' || activeTab === 'reconciliation' || activeTab === 'reconcile') && (
-                <TradingControlCenter
-                  onSelectSignalModal={(sig) => setSelectedSignal(sig)}
-                  autoTradingStatus={autoTradingStatus}
-                  onAutoTradingStatusChange={setAutoTradingStatus}
-                />
-              )}
+            {(activeTab === 'control_center' || activeTab === 'operations' || activeTab === 'reconciliation' || activeTab === 'reconcile') && (
+              <TradingControlCenter
+              onSelectSignalModal={(sig) => setSelectedSignal(sig)}
+              autoTradingStatus={autoTradingStatus}
+              onAutoTradingStatusChange={setAutoTradingStatus}
+            />
+            )}
 
-              {activeTab === 'alerts' && (
-                <TradingOperationsDashboard initialSubTab="OPS" />
-              )}
+            {activeTab === 'alerts' && (
+              <AlertsPage />
+            )}
 
-              {activeTab === 'history' && (
-                <HistoryPage />
-              )}
+            {activeTab === 'history' && (
+              <HistoryPage />
+            )}
 
-              {activeTab === 'database' && (
-                <DatabaseExplorerPage />
-              )}
+            {activeTab === 'database' && (
+              <DatabaseExplorerPage />
+            )}
 
-              {(activeTab === 'settings' || activeTab === 'governance') && (
-                <SettingsHub
-                  currentEnvironment={environment}
-                  selectedBroker={selectedBroker}
-                  onEnvironmentChange={handleRequestEnvironmentChange}
-                  onBrokerSelect={handleSelectBroker}
-                  onRefreshGlobal={refreshBrokerStatus}
-                />
-              )}
-            </>
-          )}
-        </main>
+            {(activeTab === 'settings' || activeTab === 'governance') && (
+              <SettingsHub
+                currentEnvironment={environment}
+                selectedBroker={selectedBroker}
+                onEnvironmentChange={handleRequestEnvironmentChange}
+                onBrokerSelect={handleSelectBroker}
+                onRefreshGlobal={refreshBrokerStatus}
+              />
+            )}
+          </>
+        )}
+      </main>
  
       {/* Signal Quantitative Inspection Modal */}
       {selectedSignal && (

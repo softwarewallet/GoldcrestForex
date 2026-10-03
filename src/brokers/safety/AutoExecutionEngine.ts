@@ -11,7 +11,7 @@ import type { SignalValidationInput } from './TradeValidator';
 import { liveTradingGate, LiveGateEvaluationParams } from './LiveTradingGate';
 import { autoTradeReadinessService } from './AutoTradeReadiness';
 import { logBrokerAction } from '../auditLog';
-import { claimExecutionIntent, completeExecutionIntent, failExecutionIntent, markExecutionIntentInFlight, markExecutionIntentSubmissionAmbiguous, reconcileExecutionIntent } from '../../services/executionIntentService';
+import { claimExecutionIntent, completeExecutionIntent, failExecutionIntent, markExecutionIntentInFlight } from '../../services/executionIntentService';
 import { getSystemConfig, updateSystemConfig } from '../../services/configService';
 import { liveRuntimeLog, tradeAuditLog } from '../../services/liveRuntimeLog';
 import { normalizePriceToInstrumentDigits } from './TradeSizing';
@@ -121,36 +121,6 @@ function syncAutonomousPermission(): boolean {
 
 export function refreshAutonomousExecutionPermission(): boolean {
   return syncAutonomousPermission();
-}
-
-export interface AutoLiveOrderPacketValidation {
-  valid: boolean;
-  reasons: string[];
-}
-
-export function validateAutoLiveOrderPacket(order: OrderRequest): AutoLiveOrderPacketValidation {
-  const reasons: string[] = [];
-  if (String(order.market).toUpperCase() !== 'FOREX') reasons.push('market must be FOREX');
-  if (!/^[A-Z]{3}\/[A-Z]{3}$/.test(String(order.symbol || '').toUpperCase())) reasons.push('symbol must be a valid FX pair');
-  if (order.orderType !== 'MARKET') reasons.push('Auto Live order type must be MARKET');
-  if (!(Number.isInteger(order.quantity) && order.quantity > 0)) reasons.push('quantity must be a positive integer');
-  if (!(Number.isFinite(order.price) && Number(order.price) > 0)) reasons.push('entry price must be positive');
-  if (!(Number.isFinite(order.stopLoss) && Number(order.stopLoss) > 0)) reasons.push('stop loss must be positive');
-  if (!(Number.isFinite(order.takeProfit) && Number(order.takeProfit) > 0)) reasons.push('take profit must be positive');
-
-  if (reasons.length === 0) {
-    const price = Number(order.price);
-    const stopLoss = Number(order.stopLoss);
-    const takeProfit = Number(order.takeProfit);
-    if (order.side === 'BUY' && !(stopLoss < price && price < takeProfit)) {
-      reasons.push('BUY packet must satisfy stopLoss < price < takeProfit');
-    }
-    if (order.side === 'SELL' && !(takeProfit < price && price < stopLoss)) {
-      reasons.push('SELL packet must satisfy takeProfit < price < stopLoss');
-    }
-  }
-
-  return { valid: reasons.length === 0, reasons };
 }
 
 export interface ExecutionPermissionConfig {
@@ -322,19 +292,6 @@ class AutoExecutionEngine {
       takeProfit: order.takeProfit
     });
 
-    const packetValidation = validateAutoLiveOrderPacket(order);
-    if (!packetValidation.valid) {
-      auditExecution('FINAL_ORDER_PACKET_REJECTED', {
-        code: 'INVALID_AUTONOMOUS_ORDER_PACKET',
-        reason: packetValidation.reasons.join('; ')
-      });
-      return {
-        executed: false,
-        code: 'INVALID_AUTONOMOUS_ORDER_PACKET',
-        reason: packetValidation.reasons.join('; ')
-      };
-    }
-
     // Stage 1: Kill Switch Check
     if (killSwitch.isHalted()) {
       logBrokerAction({
@@ -460,37 +417,6 @@ class AutoExecutionEngine {
       });
 
       if (!intent.claimed) {
-        // An ambiguous prior submission is reconciled against authoritative broker
-        // history before the duplicate is rejected. Resolution is fail-closed:
-        // only one exact broker match can complete the durable intent.
-        if (intent.existing?.state === 'RECONCILIATION_TIMEOUT' || intent.existing?.state === 'IN_FLIGHT') {
-          try {
-            const reconciliation = await reconcileExecutionIntent(idempotencyKey, adapter);
-            if (reconciliation.status === 'RESOLVED' && reconciliation.order) {
-              auditExecution('EXECUTION_INTENT_RECONCILED', {
-                code: 'EXECUTION_INTENT_RECONCILED',
-                brokerOrderId: reconciliation.order.brokerOrderId || reconciliation.order.id
-              });
-              return {
-                executed: reconciliation.order.status === 'FILLED',
-                order: reconciliation.order,
-                code: 'EXECUTION_INTENT_RECONCILED',
-                reason: reconciliation.reason
-              };
-            }
-            auditExecution('EXECUTION_INTENT_RECONCILIATION_PENDING', {
-              code: 'EXECUTION_INTENT_RECONCILIATION_PENDING',
-              reason: reconciliation.reason,
-              candidateCount: reconciliation.candidates.length
-            });
-          } catch (reconciliationError: any) {
-            auditExecution('EXECUTION_INTENT_RECONCILIATION_FAILED', {
-              code: 'EXECUTION_INTENT_RECONCILIATION_FAILED',
-              reason: reconciliationError?.message || String(reconciliationError)
-            });
-          }
-        }
-
         auditExecution('EXECUTION_INTENT_DUPLICATE', { code: 'EXECUTION_INTENT_ALREADY_EXISTS', reason: 'This autonomous signal has already been submitted or is pending reconciliation.', existingState: intent.existing?.state });
         return {
           executed: intent.existing?.state === 'COMPLETED',
@@ -520,36 +446,7 @@ class AutoExecutionEngine {
       // This is the last guarded application-level point before the live broker API call.
       auditExecution('FINAL_ORDER_PACKET', { request: order });
       onReadyToSubmit?.();
-
-      // Move the durable intent to IN_FLIGHT immediately before submission.
-      // If the broker call then fails without a definitive broker response,
-      // the outcome is intentionally ambiguous: the broker may have accepted
-      // the order even though the client did not receive the response. Keep
-      // the intent non-retryable and route it to reconciliation instead of
-      // marking it FAILED.
-      await markExecutionIntentInFlight(idempotencyKey, {
-        status: 'SUBMISSION_STARTED',
-        broker,
-        symbol: order.symbol,
-        signalId: order.signalId
-      });
-
-      let brokerSubmissionStarted = true;
-      let placedOrder: NormalizedOrder;
-      try {
-        placedOrder = await autonomousPlacer.call(adapter, order);
-        brokerSubmissionStarted = false;
-      } catch (err: any) {
-        if (brokerSubmissionStarted) {
-          await markExecutionIntentSubmissionAmbiguous(idempotencyKey, {
-            message: err?.message || String(err),
-            broker,
-            symbol: order.symbol,
-            signalId: order.signalId
-          });
-        }
-        throw err;
-      }
+      const placedOrder = await autonomousPlacer.call(adapter, order);
 
       if (placedOrder.status === 'FILLED') {
         await completeExecutionIntent(idempotencyKey, placedOrder);

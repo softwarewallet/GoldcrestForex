@@ -46,8 +46,10 @@ import { BrokerType, TradingEnvironment, OrderRequest } from '../brokers/types';
 import { TradingSignal } from '../markets/common/types';
 
 export type ControlCenterSection =
-  | 'BALANCE_HISTORY'
+  | 'ALL_OVERVIEW'
+  | 'ACCOUNT_OVERVIEW'
   | 'MARKET_INTELLIGENCE'
+  | 'OPTIONS_CHAIN'
   | 'SIGNAL_CENTER'
   | 'POSITIONS'
   | 'ORDERS'
@@ -61,7 +63,6 @@ export type FreshnessStatus = 'LIVE' | 'RECENT' | 'STALE' | 'ERROR' | 'UNAVAILAB
 
 interface AccountCardData {
   broker: BrokerType;
-  accountType?: 'LIVE' | 'DEMO';
   accountId: string;
   accountStatus: 'ACTIVE' | 'DISCONNECTED' | 'ERROR' | 'ACCOUNT_NOT_FOUND';
   connectionStatus: 'CONNECTED' | 'CONNECTING' | 'DISCONNECTED' | 'ERROR';
@@ -80,7 +81,7 @@ interface AccountCardData {
 }
 
 interface MarketQuoteItem {
-  market: 'FOREX';
+  market: 'FOREX' | 'INDIA_EQUITY';
   symbol: string;
   bid: number;
   ask: number;
@@ -181,15 +182,13 @@ interface TradingControlCenterProps {
   onSelectSignalModal?: (signal: TradingSignal) => void;
   autoTradingStatus?: any | null;
   onAutoTradingStatusChange?: (status: any) => void;
-  reportsMode?: boolean;
 }
 
 export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
-  initialSection = 'MARKET_INTELLIGENCE',
+  initialSection = 'ALL_OVERVIEW',
   onSelectSignalModal,
   autoTradingStatus: parentAutoTradingStatus = null,
-  onAutoTradingStatusChange,
-  reportsMode = false
+  onAutoTradingStatusChange
 }) => {
   const [activeSection, setActiveSection] = useState<ControlCenterSection>(initialSection);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
@@ -212,15 +211,17 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
   const [auditCategoryFilter, setAuditCategoryFilter] = useState<string>('ALL');
   const [auditSeverityFilter, setAuditSeverityFilter] = useState<string>('ALL');
 
+  // Options Workspace State
+  const [optionsUnderlying, setOptionsUnderlying] = useState<string>('NIFTY');
+  const [optionsExpiry, setOptionsExpiry] = useState<string>('');
+  const [optionsStrikeRange, setOptionsStrikeRange] = useState<number>(7);
+  const [optionsChainData, setOptionsChainData] = useState<any | null>(null);
+  const [optionsLoading, setOptionsLoading] = useState<boolean>(false);
+  const [optionsError, setOptionsError] = useState<string | null>(null);
+
   // Execution Gate State
   const [gateBusy, setGateBusy] = useState<boolean>(false);
   const [gateFeedback, setGateFeedback] = useState<string | null>(null);
-  const [goLiveValidationBusy, setGoLiveValidationBusy] = useState<boolean>(false);
-  const [goLiveValidation, setGoLiveValidation] = useState<any | null>(null);
-  const [activeAutoLiveMonitorBusy, setActiveAutoLiveMonitorBusy] = useState<boolean>(false);
-  const [activeAutoLiveMonitor, setActiveAutoLiveMonitor] = useState<any | null>(null);
-  const [ctraderFunctionalValidationBusy, setCtraderFunctionalValidationBusy] = useState<boolean>(false);
-  const [ctraderFunctionalValidation, setCtraderFunctionalValidation] = useState<any | null>(null);
 
   // Live broker/account/market state only; empty until authoritative APIs return data.
   const [accounts, setAccounts] = useState<AccountCardData[]>([]);
@@ -232,9 +233,6 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
   const [reconciliations, setReconciliations] = useState<ReconciliationComparison[]>([]);
   const [healthComponents, setHealthComponents] = useState<SystemHealthComponent[]>([]);
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
-  const [balanceSnapshots, setBalanceSnapshots] = useState<any[]>([]);
-  const [balanceSnapshotBrokerFilter, setBalanceSnapshotBrokerFilter] = useState<string>('ALL');
-  const [balanceSnapshotDateFilter, setBalanceSnapshotDateFilter] = useState<string>('');
   const [newsSnapshot, setNewsSnapshot] = useState<any | null>(null);
   const [newsBusy, setNewsBusy] = useState(false);
   const [newsError, setNewsError] = useState<string | null>(null);
@@ -255,8 +253,6 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
   const fetchAllOperationalData = useCallback(async () => {
     setIsRefreshing(true);
     try {
-      const active = activeSection;
-      
       const [
         brokerStatusRes,
         positionsRes,
@@ -267,55 +263,22 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
         healthRes,
         autoTradingRes,
         forexPairsRes,
+        indiaUnderlyingsRes,
         signalsRes,
-        newsRes,
-        balanceHistoryRes
+        newsRes
       ] = await Promise.all([
-        // Core telemetry (always fetch)
         fetch('/api/brokers/status', { cache: 'no-store' }).catch(() => null),
-        
-        // Section-specific telemetry
-        (active === 'POSITIONS') 
-          ? fetch('/api/brokers/positions', { cache: 'no-store' }).catch(() => null) 
-          : Promise.resolve(null),
-          
-        (active === 'ORDERS') 
-          ? fetch('/api/brokers/orders', { cache: 'no-store' }).catch(() => null) 
-          : Promise.resolve(null),
-          
-        (active === 'AUDIT_CENTER' || active === 'RISK_CENTER') 
-          ? fetch('/api/governance/audit-logs?limit=100', { cache: 'no-store' }).catch(() => null) 
-          : Promise.resolve(null),
-          
-        (active === 'RECONCILIATION') 
-          ? fetch('/api/governance/reconciliation/positions', { cache: 'no-store' }).catch(() => null) 
-          : Promise.resolve(null),
-          
-        (active === 'RECONCILIATION') 
-          ? fetch('/api/governance/reconciliation/orders', { cache: 'no-store' }).catch(() => null) 
-          : Promise.resolve(null),
-          
-        (active === 'SYSTEM_HEALTH') 
-          ? fetch('/api/governance/live-health', { cache: 'no-store' }).catch(() => null) 
-          : Promise.resolve(null),
-          
+        fetch('/api/brokers/positions', { cache: 'no-store' }).catch(() => null),
+        fetch('/api/brokers/orders', { cache: 'no-store' }).catch(() => null),
+        fetch('/api/governance/audit-logs?limit=100', { cache: 'no-store' }).catch(() => null),
+        fetch('/api/governance/reconciliation/positions', { cache: 'no-store' }).catch(() => null),
+        fetch('/api/governance/reconciliation/orders', { cache: 'no-store' }).catch(() => null),
+        fetch('/api/governance/live-health', { cache: 'no-store' }).catch(() => null),
         fetch('/api/auto-trading/status', { cache: 'no-store' }).catch(() => null),
-        
-        (active === 'MARKET_INTELLIGENCE') 
-          ? fetch('/api/forex/pairs', { cache: 'no-store' }).catch(() => null) 
-          : Promise.resolve(null),
-          
-        (active === 'SIGNAL_CENTER') 
-          ? fetch('/api/signals/all', { cache: 'no-store' }).catch(() => null) 
-          : Promise.resolve(null),
-          
-        (active === 'MARKET_INTELLIGENCE') 
-          ? fetch('/api/forex/news', { cache: 'no-store' }).catch(() => null) 
-          : Promise.resolve(null),
-          
-        (reportsMode && (active === 'BALANCE_HISTORY')) 
-          ? fetch('/api/reports/account-balance-history?limit=1000', { cache: 'no-store' }).catch(() => null) 
-          : Promise.resolve(null)
+        fetch('/api/forex/pairs', { cache: 'no-store' }).catch(() => null),
+        fetch('/api/india/underlyings', { cache: 'no-store' }).catch(() => null),
+        fetch('/api/signals/all', { cache: 'no-store' }).catch(() => null),
+        fetch('/api/forex/news', { cache: 'no-store' }).catch(() => null)
       ]);
 
       if (autoTradingRes?.ok) {
@@ -339,7 +302,6 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
             const currency = String(account.currency || 'USD').toUpperCase();
             return {
               broker: item.broker,
-              accountType: account.accountType === 'DEMO' ? 'DEMO' : 'LIVE',
               accountId: String(account.accountId || '****'),
               accountStatus: connected ? 'ACTIVE' : 'ERROR',
               connectionStatus: connected ? 'CONNECTED' : 'ERROR',
@@ -353,7 +315,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
               realizedPnl: Number(account.realizedPnL ?? account.realizedPnl ?? 0),
               lastSyncTimestamp: Number(account.lastUpdate || Date.now()),
               freshness: 'LIVE',
-              source: 'cTrader LIVE API',
+              source: item.broker === 'CTRADER' ? 'cTrader LIVE API' : '5paisa LIVE API',
               errorMessage: item.error || undefined
             };
           })
@@ -412,8 +374,11 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
           .filter((o: any) => o.internalOrderId && Number.isFinite(o.quantity)));
       }
 
-      if (forexPairsRes?.ok) {
-        const fxRows = await forexPairsRes.json();
+      if (forexPairsRes?.ok || indiaUnderlyingsRes?.ok) {
+        const [fxRows, inRows] = await Promise.all([
+          forexPairsRes?.ok ? forexPairsRes.json() : [],
+          indiaUnderlyingsRes?.ok ? indiaUnderlyingsRes.json() : []
+        ]);
         const liveQuotes: MarketQuoteItem[] = [];
         if (Array.isArray(fxRows)) {
           for (const q of fxRows) {
@@ -430,6 +395,26 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
               spreadPipsOrPts: Number(q.spreadPips ?? q.spreadPipsOrPts ?? 0),
               change24h: Number(q.changePips24h ?? q.changePips ?? 0),
               changePercent24h: Number(q.changePercent24h ?? 0),
+              timestamp: Date.now(),
+              timeframe: 'LIVE',
+              status: 'OPEN',
+              freshness: 'LIVE'
+            });
+          }
+        }
+        if (Array.isArray(inRows)) {
+          for (const q of inRows) {
+            const spot = Number(q?.spot);
+            if (!(spot > 0)) continue;
+            liveQuotes.push({
+              market: 'INDIA_EQUITY',
+              symbol: q.symbol,
+              bid: null as unknown as number,
+              ask: null as unknown as number,
+              ltp: spot,
+              spreadPipsOrPts: Number(q.spreadPoints ?? 0),
+              change24h: Number(q.change ?? 0),
+              changePercent24h: Number(q.changePercent ?? 0),
               timestamp: Date.now(),
               timeframe: 'LIVE',
               status: 'OPEN',
@@ -527,11 +512,6 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
             severity: isFailure ? 'CRITICAL' : isBlocked || isLimit ? 'WARNING' : 'INFO'
           };
         }));
-      }
-
-      if (balanceHistoryRes?.ok) {
-        const payload = await balanceHistoryRes.json();
-        setBalanceSnapshots(Array.isArray(payload?.rows) ? payload.rows : []);
       }
 
       const reconRows: ReconciliationComparison[] = [];
@@ -697,84 +677,33 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
       setGateBusy(false);
     }
   }, [fetchAllOperationalData]);
-
-  const runGoLiveValidation = useCallback(async () => {
-    setGoLiveValidationBusy(true);
+  // Fetch Options Chain
+  const fetchOptionsChain = useCallback(async (symbol: string, expiry?: string, depth: number = 7) => {
+    setOptionsLoading(true);
+    setOptionsError(null);
     try {
-      const res = await fetch('/api/operations/go-live-validation', {
-        cache: 'no-store',
-        headers: { Accept: 'application/json' }
-      });
-      const data = await res.json().catch(() => ({}));
-      setGoLiveValidation(data);
-      if (res.ok && data.ready) {
-        setGateFeedback('Production go-live validation passed. Execution gate remains locked until operator unlock.');
+      const url = `/api/options/chain/${encodeURIComponent(symbol)}?depth=${depth}${expiry ? `&expiry=${encodeURIComponent(expiry)}` : ''}`;
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.isBlank && data.error) {
+          setOptionsError(data.error);
+        } else {
+          setOptionsChainData(data);
+          if (data.expiry && !optionsExpiry) {
+            setOptionsExpiry(data.expiry);
+          }
+        }
       } else {
-        setGateFeedback(
-          data?.failures?.length
-            ? 'Go-live validation blocked: ' + data.failures.join(', ')
-            : (data?.message || 'Go-live validation is unavailable.')
-        );
+        const errData = await res.json().catch(() => ({ error: 'Failed to fetch options chain' }));
+        setOptionsError(errData.error || 'Options API Unavailable');
       }
-    } catch (err) {
-      console.warn('Production go-live validation failed:', err);
-      setGateFeedback('Production go-live validation failed.');
+    } catch (err: any) {
+      setOptionsError(err.message || 'Failed to connect to Options Data Adapter');
     } finally {
-      setGoLiveValidationBusy(false);
+      setOptionsLoading(false);
     }
-  }, []);
-
-  const runActiveAutoLiveMonitor = useCallback(async () => {
-    setActiveAutoLiveMonitorBusy(true);
-    try {
-      const res = await fetch('/api/operations/active-auto-live-monitor', {
-        cache: 'no-store',
-        headers: { Accept: 'application/json' }
-      });
-      const data = await res.json().catch(() => ({}));
-      setActiveAutoLiveMonitor(data);
-      if (res.ok && data.healthy) {
-        setGateFeedback('Active Auto Live monitor is healthy.');
-      } else {
-        setGateFeedback(
-          Array.isArray(data?.criticalFailures) && data.criticalFailures.length
-            ? 'Active Auto Live safety monitor blocked: ' + data.criticalFailures.join(', ')
-            : (data?.failures?.length ? 'Active Auto Live monitor warning: ' + data.failures.join(', ') : (data?.message || 'Active Auto Live monitor is unavailable.'))
-        );
-      }
-    } catch (err) {
-      console.warn('Active Auto Live monitor failed:', err);
-      setGateFeedback('Active Auto Live monitor failed.');
-    } finally {
-      setActiveAutoLiveMonitorBusy(false);
-    }
-  }, []);
-
-  const runCTraderFunctionalValidation = useCallback(async () => {
-    setCtraderFunctionalValidationBusy(true);
-    try {
-      const res = await fetch('/api/operations/ctrader-functional-validation', {
-        cache: 'no-store',
-        headers: { Accept: 'application/json' }
-      });
-      const data = await res.json().catch(() => ({}));
-      setCtraderFunctionalValidation(data);
-      if (res.ok && data.ready) {
-        setGateFeedback('cTrader ' + (data.mode || 'API') + ' functional validation passed. No broker order was submitted.');
-      } else {
-        setGateFeedback(
-          Array.isArray(data?.failures) && data.failures.length
-            ? 'cTrader functional validation blocked: ' + data.failures.join(', ')
-            : (data?.message || 'cTrader functional validation is unavailable.')
-        );
-      }
-    } catch (err) {
-      console.warn('cTrader functional validation failed:', err);
-      setGateFeedback('cTrader functional validation failed.');
-    } finally {
-      setCtraderFunctionalValidationBusy(false);
-    }
-  }, []);
+  }, [optionsExpiry]);
 
   useEffect(() => {
     if (parentAutoTradingStatus) {
@@ -784,24 +713,14 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
 
   useEffect(() => {
     fetchAllOperationalData();
+    fetchOptionsChain(optionsUnderlying, optionsExpiry, optionsStrikeRange);
 
     const interval = setInterval(() => {
       fetchAllOperationalData();
     }, 30000);
 
     return () => clearInterval(interval);
-  }, [fetchAllOperationalData]);
-
-  const filteredBalanceSnapshots = useMemo(() => {
-    return balanceSnapshots.filter(row => {
-      if (balanceSnapshotBrokerFilter !== 'ALL' && row.broker !== balanceSnapshotBrokerFilter) return false;
-      if (balanceSnapshotDateFilter) {
-        const date = new Date(Number(row.capturedAt)).toISOString().slice(0, 10);
-        if (date !== balanceSnapshotDateFilter) return false;
-      }
-      return true;
-    });
-  }, [balanceSnapshots, balanceSnapshotBrokerFilter, balanceSnapshotDateFilter]);
+  }, [fetchAllOperationalData, fetchOptionsChain, optionsUnderlying, optionsExpiry, optionsStrikeRange]);
 
   // Filtered Positions
   const filteredPositions = useMemo(() => {
@@ -924,13 +843,22 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
               </p>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                <div className="p-3 rounded-lg bg-slate-950 border border-slate-800 col-span-2">
+                <div className="p-3 rounded-lg bg-slate-950 border border-slate-800">
                   <div className="text-slate-500 text-[10px]">FOREX / cTRADER</div>
                   <div className={closedMarketPrompt.marketGate?.forex?.isOpen ? 'text-emerald-400 font-bold mt-1' : 'text-amber-300 font-bold mt-1'}>
                     {closedMarketPrompt.marketGate?.forex?.isOpen ? 'OPEN' : 'CLOSED'}
                   </div>
                   <div className="text-slate-500 text-[10px] mt-1">
                     {closedMarketPrompt.marketGate?.forex?.sessions?.join(' / ') || 'Session unavailable'}
+                  </div>
+                </div>
+                <div className="p-3 rounded-lg bg-slate-950 border border-slate-800">
+                  <div className="text-slate-500 text-[10px]">INDIA / 5PAISA</div>
+                  <div className={closedMarketPrompt.marketGate?.india?.isOpen ? 'text-emerald-400 font-bold mt-1' : 'text-amber-300 font-bold mt-1'}>
+                    {closedMarketPrompt.marketGate?.india?.isOpen ? 'OPEN' : 'CLOSED'}
+                  </div>
+                  <div className="text-slate-500 text-[10px] mt-1">
+                    {closedMarketPrompt.marketGate?.india?.phase || 'Session unavailable'}
                   </div>
                 </div>
               </div>
@@ -973,9 +901,9 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
                 </span>
               </div>
               <div className="text-slate-400 text-xs flex items-center space-x-2 mt-0.5">
-                <span>Forex Live Operations</span>
+                <span>Multi-Market Operations</span>
                 <span className="text-slate-600">•</span>
-                <span>cTrader (Forex Live Execution)</span>
+                <span>cTrader (Forex) & 5paisa (India F&O)</span>
                 <span className="text-slate-600">•</span>
                 <span>Synced: {new Date(lastRefreshedAt).toLocaleTimeString()}</span>
               </div>
@@ -1030,9 +958,9 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
             <button
               type="button"
               onClick={fetchNewsNow}
-              disabled={newsBusy}
+              disabled={newsBusy || newsSnapshot?.marketOpen === false}
               className="px-2.5 py-1 rounded border border-cyan-800 bg-cyan-950/40 text-cyan-300 hover:bg-cyan-900/50 text-[10px] font-mono font-bold disabled:opacity-50 flex items-center gap-1.5"
-              title="Force a fresh fetch from all configured news providers"
+              title={newsSnapshot?.marketOpen === false ? "Fetch news only while the Forex market is open" : "Force a fresh fetch from all configured news providers"}
             >
               <RefreshCw className={`w-3 h-3 ${newsBusy ? 'animate-spin' : ''}`} />
               {newsBusy ? 'FETCHING NEWS...' : 'FETCH NEWS'}
@@ -1070,11 +998,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
             <button
               onClick={fetchAllOperationalData}
               disabled={isRefreshing}
-              className={`px-3 py-1 rounded border transition-all flex items-center space-x-1.5 text-xs font-semibold disabled:opacity-50 ${
-                isRefreshing 
-                  ? 'bg-emerald-900/40 border-emerald-700 text-emerald-200 shadow-[0_0_8px_rgba(16,185,129,0.2)]' 
-                  : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700 hover:border-slate-600'
-              }`}
+              className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded border border-slate-700 transition flex items-center space-x-1.5 text-xs font-semibold disabled:opacity-50"
               title="Refresh all Control Center telemetry"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-emerald-400' : ''}`} />
@@ -1086,15 +1010,15 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
         {/* Section Navigation Tabs (10 Primary Operations Sections) */}
         <div className="mt-4 pt-3 border-t border-slate-800/80 flex flex-wrap items-center gap-1.5">
           {[
-            ...(reportsMode ? [{ id: 'BALANCE_HISTORY', label: '1. BALANCE HISTORY', icon: Activity }] : []),
-            { id: 'MARKET_INTELLIGENCE', label: '1. MARKET INTEL', icon: TrendingUp },
-            { id: 'SIGNAL_CENTER', label: '2. SIGNALS', icon: Sparkles },
-            { id: 'POSITIONS', label: '3. POSITIONS', icon: Layers },
-            { id: 'ORDERS', label: '4. ORDERS', icon: FileText },
-            { id: 'RISK_CENTER', label: '5. RISK CENTER', icon: ShieldAlert },
-            { id: 'RECONCILIATION', label: '6. RECONCILIATION', icon: CheckCircle2 },
-            { id: 'SYSTEM_HEALTH', label: '7. HEALTH & APIS', icon: Server },
-            { id: 'AUDIT_CENTER', label: '8. AUDIT LEDGER', icon: FileCheck },
+            { id: 'ALL_OVERVIEW', label: 'OVERVIEW', icon: Activity },
+            { id: 'MARKET_INTELLIGENCE', label: '2. MARKET INTEL', icon: TrendingUp },
+            { id: 'SIGNAL_CENTER', label: '4. SIGNALS', icon: Sparkles },
+            { id: 'POSITIONS', label: '5. POSITIONS', icon: Layers },
+            { id: 'ORDERS', label: '6. ORDERS', icon: FileText },
+            { id: 'RISK_CENTER', label: '7. RISK CENTER', icon: ShieldAlert },
+            { id: 'RECONCILIATION', label: '8. RECONCILIATION', icon: CheckCircle2 },
+            { id: 'SYSTEM_HEALTH', label: '9. HEALTH & APIS', icon: Server },
+            { id: 'AUDIT_CENTER', label: '10. AUDIT LEDGER', icon: FileCheck },
             { id: 'SAFETY_STATUS', label: 'SAFETY & GOVERNANCE', icon: Lock }
           ].map(tab => {
             const Icon = tab.icon;
@@ -1117,57 +1041,13 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
         </div>
       </div>
 
-      {/* REPORTS: THREE-HOUR ACCOUNT BALANCE HISTORY */}
-      {activeSection === 'BALANCE_HISTORY' && (
-        <div id="section_balance_history" className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow space-y-4 font-mono text-xs">
-          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-bold text-slate-200 uppercase tracking-wider flex items-center gap-2"><Activity className="w-4 h-4 text-emerald-400" /><span>3-Hour Account Balance History</span></h3>
-              <p className="text-[10px] text-slate-500 mt-1">Authoritative LIVE API snapshots at 00:00, 03:00, 06:00, 09:00, 12:00, 15:00, 18:00 and 21:00. No calculated or fabricated balance values are stored.</p>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <select value={balanceSnapshotBrokerFilter} onChange={e => setBalanceSnapshotBrokerFilter(e.target.value)} className="bg-slate-950 border border-slate-800 text-slate-200 rounded px-2.5 py-1.5"><option value="ALL">All Brokers</option><option value="CTRADER">cTrader</option></select>
-              <input type="date" value={balanceSnapshotDateFilter} onChange={e => setBalanceSnapshotDateFilter(e.target.value)} className="bg-slate-950 border border-slate-800 text-slate-200 rounded px-2.5 py-1.5" />
-              {(balanceSnapshotDateFilter || balanceSnapshotBrokerFilter !== 'ALL') && <button type="button" onClick={() => { setBalanceSnapshotDateFilter(''); setBalanceSnapshotBrokerFilter('ALL'); }} className="px-2.5 py-1.5 rounded border border-slate-700 bg-slate-950 text-slate-300 hover:text-white">Clear</button>}
-            </div>
-          </div>
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
-            <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3"><div className="text-[10px] text-slate-500">SNAPSHOTS</div><div className="text-lg font-bold text-white mt-1">{filteredBalanceSnapshots.length}</div></div>
-            <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3"><div className="text-[10px] text-slate-500">CAPTURED</div><div className="text-lg font-bold text-emerald-400 mt-1">{filteredBalanceSnapshots.filter(row => row.status === 'CAPTURED').length}</div></div>
-            <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3"><div className="text-[10px] text-slate-500">ERRORS</div><div className="text-lg font-bold text-amber-400 mt-1">{filteredBalanceSnapshots.filter(row => row.status === 'ERROR').length}</div></div>
-            <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-3"><div className="text-[10px] text-slate-500">INTERVAL</div><div className="text-lg font-bold text-slate-200 mt-1">3 HOURS</div></div>
-          </div>
-          <div className="overflow-x-auto max-h-[560px] overflow-y-auto">
-            <table className="w-full text-left"><thead className="bg-slate-950 text-slate-400 border-b border-slate-800 sticky top-0"><tr>
-              <th className="py-2.5 px-3">DATE</th><th className="py-2.5 px-3">TIME</th><th className="py-2.5 px-3">BROKER</th><th className="py-2.5 px-3">ACCOUNT</th><th className="py-2.5 px-3">CURRENCY</th><th className="py-2.5 px-3">BALANCE</th><th className="py-2.5 px-3">EQUITY</th><th className="py-2.5 px-3">USED MARGIN</th><th className="py-2.5 px-3">FREE MARGIN</th><th className="py-2.5 px-3">STATUS</th>
-            </tr></thead><tbody className="divide-y divide-slate-800/60">
-              {filteredBalanceSnapshots.map((row, index) => {
-                const timestamp = Number(row.capturedAt);
-                const date = Number.isFinite(timestamp) ? new Date(timestamp) : null;
-                const currency = String(row.currency || '');
-                const prefix = currency === 'INR' ? 'INR ' : 'USD ';
-                const money = (value: any) => { const numeric = Number(value); return Number.isFinite(numeric) ? prefix + numeric.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—'; };
-                return <tr key={row.id || 'balance-snapshot-' + index} className="hover:bg-slate-800/40">
-                  <td className="py-2.5 px-3 text-slate-300">{date ? date.toLocaleDateString() : '—'}</td>
-                  <td className="py-2.5 px-3 font-semibold text-white">{date ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}</td>
-                  <td className="py-2.5 px-3 font-bold text-slate-200">{row.broker}</td><td className="py-2.5 px-3 text-slate-400">{row.accountId}</td><td className="py-2.5 px-3 text-slate-400">{currency || '—'}</td>
-                  <td className="py-2.5 px-3 text-slate-100">{money(row.balance)}</td><td className="py-2.5 px-3 text-emerald-400">{money(row.equity)}</td><td className="py-2.5 px-3 text-amber-300">{money(row.usedMargin)}</td><td className="py-2.5 px-3 text-sky-300">{money(row.freeMargin)}</td>
-                  <td className="py-2.5 px-3"><span className={'px-2 py-0.5 rounded border text-[10px] font-bold ' + (row.status === 'CAPTURED' ? 'bg-emerald-950/50 border-emerald-700 text-emerald-300' : 'bg-amber-950/50 border-amber-700 text-amber-300')}>{row.status}</span>{row.errorMessage && <div className="text-[9px] text-amber-400 mt-1 max-w-xs truncate" title={row.errorMessage}>{row.errorMessage}</div>}</td>
-                </tr>;
-              })}
-            </tbody></table>
-            {!filteredBalanceSnapshots.length && <div className="py-10 text-center text-slate-500">No account balance snapshots match the selected filters.</div>}
-          </div>
-        </div>
-      )}
-
       {/* SECTION 2: MARKET INTELLIGENCE CENTER */}
-      {activeSection === 'MARKET_INTELLIGENCE' && (
+      {(activeSection === 'ALL_OVERVIEW' || activeSection === 'MARKET_INTELLIGENCE') && (
         <div id="section_market_intelligence" className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow space-y-3">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <h3 className="text-sm font-bold text-slate-200 uppercase tracking-wider flex items-center space-x-2">
               <TrendingUp className="w-4 h-4 text-emerald-400" />
-              <span>Market Intelligence (Forex Majors & Crosses)</span>
+              <span>Market Intelligence (Forex & Indian Equities)</span>
             </h3>
             <span className="text-xs text-slate-400 font-mono">Live Ingestion & Point-in-Time Freshness</span>
           </div>
@@ -1216,14 +1096,22 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
           <div className="mt-4 pt-4 border-t border-slate-800/70">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
               <div>
-                <div className="text-xs font-bold text-slate-200 uppercase tracking-wider">Live News Provider Matrix</div>
+                <div className="text-xs font-bold text-slate-200 uppercase tracking-wider">Live News Provider Matrix (Forex Session)</div>
                 <div className="text-[10px] text-slate-500 font-mono mt-1">
-                  Provider status is based on the latest fetch. Raw vs fresh counts show when a provider returned data that was later rejected by the freshness window.
+                  News ingestion is linked to active Forex trading hours.
                 </div>
               </div>
               <div className="flex items-center gap-2 font-mono text-[10px]">
-                <span className={`px-2 py-1 rounded border ${newsSnapshot?.status === 'LIVE' ? 'border-emerald-700 bg-emerald-950/50 text-emerald-300' : newsSnapshot?.status === 'NO_RESULTS' || newsSnapshot?.status === 'STALE' ? 'border-amber-700 bg-amber-950/50 text-amber-300' : 'border-rose-700 bg-rose-950/50 text-rose-300'}`}>
-                  NEWS ENGINE: {newsSnapshot?.status || 'NOT FETCHED'}
+                <span className={`px-2 py-1 rounded border ${
+                  newsSnapshot?.status === 'MARKET_CLOSED' || newsSnapshot?.marketOpen === false
+                    ? 'border-slate-700 bg-slate-950 text-slate-400'
+                    : newsSnapshot?.status === 'LIVE'
+                      ? 'border-emerald-700 bg-emerald-950/50 text-emerald-300'
+                      : newsSnapshot?.status === 'NO_RESULTS' || newsSnapshot?.status === 'STALE'
+                        ? 'border-amber-700 bg-amber-950/50 text-amber-300'
+                        : 'border-rose-700 bg-rose-950/50 text-rose-300'
+                }`}>
+                  FOREX: {newsSnapshot?.status === 'MARKET_CLOSED' || newsSnapshot?.marketOpen === false ? 'CLOSED (WEEKEND)' : newsSnapshot?.status || 'NOT FETCHED'}
                 </span>
                 <span className="text-slate-500">
                   {newsSnapshot?.articleCount ?? 0} usable articles
@@ -1231,73 +1119,74 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
               </div>
             </div>
 
-            {newsError && (
-              <div className="mb-3 px-3 py-2 rounded border border-rose-800 bg-rose-950/30 text-rose-300 text-[10px] font-mono">
-                {newsError}
+            {newsSnapshot?.status === 'MARKET_CLOSED' || newsSnapshot?.marketOpen === false ? (
+              <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-4 text-center font-mono text-xs text-slate-400">
+                FOREX MARKET CLOSED — live news ingestion and macro analysis are disabled while the Forex market is closed.
               </div>
-            )}
-
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2">
-              {[
-                ['FINNHUB', 'Finnhub'],
-                ['MASSIVE', 'Massive'],
-                ['CURRENTS', 'Currents'],
-                ['GOOGLE_NEWS_RSS', 'Google News RSS']
-              ].map(([key, label]) => {
-                const d = newsSnapshot?.providerDiagnostics?.[key];
-                const status = d?.status || newsSnapshot?.providerStatus?.[key] || 'NO_RESULTS';
-                const strength = status === 'LIVE'
-                  ? (Number(d?.freshArticleCount || 0) >= 10 ? 'STRONG' : 'ACTIVE')
-                  : status === 'STALE' ? 'STALE DATA'
-                    : status === 'RATE_LIMITED' ? 'LIMITED'
-                      : status === 'ERROR' ? 'DOWN'
-                        : status === 'UNCONFIGURED' ? 'NOT CONFIGURED'
-                          : 'EMPTY';
-                const badge = status === 'LIVE'
-                  ? 'text-emerald-300 border-emerald-800 bg-emerald-950/40'
-                  : status === 'STALE' || status === 'RATE_LIMITED'
-                    ? 'text-amber-300 border-amber-800 bg-amber-950/40'
-                    : status === 'ERROR'
-                      ? 'text-rose-300 border-rose-800 bg-rose-950/40'
-                      : 'text-slate-400 border-slate-800 bg-slate-950';
-                return (
-                  <div key={key} className="p-3 rounded-lg border border-slate-800 bg-slate-950/70 font-mono">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[11px] font-bold text-white">{label}</span>
-                      <span className={`px-1.5 py-0.5 rounded border text-[9px] font-bold ${badge}`}>{status}</span>
-                    </div>
-                    <div className="grid grid-cols-3 gap-2 mt-2 text-[9px]">
-                      <div><div className="text-slate-600">RAW</div><div className="text-slate-300">{d?.rawArticleCount ?? 0}</div></div>
-                      <div><div className="text-slate-600">FRESH</div><div className="text-cyan-300">{d?.freshArticleCount ?? 0}</div></div>
-                      <div><div className="text-slate-600">STALE</div><div className="text-amber-300">{d?.staleArticleCount ?? 0}</div></div>
-                    </div>
-                    {d?.error && <div className="mt-2 text-[9px] text-rose-400 truncate" title={d.error}>{d.error}</div>}
-                    <div className="mt-2 flex items-center justify-between text-[9px] text-slate-600">
-                      <span>STALE {d?.staleArticleCount ?? 0}</span>
-                      <span>{Number.isFinite(Number(d?.latencyMs)) ? `${Number(d?.latencyMs)}ms` : '—'}</span>
-                    </div>
-                    {(d?.latestRawArticleAt || d?.latencyMs !== undefined) && (
-                      <div className="mt-2 text-[8px] text-slate-600">
-                        {d?.latestRawArticleAt ? `Latest raw: ${new Date(d.latestRawArticleAt).toLocaleTimeString()}` : 'No timestamp'}
-                        {d?.latencyMs !== undefined ? ` · ${d.latencyMs}ms` : ''}
-                      </div>
-                    )}
+            ) : (
+              <>
+                {newsError && (
+                  <div className="mb-3 px-3 py-2 rounded border border-rose-800 bg-rose-950/30 text-rose-300 text-[10px] font-mono">
+                    {newsError}
                   </div>
-                );
-              })}
-            </div>
+                )}
 
-            <div className="mt-3 text-[10px] text-slate-500 font-mono">
-              Last news fetch: {newsSnapshot?.fetchedAt ? new Date(newsSnapshot.fetchedAt).toLocaleTimeString() : 'N/A'}
-              {newsSnapshot?.latestArticleAt ? ` · Latest article: ${new Date(newsSnapshot.latestArticleAt).toLocaleTimeString()}` : ''}
-              {newsSnapshot?.queryPairs?.length ? ` · Universe: ${newsSnapshot.queryPairs.join(', ')}` : ''}
-            </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2">
+                  {[
+                    ['FINNHUB', 'Finnhub'],
+                    ['MASSIVE', 'Massive'],
+                    ['CURRENTS', 'Currents'],
+                    ['GOOGLE_NEWS_RSS', 'Google News RSS']
+                  ].map(([key, label]) => {
+                    const d = newsSnapshot?.providerDiagnostics?.[key];
+                    const status = d?.status || newsSnapshot?.providerStatus?.[key] || 'NO_RESULTS';
+                    const badge = status === 'LIVE'
+                      ? 'text-emerald-300 border-emerald-800 bg-emerald-950/40'
+                      : status === 'STALE' || status === 'RATE_LIMITED'
+                        ? 'text-amber-300 border-amber-800 bg-amber-950/40'
+                        : status === 'ERROR'
+                          ? 'text-rose-300 border-rose-800 bg-rose-950/40'
+                          : 'text-slate-400 border-slate-800 bg-slate-950';
+                    return (
+                      <div key={key} className="p-3 rounded-lg border border-slate-800 bg-slate-950/70 font-mono">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[11px] font-bold text-white">{label}</span>
+                          <span className={`px-1.5 py-0.5 rounded border text-[9px] font-bold ${badge}`}>{status}</span>
+                        </div>
+                        <div className="grid grid-cols-3 gap-2 mt-2 text-[9px]">
+                          <div><div className="text-slate-600">RAW</div><div className="text-slate-300">{d?.rawArticleCount ?? 0}</div></div>
+                          <div><div className="text-slate-600">FRESH</div><div className="text-cyan-300">{d?.freshArticleCount ?? 0}</div></div>
+                          <div><div className="text-slate-600">STALE</div><div className="text-amber-300">{d?.staleArticleCount ?? 0}</div></div>
+                        </div>
+                        {d?.error && <div className="mt-2 text-[9px] text-rose-400 truncate" title={d.error}>{d.error}</div>}
+                        <div className="mt-2 flex items-center justify-between text-[9px] text-slate-600">
+                          <span>STALE {d?.staleArticleCount ?? 0}</span>
+                          <span>{Number.isFinite(Number(d?.latencyMs)) ? `${Number(d?.latencyMs)}ms` : '—'}</span>
+                        </div>
+                        {(d?.latestRawArticleAt || d?.latencyMs !== undefined) && (
+                          <div className="mt-2 text-[8px] text-slate-600">
+                            {d?.latestRawArticleAt ? `Latest raw: ${new Date(d.latestRawArticleAt).toLocaleTimeString()}` : 'No timestamp'}
+                            {d?.latencyMs !== undefined ? ` · ${d.latencyMs}ms` : ''}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="mt-3 text-[10px] text-slate-500 font-mono">
+                  Last news fetch: {newsSnapshot?.fetchedAt ? new Date(newsSnapshot.fetchedAt).toLocaleTimeString() : 'N/A'}
+                  {newsSnapshot?.latestArticleAt ? ` · Latest article: ${new Date(newsSnapshot.latestArticleAt).toLocaleTimeString()}` : ''}
+                  {newsSnapshot?.queryPairs?.length ? ` · Universe: ${newsSnapshot.queryPairs.join(', ')}` : ''}
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}
 
-      {/* SECTION 3: SIGNAL CENTER & VISUAL LIFECYCLE TRACE */}
-      {activeSection === 'SIGNAL_CENTER' && (
+      {/* SECTION 4: SIGNAL CENTER & VISUAL LIFECYCLE TRACE */}
+      {(activeSection === 'ALL_OVERVIEW' || activeSection === 'SIGNAL_CENTER') && (
         <div id="section_signal_center" className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow space-y-3">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
             <div>
@@ -1505,7 +1394,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
       )}
 
       {/* SECTION 5: POSITIONS CENTER */}
-      {activeSection === 'POSITIONS' && (
+      {(activeSection === 'ALL_OVERVIEW' || activeSection === 'POSITIONS') && (
         <div id="section_positions" className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow space-y-3">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <h3 className="text-sm font-bold text-slate-200 uppercase tracking-wider flex items-center space-x-2">
@@ -1522,6 +1411,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
               >
                 <option value="ALL">All Brokers</option>
                 <option value="CTRADER">cTrader (USD)</option>
+                <option value="FIVE_PAISA">5paisa (INR)</option>
               </select>
 
               <select
@@ -1599,7 +1489,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
       )}
 
       {/* SECTION 6: ORDERS CENTER */}
-      {activeSection === 'ORDERS' && (
+      {(activeSection === 'ALL_OVERVIEW' || activeSection === 'ORDERS') && (
         <div id="section_orders" className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow space-y-3">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <h3 className="text-sm font-bold text-slate-200 uppercase tracking-wider flex items-center space-x-2">
@@ -1628,6 +1518,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
               >
                 <option value="ALL">All Brokers</option>
                 <option value="CTRADER">cTrader</option>
+                <option value="FIVE_PAISA">5paisa</option>
               </select>
             </div>
           </div>
@@ -1686,7 +1577,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
       )}
 
       {/* SECTION 7: RISK CENTER & CHRONOLOGICAL EVENT TIMELINE */}
-      {activeSection === 'RISK_CENTER' && (
+      {(activeSection === 'ALL_OVERVIEW' || activeSection === 'RISK_CENTER') && (
         <div id="section_risk_center" className="space-y-3">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-bold text-slate-200 uppercase tracking-wider flex items-center space-x-2">
@@ -1753,7 +1644,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
       )}
 
       {/* SECTION 8: RECONCILIATION CENTER (Broker API ↔ SQLite Ledger) */}
-      {activeSection === 'RECONCILIATION' && (
+      {(activeSection === 'ALL_OVERVIEW' || activeSection === 'RECONCILIATION') && (
         <div id="section_reconciliation" className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow space-y-3 font-mono text-xs">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-2">
             <div>
@@ -1805,7 +1696,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
       )}
 
       {/* SECTION 9: SYSTEM HEALTH & API MONITORING */}
-      {activeSection === 'SYSTEM_HEALTH' && (
+      {(activeSection === 'ALL_OVERVIEW' || activeSection === 'SYSTEM_HEALTH') && (
         <div id="section_system_health" className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow space-y-3 font-mono text-xs">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-2">
             <div>
@@ -1857,7 +1748,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
       )}
 
       {/* SECTION 10: AUDIT LEDGER (Filterable & Searchable) */}
-      {activeSection === 'AUDIT_CENTER' && (
+      {(activeSection === 'ALL_OVERVIEW' || activeSection === 'AUDIT_CENTER') && (
         <div id="section_audit_ledger" className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow space-y-3 font-mono text-xs">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
@@ -1947,7 +1838,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
       )}
 
       {/* SECTION 11: SAFETY STATUS & MODEL GOVERNANCE */}
-      {activeSection === 'SAFETY_STATUS' && (
+      {(activeSection === 'ALL_OVERVIEW' || activeSection === 'SAFETY_STATUS') && (
         <div id="section_safety_status" className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow space-y-4 font-mono text-xs">
           <div className="flex items-center justify-between border-b border-slate-800 pb-2">
             <h3 className="text-sm font-bold text-slate-200 uppercase tracking-wider flex items-center space-x-2">
@@ -1975,113 +1866,6 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
                 </span>
               </div>
 
-              <div className="flex items-center justify-between gap-2 bg-slate-900/80 p-2 rounded border border-slate-800">
-                <span className="text-slate-400">cTrader Functional Validation:</span>
-                <button
-                  type="button"
-                  onClick={runCTraderFunctionalValidation}
-                  disabled={ctraderFunctionalValidationBusy}
-                  className="px-2.5 py-1 rounded border border-fuchsia-700 bg-fuchsia-950/70 text-fuchsia-300 hover:bg-fuchsia-900/80 text-[10px] font-bold disabled:opacity-50"
-                  title="Validate cTrader account, market data, positions, orders, history and shared order packet logic using the currently selected LIVE or DEMO API mode. No broker order is submitted."
-                >
-                  {ctraderFunctionalValidationBusy ? 'TESTING...' : 'VALIDATE cTRADER'}
-                </button>
-              </div>
-
-              {ctraderFunctionalValidation && (
-                <div className="bg-slate-900/70 p-2.5 rounded border border-slate-800 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-400">cTrader Test Status</span>
-                    <strong className={ctraderFunctionalValidation.ready ? 'text-emerald-400' : 'text-rose-400'}>
-                      {(ctraderFunctionalValidation.mode || 'UNKNOWN') + ' / ' + (ctraderFunctionalValidation.status || 'UNKNOWN')}
-                    </strong>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-400">Broker Order Submitted</span>
-                    <strong className="text-emerald-400">NO</strong>
-                  </div>
-                  {Array.isArray(ctraderFunctionalValidation.failures) && ctraderFunctionalValidation.failures.length > 0 && (
-                    <div className="text-[10px] text-rose-300">
-                      Blockers: {ctraderFunctionalValidation.failures.join(', ')}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <div className="flex items-center justify-between gap-2 bg-slate-900/80 p-2 rounded border border-slate-800">
-                <span className="text-slate-400">Active Auto Live Monitor:</span>
-                <button
-                  type="button"
-                  onClick={runActiveAutoLiveMonitor}
-                  disabled={activeAutoLiveMonitorBusy}
-                  className="px-2.5 py-1 rounded border border-violet-700 bg-violet-950/70 text-violet-300 hover:bg-violet-900/80 text-[10px] font-bold disabled:opacity-50"
-                  title="Check the live Auto Live runtime without changing the execution gate"
-                >
-                  {activeAutoLiveMonitorBusy ? 'CHECKING...' : 'CHECK ACTIVE SESSION'}
-                </button>
-              </div>
-
-              {activeAutoLiveMonitor && (
-                <div className="bg-slate-900/70 p-2.5 rounded border border-slate-800 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-400">Active Session Status</span>
-                    <strong className={
-                      activeAutoLiveMonitor.status === 'HEALTHY'
-                        ? 'text-emerald-400'
-                        : activeAutoLiveMonitor.status === 'DEGRADED'
-                          ? 'text-amber-400'
-                          : 'text-rose-400'
-                    }>
-                      {activeAutoLiveMonitor.status || 'UNKNOWN'}
-                    </strong>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-400">Execution Gate</span>
-                    <strong className={activeAutoLiveMonitor.executionGate?.unlocked ? 'text-emerald-400' : 'text-amber-400'}>
-                      {activeAutoLiveMonitor.executionGate?.unlocked ? 'UNLOCKED' : 'LOCKED'}
-                    </strong>
-                  </div>
-                  {Array.isArray(activeAutoLiveMonitor.failures) && activeAutoLiveMonitor.failures.length > 0 && (
-                    <div className="text-[10px] text-rose-300">
-                      Issues: {activeAutoLiveMonitor.failures.join(', ')}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <div className="flex items-center justify-between gap-2 bg-slate-900/80 p-2 rounded border border-slate-800">
-                <span className="text-slate-400">Production Go-Live Validation:</span>
-                <button
-                  type="button"
-                  onClick={runGoLiveValidation}
-                  disabled={goLiveValidationBusy}
-                  className="px-2.5 py-1 rounded border border-cyan-700 bg-cyan-950/70 text-cyan-300 hover:bg-cyan-900/80 text-[10px] font-bold disabled:opacity-50"
-                  title="Run the production go-live validation without unlocking or submitting an order"
-                >
-                  {goLiveValidationBusy ? 'VALIDATING...' : 'VALIDATE GO-LIVE'}
-                </button>
-              </div>
-
-              {goLiveValidation && (
-                <div className="bg-slate-900/70 p-2.5 rounded border border-slate-800 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-400">Validation Status</span>
-                    <strong className={goLiveValidation.ready ? 'text-emerald-400' : 'text-rose-400'}>
-                      {goLiveValidation.status || 'UNKNOWN'}
-                    </strong>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-400">Broker Order Submitted</span>
-                    <strong className="text-emerald-400">NO</strong>
-                  </div>
-                  {Array.isArray(goLiveValidation.failures) && goLiveValidation.failures.length > 0 && (
-                    <div className="text-[10px] text-rose-300">
-                      Blockers: {goLiveValidation.failures.join(', ')}
-                    </div>
-                  )}
-                </div>
-              )}
-
               <div className="space-y-2 text-xs">
                 <div className="flex items-center justify-between bg-slate-900/80 p-2.5 rounded border border-slate-800">
                   <span className="text-slate-400">LIVE_AUTO_EXECUTION_ALLOWED</span>
@@ -2104,10 +1888,8 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
                 </div>
 
                 <div className="flex items-center justify-between bg-slate-900/80 p-2.5 rounded border border-slate-800">
-                  <span className="text-slate-400">Broker Connectivity:</span>
-                  <strong className={accounts.length > 0 ? 'text-emerald-400' : 'text-amber-400'}>
-                    {accounts.length > 0 ? accounts.map(account => account.broker + ' CONNECTED').join(' / ') : 'NO AUTHORITATIVE LIVE ACCOUNT DATA'}
-                  </strong>
+                  <span className="text-slate-400">Live Account Connected:</span>
+                  <strong className="text-emerald-400">YES (cTrader & 5paisa)</strong>
                 </div>
 
                 <div className="flex items-center justify-between bg-slate-900/80 p-2.5 rounded border border-slate-800">

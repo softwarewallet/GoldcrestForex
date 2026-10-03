@@ -1,3 +1,5 @@
+import { getForexSessionState } from '../markets/common/session';
+
 export interface LiveNewsArticle {
   title: string;
   url: string;
@@ -38,7 +40,9 @@ export interface LiveNewsSentimentSummary {
 export interface LiveNewsSnapshot {
   source: LiveNewsSource;
   fetchedAt: string;
-  status: 'LIVE' | 'NO_RESULTS' | 'STALE' | 'UNAVAILABLE';
+  status: 'LIVE' | 'NO_RESULTS' | 'STALE' | 'UNAVAILABLE' | 'MARKET_CLOSED';
+  marketOpen?: boolean;
+  marketPhase?: string;
   articleCount: number;
   highImpactCount: number;
   elevatedCount: number;
@@ -72,6 +76,7 @@ export interface LiveNewsSnapshot {
 export interface LiveNewsFetchOptions {
   pairs?: string[];
   forceRefresh?: boolean;
+  now?: Date;
 }
 
 const CURRENCY_NEWS_ALIASES: Record<string, string[]> = {
@@ -816,6 +821,36 @@ function unavailableSnapshot(
   };
 }
 
+function closedForexSnapshot(now: Date = new Date()): LiveNewsSnapshot {
+  const session = getForexSessionState(now);
+  return {
+    source: 'NONE',
+    fetchedAt: now.toISOString(),
+    status: 'MARKET_CLOSED',
+    marketOpen: false,
+    marketPhase: session.activeSessions.join(', '),
+    articleCount: 0,
+    highImpactCount: 0,
+    elevatedCount: 0,
+    activeHighImpactCount: 0,
+    riskLevel: 'LOW',
+    articles: [],
+    providerStatus: {
+      FINNHUB: 'NO_RESULTS',
+      MASSIVE: 'NO_RESULTS',
+      CURRENTS: 'NO_RESULTS',
+      GOOGLE_NEWS_RSS: 'NO_RESULTS'
+    },
+    providerDiagnostics: {
+      FINNHUB: { status: 'NO_RESULTS', rawArticleCount: 0, freshArticleCount: 0, staleArticleCount: 0, configured: Boolean(process.env.FINNHUB_API_KEY?.trim()) },
+      MASSIVE: { status: 'NO_RESULTS', rawArticleCount: 0, freshArticleCount: 0, staleArticleCount: 0, configured: Boolean(process.env.MASSIVE_API_KEY?.trim()) },
+      CURRENTS: { status: 'NO_RESULTS', rawArticleCount: 0, freshArticleCount: 0, staleArticleCount: 0, configured: Boolean(process.env.CURRENTS_API_KEY?.trim()) },
+      GOOGLE_NEWS_RSS: { status: 'NO_RESULTS', rawArticleCount: 0, freshArticleCount: 0, staleArticleCount: 0, configured: true }
+    },
+    error: 'Forex market is closed. Live news ingestion is disabled when the Forex market is closed.'
+  };
+}
+
 async function fetchLiveForexNewsInternal(
   options: LiveNewsFetchOptions
 ): Promise<LiveNewsSnapshot> {
@@ -926,29 +961,31 @@ async function fetchLiveForexNewsInternal(
     : primaryFreshArticles;
   const articles = deduplicateArticles(fetchedArticles).slice(0, 100);
 
-  if (articles.length === 0) {
-    const configuredProviders = [finnhubRes, massiveRes, currentsRes, googleNewsRssRes]
-      .filter(result => result.status !== 'UNCONFIGURED');
-    const allUnavailable = configuredProviders.length > 0
-      && configuredProviders.every(result => ['ERROR', 'RATE_LIMITED'].includes(result.status));
+    if (articles.length === 0) {
+      const configuredProviders = [finnhubRes, massiveRes, currentsRes, googleNewsRssRes]
+        .filter(result => result.status !== 'UNCONFIGURED');
+      const allUnavailable = configuredProviders.length > 0
+        && configuredProviders.every(result => ['ERROR', 'RATE_LIMITED'].includes(result.status));
 
-    const snapshot: LiveNewsSnapshot = {
-      source: 'NONE',
-      fetchedAt: new Date().toISOString(),
-      status: allUnavailable ? 'UNAVAILABLE' : 'STALE',
-      articleCount: 0,
-      highImpactCount: 0,
-      elevatedCount: 0,
-      activeHighImpactCount: 0,
-      riskLevel: allUnavailable ? 'UNAVAILABLE' : 'LOW',
-      articles: [],
-      queryPairs,
-      providerStatus,
-      providerDiagnostics,
-      error: errors.length
-        ? errors.join(' | ')
-        : 'No fresh Forex news/events are currently available.'
-    };
+      const snapshot: LiveNewsSnapshot = {
+        source: 'NONE',
+        fetchedAt: new Date().toISOString(),
+        status: allUnavailable ? 'UNAVAILABLE' : 'STALE',
+        marketOpen: true,
+        marketPhase: getForexSessionState().activeSessions.join(', '),
+        articleCount: 0,
+        highImpactCount: 0,
+        elevatedCount: 0,
+        activeHighImpactCount: 0,
+        riskLevel: allUnavailable ? 'UNAVAILABLE' : 'LOW',
+        articles: [],
+        queryPairs,
+        providerStatus,
+        providerDiagnostics,
+        error: errors.length
+          ? errors.join(' | ')
+          : 'No fresh Forex news/events are currently available.'
+      };
 
     newsCache = {
       key: queryKey,
@@ -987,6 +1024,8 @@ async function fetchLiveForexNewsInternal(
     source,
     fetchedAt: new Date().toISOString(),
     status: 'LIVE',
+    marketOpen: true,
+    marketPhase: getForexSessionState().activeSessions.join(', '),
     articleCount: articles.length,
     highImpactCount: score.highImpactCount,
     elevatedCount: score.elevatedCount,
@@ -1012,11 +1051,21 @@ async function fetchLiveForexNewsInternal(
 }
 
 export async function fetchLiveForexNews(
-  options: LiveNewsFetchOptions = {}
+  options: LiveNewsFetchOptions = {},
+  nowInput: Date = options.now || new Date()
 ): Promise<LiveNewsSnapshot> {
+  const nowDate = options.now || nowInput;
+  const forexSession = getForexSessionState(nowDate);
+  const isForexOpen = !forexSession.activeSessions.includes('CLOSED (WEEKEND)');
+
+  if (!isForexOpen) {
+    newsCache = null;
+    return closedForexSnapshot(nowDate);
+  }
+
   const queryPairs = normalizePairs(options.pairs);
   const key = queryPairs.join(',');
-  const now = Date.now();
+  const now = nowDate.getTime();
   const forceRefresh = options.forceRefresh === true;
 
   if (!forceRefresh && newsCache && newsCache.key === key && now < newsCache.expiresAt) {

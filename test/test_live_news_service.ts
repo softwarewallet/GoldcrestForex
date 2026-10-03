@@ -86,9 +86,12 @@ try {
     throw new Error('Unexpected news provider URL: ' + url);
   };
 
+  const testWeekday = new Date('2026-09-23T10:00:00.000Z'); // Wednesday
+
   const live = await fetchLiveForexNews({
     pairs: ['EUR/USD', 'GBP/USD'],
-    forceRefresh: true
+    forceRefresh: true,
+    now: testWeekday
   });
 
   assert.equal(live.status, 'LIVE');
@@ -149,7 +152,8 @@ try {
 
   const googleBackup = await fetchLiveForexNews({
     pairs: ['EUR/USD'],
-    forceRefresh: true
+    forceRefresh: true,
+    now: testWeekday
   });
 
   assert.equal(googleBackup.status, 'LIVE');
@@ -207,7 +211,8 @@ try {
 
   const staleCheck = await fetchLiveForexNews({
     pairs: ['EUR/USD'],
-    forceRefresh: true
+    forceRefresh: true,
+    now: testWeekday
   });
 
   assert.equal(staleCheck.status, 'LIVE');
@@ -221,7 +226,8 @@ try {
 
   const unavailable = await fetchLiveForexNews({
     pairs: ['USD/JPY'],
-    forceRefresh: true
+    forceRefresh: true,
+    now: testWeekday
   });
 
   assert.equal(unavailable.status, 'UNAVAILABLE');
@@ -230,6 +236,18 @@ try {
   assert.equal(unavailable.providerStatus?.FINNHUB, 'ERROR');
   assert.equal(unavailable.providerStatus?.MASSIVE, 'ERROR');
   assert.equal(unavailable.providerStatus?.CURRENTS, 'ERROR');
+
+  resetLiveForexNewsCacheForTest();
+
+  // Test Forex market closed on weekend
+  const weekendDate = new Date('2026-09-26T10:00:00.000Z'); // Saturday
+  const closed = await fetchLiveForexNews(
+    { pairs: ['EUR/USD'], forceRefresh: true },
+    weekendDate
+  );
+  assert.equal(closed.status, 'MARKET_CLOSED');
+  assert.equal(closed.marketOpen, false);
+  assert.equal(closed.articleCount, 0);
 
   resetLiveForexNewsCacheForTest();
   console.log('LIVE NEWS SERVICE TEST PASSED');

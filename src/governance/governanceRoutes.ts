@@ -9,7 +9,7 @@ import { executeQuery } from '../database/db';
 
 export const governanceRouter = Router();
 
-const LIVE_BROKERS = ['CTRADER'] as const;
+const LIVE_BROKERS = ['CTRADER', 'FIVE_PAISA'] as const;
 
 governanceRouter.get('/status', async (_req: Request, res: Response) => {
   const emergency = killSwitch.getHaltDetails();
@@ -44,7 +44,10 @@ governanceRouter.get('/status', async (_req: Request, res: Response) => {
     environment: 'LIVE',
     routingMode: 'AUTOMATIC_BY_MARKET',
     brokerRouting: {
-      FOREX: 'CTRADER'
+      FOREX: 'CTRADER',
+      INDIAN_EQUITY: 'FIVE_PAISA',
+      INDIAN_FUTURES: 'FIVE_PAISA',
+      INDIAN_OPTIONS: 'FIVE_PAISA'
     },
     brokers,
     autoTrading: autoTradingService.getStatus(),
@@ -55,7 +58,7 @@ governanceRouter.get('/status', async (_req: Request, res: Response) => {
 
 governanceRouter.get('/audit-logs', (req: Request, res: Response) => {
   const limit = Math.min(Math.max(Number(req.query.limit || 100), 1), 500);
-  const broker = req.query.broker as 'CTRADER' | undefined;
+  const broker = req.query.broker as 'CTRADER' | 'FIVE_PAISA' | undefined;
   res.json(getAuditLogs(limit, broker ? { broker, environment: 'LIVE' } : { environment: 'LIVE' }));
 });
 
@@ -120,7 +123,7 @@ governanceRouter.get('/live-health', async (_req: Request, res: Response) => {
       const healthy = Boolean(account?.accountId) && tradingStatus === 'CONNECTED';
       return {
         id: `${broker.toLowerCase()}_live_api`,
-        name: 'cTrader LIVE API',
+        name: broker === 'CTRADER' ? 'cTrader LIVE API' : '5paisa LIVE API',
         status: healthy ? 'HEALTHY' : account ? 'DEGRADED' : 'ERROR',
         lastSuccessTimestamp: healthy ? Number(account.lastUpdate || now) : 0,
         latencyMs: Date.now() - healthStartedAt,
@@ -135,7 +138,7 @@ governanceRouter.get('/live-health', async (_req: Request, res: Response) => {
     } catch (error: any) {
       return {
         id: `${broker.toLowerCase()}_live_api`,
-        name: 'cTrader LIVE API',
+        name: broker === 'CTRADER' ? 'cTrader LIVE API' : '5paisa LIVE API',
         status: 'ERROR',
         lastSuccessTimestamp: 0,
         latencyMs: 0,

@@ -3,175 +3,45 @@ import fs from 'fs';
 import path from 'path';
 
 let dbInstance: Database | null = null;
-let dbInitializationPromise: Promise<Database> | null = null;
 const DB_DIR = path.join(process.cwd(), 'data');
 const DB_FILE = path.join(DB_DIR, 'trading_analyst.sqlite');
-const DB_TEMP_FILE = path.join(DB_DIR, 'trading_analyst.sqlite.tmp');
-const DB_BACKUP_FILE = path.join(DB_DIR, 'trading_analyst.sqlite.bak');
 
-export type DatabasePersistenceStatus = {
-  lastPersistedAt: number | null;
-  lastPersistenceError: string | null;
-  lastRecoveryAt: number | null;
-  recoveredFromBackup: boolean;
-};
+export async function getDatabase(): Promise<Database> {
+  if (dbInstance) return dbInstance;
 
-let persistenceStatus: DatabasePersistenceStatus = {
-  lastPersistedAt: null,
-  lastPersistenceError: null,
-  lastRecoveryAt: null,
-  recoveredFromBackup: false
-};
-
-export function recoverDatabaseFileIfNeeded(
-  primaryFile = DB_FILE,
-  backupFile = DB_BACKUP_FILE,
-  temporaryFile = DB_TEMP_FILE
-): boolean {
-  if (fs.existsSync(primaryFile)) return false;
-  if (fs.existsSync(backupFile)) {
-    fs.copyFileSync(backupFile, primaryFile);
-    persistenceStatus.lastRecoveryAt = Date.now();
-    persistenceStatus.recoveredFromBackup = true;
-    return true;
-  }
-  return false;
-}
-
-function loadDatabase(SQL: any): Database {
-  recoverDatabaseFileIfNeeded();
-  if (!fs.existsSync(DB_FILE) && fs.existsSync(DB_TEMP_FILE)) {
-    try {
-      const recovered = new SQL.Database(fs.readFileSync(DB_TEMP_FILE));
-      fs.renameSync(DB_TEMP_FILE, DB_FILE);
-      persistenceStatus.lastRecoveryAt = Date.now();
-      persistenceStatus.recoveredFromBackup = true;
-      return recovered;
-    } catch {
-      try { fs.unlinkSync(DB_TEMP_FILE); } catch {}
-    }
-  }
-  if (!fs.existsSync(DB_FILE)) return new SQL.Database();
-
-  try {
-    return new SQL.Database(fs.readFileSync(DB_FILE));
-  } catch (primaryError) {
-    if (!fs.existsSync(DB_BACKUP_FILE)) throw primaryError;
-    const corruptFile = path.join(DB_DIR, `trading_analyst.sqlite.corrupt-${Date.now()}`);
-    try {
-      fs.renameSync(DB_FILE, corruptFile);
-    } catch {
-      // Best effort: preserve the primary if another process owns the file.
-    }
-    const recovered = new SQL.Database(fs.readFileSync(DB_BACKUP_FILE));
-    persistenceStatus.lastRecoveryAt = Date.now();
-    persistenceStatus.recoveredFromBackup = true;
-    return recovered;
-  }
-}
-
-async function initializeDatabase(): Promise<Database> {
   if (!fs.existsSync(DB_DIR)) {
     fs.mkdirSync(DB_DIR, { recursive: true });
   }
 
   const SQL = await initSqlJs();
 
-  dbInstance = loadDatabase(SQL);
-  // Always run schema migrations against existing databases so newly added
-  // SQLite-only persistence tables are available without manual reset.
-  initSchema(dbInstance);
-  seedInitialData(dbInstance);
-  persistDatabase();
+  if (fs.existsSync(DB_FILE)) {
+    const fileBuffer = fs.readFileSync(DB_FILE);
+    dbInstance = new SQL.Database(fileBuffer);
+    // Always run schema migrations against existing databases so newly added
+    // SQLite-only persistence tables are available without manual reset.
+    initSchema(dbInstance);
+    seedInitialData(dbInstance);
+    persistDatabase();
+  } else {
+    dbInstance = new SQL.Database();
+    initSchema(dbInstance);
+    seedInitialData(dbInstance);
+    persistDatabase();
+  }
+
   return dbInstance;
-}
-
-export async function getDatabase(): Promise<Database> {
-  if (dbInstance) return dbInstance;
-  if (dbInitializationPromise) return dbInitializationPromise;
-
-  dbInitializationPromise = initializeDatabase().finally(() => {
-    dbInitializationPromise = null;
-  });
-
-  return dbInitializationPromise;
-}
-
-export function getDatabaseInitializationState(): {
-  initialized: boolean;
-  initializing: boolean;
-} {
-  return {
-    initialized: Boolean(dbInstance),
-    initializing: Boolean(dbInitializationPromise)
-  };
-}
-
-export function persistDatabaseBuffer(
-  buffer: Buffer,
-  primaryFile = DB_FILE,
-  temporaryFile = DB_TEMP_FILE,
-  backupFile = DB_BACKUP_FILE
-): void {
-  const directory = path.dirname(primaryFile);
-  if (!fs.existsSync(directory)) fs.mkdirSync(directory, { recursive: true });
-
-  fs.writeFileSync(temporaryFile, buffer);
-  if (fs.existsSync(primaryFile)) {
-    fs.copyFileSync(primaryFile, backupFile);
-    fs.rmSync(primaryFile, { force: true });
-  }
-  try {
-    fs.renameSync(temporaryFile, primaryFile);
-  } catch (renameError) {
-    // Windows may not replace an existing destination during rename. Restore
-    // the previous durable image when installing the new image fails.
-    if (!fs.existsSync(primaryFile) && fs.existsSync(backupFile)) {
-      try { fs.copyFileSync(backupFile, primaryFile); } catch {}
-    }
-    throw renameError;
-  }
 }
 
 export function persistDatabase(): void {
   if (!dbInstance) return;
   try {
-    // Write a complete new image first. The previous primary is retained as a
-    // recovery snapshot so a process crash or filesystem failure cannot leave
-    // the only durable database image unreadable.
-    persistDatabaseBuffer(
-      Buffer.from(dbInstance.export()),
-      DB_FILE,
-      DB_TEMP_FILE,
-      DB_BACKUP_FILE
-    );
-    persistenceStatus.lastPersistedAt = Date.now();
-    persistenceStatus.lastPersistenceError = null;
-  } catch (err: any) {
-    persistenceStatus.lastPersistenceError = err?.message || String(err);
+    const data = dbInstance.export();
+    const buffer = Buffer.from(data);
+    fs.writeFileSync(DB_FILE, buffer);
+  } catch (err) {
     console.error('Error persisting SQLite database to disk:', err);
-    try {
-      if (fs.existsSync(DB_TEMP_FILE)) fs.unlinkSync(DB_TEMP_FILE);
-    } catch {
-      // Best effort cleanup only.
-    }
   }
-}
-
-export function getDatabaseFilePaths(): {
-  primary: string;
-  temporary: string;
-  backup: string;
-} {
-  return {
-    primary: DB_FILE,
-    temporary: DB_TEMP_FILE,
-    backup: DB_BACKUP_FILE
-  };
-}
-
-export function getDatabasePersistenceStatus(): DatabasePersistenceStatus {
-  return { ...persistenceStatus };
 }
 
 function initSchema(db: Database) {
@@ -575,139 +445,6 @@ function initSchema(db: Database) {
       value TEXT NOT NULL,
       updated_at INTEGER NOT NULL
     );
-
-    -- Optional external research AI connectors. Credentials are stored server-side
-    -- and are never returned by the public configuration endpoint.
-    CREATE TABLE IF NOT EXISTS ai_research_server_connections (
-      provider TEXT PRIMARY KEY,
-      enabled INTEGER NOT NULL DEFAULT 0,
-      base_url TEXT NOT NULL DEFAULT '',
-      model TEXT NOT NULL DEFAULT '',
-      health_path TEXT NOT NULL DEFAULT '/health',
-      predict_path TEXT NOT NULL DEFAULT '/predict',
-      timeout_ms INTEGER NOT NULL DEFAULT 10000,
-      auth_token TEXT NOT NULL DEFAULT '',
-      updated_at INTEGER NOT NULL
-    );
-
-    -- Persistent Forex market-history synchronization state.
-    CREATE TABLE IF NOT EXISTS market_history_sync (
-      symbol TEXT PRIMARY KEY,
-      last_attempt_at INTEGER,
-      last_success_at INTEGER,
-      last_full_backfill_at INTEGER,
-      last_incremental_at INTEGER,
-      latest_daily_timestamp INTEGER,
-      daily_bars_stored INTEGER NOT NULL DEFAULT 0,
-      status TEXT NOT NULL,
-      error TEXT,
-      updated_at INTEGER NOT NULL
-    );
-
-    -- Derived market-period statistics used by the historical trend engine.
-    -- One row exists for each calendar period and each rolling snapshot.
-    CREATE TABLE IF NOT EXISTS market_period_stats (
-      id TEXT PRIMARY KEY,
-      symbol TEXT NOT NULL,
-      period_type TEXT NOT NULL,
-      period_start INTEGER NOT NULL,
-      period_end INTEGER NOT NULL,
-      open REAL NOT NULL,
-      high REAL NOT NULL,
-      low REAL NOT NULL,
-      close REAL NOT NULL,
-      range REAL NOT NULL,
-      range_pct REAL NOT NULL,
-      return_pct REAL NOT NULL,
-      atr14 REAL,
-      volatility_pct REAL,
-      data_points INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL,
-      UNIQUE(symbol, period_type, period_start)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_candles_symbol_timeframe_timestamp
-      ON candles(symbol, timeframe, timestamp);
-
-    CREATE INDEX IF NOT EXISTS idx_market_period_stats_symbol_type_end
-      ON market_period_stats(symbol, period_type, period_end);
-
-    CREATE INDEX IF NOT EXISTS idx_market_history_sync_status
-      ON market_history_sync(status);
-
-    -- Durable live-trading research ledger.
-    -- Stores the information Goldcrest knew at signal time and the resulting
-    -- broker execution state so future trend/prediction models can be trained
-    -- and evaluated without reconstructing historical TradeLog files.
-    CREATE TABLE IF NOT EXISTS live_trade_research (
-      signal_id TEXT PRIMARY KEY,
-      symbol TEXT NOT NULL,
-      broker TEXT NOT NULL,
-      environment TEXT NOT NULL,
-      signal_timestamp INTEGER NOT NULL,
-      captured_at INTEGER NOT NULL,
-      direction TEXT NOT NULL,
-      signal_category TEXT NOT NULL,
-      score REAL NOT NULL,
-      score_breakdown_json TEXT NOT NULL,
-      strategy_version TEXT NOT NULL,
-      model_version TEXT NOT NULL,
-      market_regime TEXT NOT NULL,
-      session TEXT NOT NULL,
-      data_status TEXT NOT NULL,
-      entry_min REAL,
-      entry_max REAL,
-      entry_preferred REAL,
-      entry_type TEXT,
-      stop_loss REAL,
-      take_profit_1 REAL,
-      take_profit_2 REAL,
-      take_profit_3 REAL,
-      risk_reward REAL,
-      quote_bid REAL,
-      quote_ask REAL,
-      quote_spread REAL,
-      quote_timestamp INTEGER,
-      quote_status TEXT,
-      requested_risk_quantity REAL,
-      configured_quantity REAL,
-      news_status TEXT,
-      news_source TEXT,
-      news_json TEXT,
-      reasons_json TEXT NOT NULL,
-      no_trade_reasons_json TEXT NOT NULL,
-      context_json TEXT NOT NULL,
-      lifecycle_status TEXT NOT NULL,
-      broker_position_id TEXT,
-      mfe_pnl REAL,
-      mae_pnl REAL,
-      max_favorable_price REAL,
-      max_adverse_price REAL,
-      holding_duration_ms INTEGER,
-      execution_status TEXT,
-      execution_code TEXT,
-      execution_reason TEXT,
-      broker_order_id TEXT,
-      executed_entry_price REAL,
-      executed_quantity REAL,
-      commission REAL,
-      broker_status TEXT,
-      execution_timestamp INTEGER,
-      realized_pnl REAL,
-      exit_price REAL,
-      exit_timestamp INTEGER,
-      outcome TEXT,
-      updated_at INTEGER NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_live_trade_research_symbol_time
-      ON live_trade_research(symbol, signal_timestamp);
-
-    CREATE INDEX IF NOT EXISTS idx_live_trade_research_lifecycle
-      ON live_trade_research(lifecycle_status, updated_at);
-
-    CREATE INDEX IF NOT EXISTS idx_live_trade_research_position
-      ON live_trade_research(broker_position_id, lifecycle_status);
   `;
 
   db.run(schemaSQL);
@@ -723,13 +460,7 @@ function initSchema(db: Database) {
     'ALTER TABLE signals ADD COLUMN market_regime TEXT;',
     'ALTER TABLE signals ADD COLUMN session TEXT;',
     'ALTER TABLE signals ADD COLUMN data_status TEXT;',
-    'ALTER TABLE signals ADD COLUMN strategy_version TEXT;',
-    'ALTER TABLE live_trade_research ADD COLUMN broker_position_id TEXT;',
-    'ALTER TABLE live_trade_research ADD COLUMN mfe_pnl REAL;',
-    'ALTER TABLE live_trade_research ADD COLUMN mae_pnl REAL;',
-    'ALTER TABLE live_trade_research ADD COLUMN max_favorable_price REAL;',
-    'ALTER TABLE live_trade_research ADD COLUMN max_adverse_price REAL;',
-    'ALTER TABLE live_trade_research ADD COLUMN holding_duration_ms INTEGER;'
+    'ALTER TABLE signals ADD COLUMN strategy_version TEXT;'
   ];
   try {
     db.run('ALTER TABLE execution_intents ADD COLUMN claim_token TEXT;');
@@ -764,7 +495,9 @@ function initSchema(db: Database) {
 function seedInitialData(db: Database) {
   // Markets
   db.run(`INSERT OR IGNORE INTO markets (id, code, name, status, currency) VALUES 
-    ('mkt_fx', 'FOREX', 'Global Foreign Exchange', 'ACTIVE', 'USD');
+    ('mkt_fx', 'FOREX', 'Global Foreign Exchange', 'ACTIVE', 'USD'),
+    ('mkt_in_eq', 'INDIA_EQUITY', 'Indian Equity Benchmark Indices', 'ACTIVE', 'INR'),
+    ('mkt_in_opt', 'INDIA_OPTIONS', 'Indian Equity Index Options', 'ACTIVE', 'INR');
   `);
 
   // System settings
@@ -774,7 +507,9 @@ function seedInitialData(db: Database) {
     ('DATA_STATUS', 'UNAVAILABLE', ${now}),
     ('MODEL_STATUS', 'BASELINE_UNCALIBRATED', ${now}),
     ('DEFAULT_RISK_PCT', '1.0', ${now}),
-    ('MAX_TRADE_VALUE_FOREX_USD', '100000', ${now});
+    ('STRIKE_DEPTH', '7', ${now}),
+    ('MAX_TRADE_VALUE_FOREX_USD', '100000', ${now}),
+    ('MAX_TRADE_VALUE_INDIAN_INR', '1000000', ${now});
   `);
 
   // Enforce LIVE_ONLY persistence.
@@ -839,12 +574,10 @@ export async function getDatabaseStats() {
   const db = await getDatabase();
   const tables = [
     'markets', 'currency_pairs', 'underlyings', 'contracts', 'candles',
-    'market_history_sync', 'market_period_stats',
     'signals', 'trades', 'positions', 'orders', 'economic_events',
     'risk_configs', 'system_settings', 'broker_accounts',
     'broker_reconciliation_snapshots', 'execution_intents', 'execution_fill_observations', 'execution_fill_events',
-    'trade_traces', 'trade_trace_nodes', 'trade_notes', 'ml_storage_records',
-    'live_trade_research'
+    'trade_traces', 'trade_trace_nodes', 'trade_notes', 'ml_storage_records'
   ];
 
   const stats: Record<string, number> = {};

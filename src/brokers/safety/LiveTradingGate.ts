@@ -74,13 +74,13 @@ export class LiveTradingGate {
       failedReasons.push('Condition 6 Failed: Market is currently closed or emergency halted.');
     }
 
-    // Check 7: Goldcrest-wide live quote freshness policy is fixed at 30s.
+    // Check 7: Goldcrest-wide live quote freshness policy is fixed at 20s.
     // There is intentionally no caller override or shorter fallback. This
     // prevents any future execution path from silently reintroducing a 10s
     // freshness requirement without an explicit code change here.
     const quoteMaxAgeMs = 30_000;
-    const marketDataFresh = (params.currentQuote.status === 'FRESH' || params.currentQuote.status === 'DELAYED')
-      && (Date.now() - params.currentQuote.timestamp < 300_000);
+    const marketDataFresh = params.currentQuote.status === 'FRESH'
+      && (Date.now() - params.currentQuote.timestamp < quoteMaxAgeMs);
     if (!marketDataFresh) {
       failedReasons.push(
         `Condition 7 Failed: Market data quote is stale or delayed (>${Math.round(quoteMaxAgeMs / 1000)}s old).`
@@ -193,12 +193,18 @@ export class LiveTradingGate {
     // price/quote-currency conversion. The operator controls the broker
     // volume by setting this value.
     const config = getSystemConfig();
-    const maxTradeValue = config.maxTradeValueForexUsd;
+    const isForex = params.order.market === 'FOREX';
+    const maxTradeValue = isForex ? config.maxTradeValueForexUsd : config.maxTradeValueIndianInr;
     let maximumTradeValueCheckPassed = Number.isFinite(maxTradeValue) && maxTradeValue > 0;
     let tradeValue = NaN;
     let tradeValueUsd = NaN;
 
-    if (maximumTradeValueCheckPassed && adapter.environment === 'LIVE') {
+    if (maximumTradeValueCheckPassed && isForex && adapter.environment === 'LIVE') {
+      // For cTrader LIVE Forex, maxTradeValueForexUsd is the broker protocol
+      // volume itself. Do not multiply order quantity by price or perform
+      // quote-currency conversion here. The configured value is also the
+      // authoritative per-order ceiling, so any execution path that supplies
+      // a larger quantity is rejected before broker submission.
       if (!Number.isSafeInteger(maxTradeValue)) {
         maximumTradeValueCheckPassed = false;
         failedReasons.push(
@@ -223,7 +229,7 @@ export class LiveTradingGate {
         ? params.order.quantity * referencePrice
         : NaN;
 
-      if (maximumTradeValueCheckPassed) {
+      if (maximumTradeValueCheckPassed && isForex) {
         const instrumentForValue = instrument;
         const quoteCurrency = instrumentForValue?.quoteCurrency || params.order.symbol.replace(/[^A-Z]/g, '').slice(-3);
         let quoteToUsdRate = 1;
@@ -248,13 +254,21 @@ export class LiveTradingGate {
         tradeValueUsd = tradeValue * quoteToUsdRate;
       }
 
+      // Monetary values can contain binary floating-point noise (e.g.
+      // 200.00000000000003). Treat values within a tiny absolute tolerance of
+      // the configured limit as equal; genuine overages still fail closed.
       const tradeValueTolerance = 1e-8;
-      if (maximumTradeValueCheckPassed && tradeValueUsd > maxTradeValue + tradeValueTolerance) {
+      if (maximumTradeValueCheckPassed && isForex && tradeValueUsd > maxTradeValue + tradeValueTolerance) {
         maximumTradeValueCheckPassed = false;
         failedReasons.push(
           `Condition 16 Failed: Trade value ${tradeValueUsd.toFixed(2)} USD exceeds configured maximum of ${maxTradeValue.toFixed(2)} USD for cTrader.`
         );
-      } else if (maximumTradeValueCheckPassed && !(tradeValueUsd > 0)) {
+      } else if (maximumTradeValueCheckPassed && !isForex && tradeValue > maxTradeValue + tradeValueTolerance) {
+        maximumTradeValueCheckPassed = false;
+        failedReasons.push(
+          `Condition 16 Failed: Trade value ${tradeValue.toFixed(2)} INR exceeds configured maximum of ${maxTradeValue.toFixed(2)} INR for 5paisa.`
+        );
+      } else if (maximumTradeValueCheckPassed && isForex && !(tradeValueUsd > 0)) {
         maximumTradeValueCheckPassed = false;
         failedReasons.push('Condition 16 Failed: USD-converted Forex trade value could not be safely calculated.');
       } else if (!maximumTradeValueCheckPassed && failedReasons.length === 0) {

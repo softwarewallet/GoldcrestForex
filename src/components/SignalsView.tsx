@@ -5,7 +5,10 @@ import {
   ArrowDownRight,
   Minus,
   XCircle,
+  Filter,
   Search,
+  CheckCircle2,
+  AlertTriangle,
   Clock,
   Layers,
   Sparkles,
@@ -20,7 +23,7 @@ interface SignalsViewProps {
 
 export const SignalsView: React.FC<SignalsViewProps> = ({ signals, onSelectSignal }) => {
   const [activeCategory, setActiveCategory] = useState<
-    'ALL' | 'FOREX' | 'QUALIFIED' | 'WATCHLIST' | 'NO_TRADE' | 'HISTORY'
+    'ALL' | 'FOREX' | 'INDIAN_EQUITY' | 'INDIAN_OPTIONS' | 'QUALIFIED' | 'WATCHLIST' | 'NO_TRADE' | 'HISTORY'
   >('ALL');
   const [directionFilter, setDirectionFilter] = useState<string>('ALL');
   const [search, setSearch] = useState<string>('');
@@ -34,6 +37,8 @@ export const SignalsView: React.FC<SignalsViewProps> = ({ signals, onSelectSigna
 
       // Category filter
       if (activeCategory === 'FOREX' && s.market !== 'FOREX') return false;
+      if (activeCategory === 'INDIAN_EQUITY' && s.market !== 'INDIA_EQUITY') return false;
+      if (activeCategory === 'INDIAN_OPTIONS' && s.market !== 'INDIA_OPTIONS') return false;
       if (activeCategory === 'QUALIFIED' && (s.direction === 'WAIT' || s.direction === 'NO_TRADE' || (s.mlProbability && s.mlProbability < 0.60))) return false;
       if (activeCategory === 'WATCHLIST' && s.direction !== 'WAIT') return false;
       if (activeCategory === 'NO_TRADE' && s.direction !== 'NO_TRADE') return false;
@@ -49,10 +54,12 @@ export const SignalsView: React.FC<SignalsViewProps> = ({ signals, onSelectSigna
     <div id="consolidated_signals_view" className="space-y-4 font-sans text-slate-200">
       {/* Category Sub-Navigation Bar */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-2.5 px-3 shadow-md">
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 text-xs font-mono w-full">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-mono w-full">
           {[
             { id: 'ALL', label: 'ALL SIGNALS', icon: Layers, count: signals.length },
-            { id: 'FOREX', label: 'FOREX MAJORS & CROSSES', icon: Sparkles, count: signals.filter(s => s.market === 'FOREX').length },
+            { id: 'FOREX', label: 'FOREX', icon: Sparkles, count: signals.filter(s => s.market === 'FOREX').length },
+            { id: 'INDIAN_EQUITY', label: 'INDIAN EQUITIES', icon: Sparkles, count: signals.filter(s => s.market === 'INDIA_EQUITY').length },
+            { id: 'INDIAN_OPTIONS', label: 'OPTIONS', icon: Sparkles, count: signals.filter(s => s.market === 'INDIA_OPTIONS').length },
             { id: 'QUALIFIED', label: 'QUALIFIED (≥60% ML)', icon: ShieldCheck, count: signals.filter(s => s.direction !== 'WAIT' && s.direction !== 'NO_TRADE' && s.mlProbability >= 0.60).length },
             { id: 'WATCHLIST', label: 'WATCH (WAIT)', icon: Clock, count: signals.filter(s => s.direction === 'WAIT').length },
             { id: 'NO_TRADE', label: 'NO TRADE / CONFLICT', icon: XCircle, count: signals.filter(s => s.direction === 'NO_TRADE').length },
