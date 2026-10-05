@@ -431,6 +431,189 @@ function initSchema(db: Database) {
       timestamp INTEGER NOT NULL
     );
 
+    -- 31. Unified Prediction & Evidence Ledger (Phase 17)
+    CREATE TABLE IF NOT EXISTS predictions (
+      prediction_id TEXT PRIMARY KEY,
+      timestamp INTEGER NOT NULL,
+      pair TEXT NOT NULL,
+      horizon TEXT NOT NULL,
+      direction TEXT NOT NULL,
+      probability_up REAL NOT NULL,
+      probability_down REAL NOT NULL,
+      confidence REAL NOT NULL,
+      regime TEXT NOT NULL,
+      technical_features TEXT NOT NULL,
+      news_features TEXT NOT NULL,
+      historical_features TEXT NOT NULL,
+      sample_size INTEGER NOT NULL,
+      expected_return REAL NOT NULL,
+      expected_risk REAL NOT NULL,
+      recommendation TEXT NOT NULL,
+      target_price REAL,
+      actual_price REAL,
+      actual_outcome TEXT NOT NULL DEFAULT 'PENDING',
+      actual_return REAL,
+      win_loss INTEGER,
+      prediction_error REAL,
+      created_at INTEGER NOT NULL,
+      evaluated_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_predictions_pair_ts ON predictions(pair, timestamp);
+    CREATE INDEX IF NOT EXISTS idx_predictions_recommendation ON predictions(recommendation);
+    CREATE INDEX IF NOT EXISTS idx_predictions_outcome ON predictions(actual_outcome);
+
+    -- 32. Forensic Immutable Prediction Snapshots (Phase 2 & 16)
+    CREATE TABLE IF NOT EXISTS prediction_snapshots (
+      prediction_id TEXT PRIMARY KEY,
+      timestamp INTEGER NOT NULL,
+      pair TEXT NOT NULL,
+      timeframe TEXT NOT NULL,
+      horizon TEXT NOT NULL,
+      model_id TEXT NOT NULL,
+      model_version TEXT NOT NULL,
+      feature_version TEXT NOT NULL,
+      regime_version TEXT NOT NULL,
+      news_engine_version TEXT NOT NULL,
+      predicted_direction TEXT NOT NULL,
+      prediction_class TEXT NOT NULL,
+      prob_target_first REAL NOT NULL,
+      prob_stop_first REAL NOT NULL,
+      prob_time_exit REAL NOT NULL,
+      expected_r REAL NOT NULL,
+      confidence_tier TEXT NOT NULL,
+      confidence_score REAL NOT NULL,
+      prediction_horizon_candles INTEGER NOT NULL,
+      predicted_entry REAL NOT NULL,
+      predicted_stop_loss REAL NOT NULL,
+      predicted_take_profit REAL NOT NULL,
+      predicted_risk_reward REAL NOT NULL,
+      predicted_position_size REAL NOT NULL,
+      spread_at_prediction REAL NOT NULL,
+      bid REAL NOT NULL,
+      ask REAL NOT NULL,
+      mid_price REAL NOT NULL,
+      atr REAL NOT NULL,
+      atr_pips REAL NOT NULL,
+      volatility REAL NOT NULL,
+      market_regime TEXT NOT NULL,
+      trend_strength REAL NOT NULL,
+      market_structure TEXT NOT NULL,
+      dist_to_support_pips REAL NOT NULL,
+      dist_to_resistance_pips REAL NOT NULL,
+      session TEXT NOT NULL,
+      deterministic_signal TEXT NOT NULL,
+      deterministic_score REAL NOT NULL,
+      ml_score REAL NOT NULL,
+      trade_quality_score REAL NOT NULL,
+      final_decision TEXT NOT NULL,
+      news_risk TEXT NOT NULL,
+      high_impact_news INTEGER NOT NULL,
+      elevated_news INTEGER NOT NULL,
+      news_sentiment REAL NOT NULL,
+      news_shock_state INTEGER NOT NULL,
+      relevant_news_count INTEGER NOT NULL,
+      top_contributing_features TEXT NOT NULL,
+      conflicting_factors TEXT NOT NULL,
+      quote_age_ms INTEGER NOT NULL,
+      data_quality TEXT NOT NULL,
+      spread_quality TEXT NOT NULL,
+      missing_feature_count INTEGER NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_psnap_pair_ts ON prediction_snapshots(pair, timestamp);
+    CREATE INDEX IF NOT EXISTS idx_psnap_model_ver ON prediction_snapshots(model_version);
+    CREATE INDEX IF NOT EXISTS idx_psnap_regime ON prediction_snapshots(market_regime);
+    CREATE INDEX IF NOT EXISTS idx_psnap_session ON prediction_snapshots(session);
+    CREATE INDEX IF NOT EXISTS idx_psnap_decision ON prediction_snapshots(final_decision);
+
+    -- 33. Forensic Feature Snapshots (Phase 2 & 16)
+    CREATE TABLE IF NOT EXISTS prediction_feature_snapshots (
+      prediction_id TEXT PRIMARY KEY,
+      rsi REAL NOT NULL,
+      macd REAL NOT NULL,
+      macd_signal REAL NOT NULL,
+      macd_histogram REAL NOT NULL,
+      ema9 REAL NOT NULL,
+      ema21 REAL NOT NULL,
+      ema50 REAL NOT NULL,
+      ema200 REAL NOT NULL,
+      adx REAL NOT NULL,
+      di_plus REAL NOT NULL,
+      di_minus REAL NOT NULL,
+      bollinger_upper REAL NOT NULL,
+      bollinger_lower REAL NOT NULL,
+      bollinger_width REAL NOT NULL,
+      stochastic_k REAL NOT NULL,
+      stochastic_d REAL NOT NULL,
+      roc REAL NOT NULL,
+      vwap_distance REAL NOT NULL,
+      mtf_alignment TEXT NOT NULL,
+      mtf_conflict_score REAL NOT NULL
+    );
+
+    -- 34. Forensic Prediction Outcomes (Phase 3 & 16)
+    CREATE TABLE IF NOT EXISTS prediction_outcomes (
+      prediction_id TEXT PRIMARY KEY,
+      evaluated_at INTEGER NOT NULL,
+      actual_outcome TEXT NOT NULL,
+      trade_classification TEXT NOT NULL,
+      is_direction_correct INTEGER NOT NULL,
+      is_trade_won INTEGER NOT NULL,
+      entry_reached INTEGER NOT NULL,
+      entry_price_actual REAL,
+      exit_price_actual REAL,
+      actual_realized_r REAL NOT NULL,
+      holding_duration_minutes REAL NOT NULL,
+      mae_pips REAL NOT NULL,
+      mfe_pips REAL NOT NULL,
+      mae_r REAL NOT NULL,
+      mfe_r REAL NOT NULL,
+      closed_by TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_poutcome_eval_ts ON prediction_outcomes(evaluated_at);
+    CREATE INDEX IF NOT EXISTS idx_poutcome_outcome ON prediction_outcomes(actual_outcome);
+    CREATE INDEX IF NOT EXISTS idx_poutcome_trade_class ON prediction_outcomes(trade_classification);
+
+    -- 35. Forensic Root Cause Audits (Phase 7 & 16)
+    CREATE TABLE IF NOT EXISTS prediction_forensics (
+      prediction_id TEXT PRIMARY KEY,
+      primary_failure_reason TEXT NOT NULL,
+      secondary_factors TEXT NOT NULL,
+      evidence_summary TEXT NOT NULL,
+      confidence_bucket TEXT NOT NULL,
+      is_overconfident INTEGER NOT NULL,
+      is_underconfident INTEGER NOT NULL,
+      calibration_error REAL NOT NULL,
+      brier_score REAL NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_pforensics_reason ON prediction_forensics(primary_failure_reason);
+    CREATE INDEX IF NOT EXISTS idx_pforensics_bucket ON prediction_forensics(confidence_bucket);
+
+    -- 36. Daily Aggregated Prediction Metrics (Phase 5 & 16)
+    CREATE TABLE IF NOT EXISTS prediction_daily_metrics (
+      date TEXT PRIMARY KEY,
+      total_predictions INTEGER NOT NULL,
+      completed_predictions INTEGER NOT NULL,
+      pending_predictions INTEGER NOT NULL,
+      actionable_predictions INTEGER NOT NULL,
+      abstained_predictions INTEGER NOT NULL,
+      correct_predictions INTEGER NOT NULL,
+      incorrect_predictions INTEGER NOT NULL,
+      accuracy_pct REAL NOT NULL,
+      tp_first_count INTEGER NOT NULL,
+      sl_first_count INTEGER NOT NULL,
+      time_exit_count INTEGER NOT NULL,
+      no_entry_count INTEGER NOT NULL,
+      avg_confidence REAL NOT NULL,
+      avg_expected_r REAL NOT NULL,
+      avg_realized_r REAL NOT NULL,
+      realized_profit_factor REAL NOT NULL,
+      brier_score REAL NOT NULL,
+      calibration_error REAL NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
     -- 29. Risk Configs & System Settings
     CREATE TABLE IF NOT EXISTS risk_configs (
       id TEXT PRIMARY KEY,

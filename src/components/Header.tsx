@@ -38,6 +38,8 @@ export const Header: React.FC<HeaderProps> = ({
   const isLive = true;
   const activeArea =
     activeTab === 'market_watch' ? 'MARKET WATCH' :
+    activeTab === 'shadow_mode' ? 'SHADOW MODE' :
+    activeTab === 'forensics' ? 'PREDICTION FORENSICS' :
     activeTab === 'control_center' ? 'CONTROL CENTER' :
     activeTab === 'history' ? 'HISTORY' :
     activeTab === 'trading' ? 'COCKPIT' :

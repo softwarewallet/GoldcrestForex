@@ -187,7 +187,7 @@ export const TradingHub: React.FC<TradingHubProps> = ({
       message: string;
     };
   }
-  const [activeTab, setActiveTab] = useState<'cockpit' | 'positions' | 'signals' | 'options' | 'execution' | 'controls'>('cockpit');
+  const [activeTab, setActiveTab] = useState<'cockpit' | 'positions' | 'signals' | 'options' | 'execution' | 'controls' | 'predictions'>('cockpit');
   const [autoStatus, setAutoStatus] = useState<AutoTradingStatusSnapshot | null>(null);
   const [autoStatusError, setAutoStatusError] = useState<string | null>(null);
   const [dailyLossLimitPct, setDailyLossLimitPct] = useState<number>(3);
@@ -196,6 +196,20 @@ export const TradingHub: React.FC<TradingHubProps> = ({
   const [isAuthorizingContinuity, setIsAuthorizingContinuity] = useState<boolean>(false);
   const [continuityOperatorNote, setContinuityOperatorNote] = useState<string>('');
   const [continuityNotification, setContinuityNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
+  // Predictions & Evidence state
+  const [predictionPair, setPredictionPair] = useState<string>('EUR/USD');
+  const [predictionHorizon, setPredictionHorizon] = useState<string>('15M');
+  const [predictionResult, setPredictionResult] = useState<any | null>(null);
+  const [evaluatingPrediction, setEvaluatingPrediction] = useState<boolean>(false);
+  const [walkForwardPair, setWalkForwardPair] = useState<string>('EUR/USD');
+  const [walkForwardReport, setWalkForwardReport] = useState<any | null>(null);
+  const [runningWalkForward, setRunningWalkForward] = useState<boolean>(false);
+  const [predictionHistory, setPredictionHistory] = useState<any[]>([]);
+  const [predictionMode, setPredictionMode] = useState<string>('SHADOW');
+  const [universeScan, setUniverseScan] = useState<any | null>(null);
+  const [scanningUniverse, setScanningUniverse] = useState<boolean>(false);
+  const [togglingPair, setTogglingPair] = useState<string | null>(null);
 
   // Helper to append telemetry console logs
   const addLog = useCallback((type: 'info' | 'success' | 'error' | 'warning' | 'nlp', message: string) => {
@@ -428,6 +442,121 @@ export const TradingHub: React.FC<TradingHubProps> = ({
       clearInterval(signalsInterval);
     };
   }, [fetchRealPositions, fetchRealSignals]);
+
+  const handleEvaluatePrediction = useCallback(async (pairToEval: string = predictionPair) => {
+    setEvaluatingPrediction(true);
+    try {
+      const res = await fetch('/api/prediction/predict', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pair: pairToEval, horizon: predictionHorizon })
+      });
+      const data = await safeParseJson(res);
+      if (data?.success && data?.prediction) {
+        setPredictionResult(data.prediction);
+        addLog('info', `Multi-factor prediction generated for ${pairToEval}: ${data.prediction.direction} (${(data.prediction.calibratedConfidence * 100).toFixed(1)}% conf, EV=${data.prediction.expectedValue} pips) -> ${data.prediction.recommendation}`);
+      } else {
+        throw new Error(data?.error || 'Failed to evaluate prediction');
+      }
+    } catch (err: any) {
+      addLog('error', `Prediction error for ${pairToEval}: ${err.message}`);
+    } finally {
+      setEvaluatingPrediction(false);
+    }
+  }, [predictionPair, predictionHorizon, safeParseJson, addLog]);
+
+  const handleRunWalkForward = useCallback(async (pairToTest: string = walkForwardPair) => {
+    setRunningWalkForward(true);
+    setWalkForwardReport(null);
+    try {
+      const res = await fetch('/api/prediction/walk-forward', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pair: pairToTest, candlesCount: 200, windowSize: 50, stepSize: 20 })
+      });
+      const data = await safeParseJson(res);
+      if (data?.success && data?.report) {
+        setWalkForwardReport(data.report);
+        addLog('success', `Walk-forward validation completed for ${pairToTest} across ${data.report.validationWindows} windows.`);
+      } else {
+        throw new Error(data?.error || 'Failed to execute walk-forward validation');
+      }
+    } catch (err: any) {
+      addLog('error', `Walk-forward validation error: ${err.message}`);
+    } finally {
+      setRunningWalkForward(false);
+    }
+  }, [walkForwardPair, safeParseJson, addLog]);
+
+  const handleScanUniverse = useCallback(async () => {
+    setScanningUniverse(true);
+    try {
+      const res = await fetch(`/api/prediction/universe-scan?horizon=${predictionHorizon}`);
+      const data = await safeParseJson(res);
+      if (data?.success && data?.scan) {
+        setUniverseScan(data.scan);
+        addLog('info', `Universe prediction scan complete: ${data.scan.recommendedTradeCount} tradeable, ${data.scan.missedOpportunitiesCount} disabled opportunities, ${data.scan.avoidNoTradeCount} avoided.`);
+      } else {
+        throw new Error(data?.error || 'Failed to scan universe');
+      }
+    } catch (err: any) {
+      addLog('error', `Universe scan error: ${err.message}`);
+    } finally {
+      setScanningUniverse(false);
+    }
+  }, [predictionHorizon, safeParseJson, addLog]);
+
+  const handleTogglePairInSettings = useCallback(async (pair: string, currentEnabled: boolean) => {
+    setTogglingPair(pair);
+    try {
+      const endpoint = currentEnabled ? '/api/prediction/disable-pair' : '/api/prediction/enable-pair';
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pair })
+      });
+      const data = await safeParseJson(res);
+      if (data?.success) {
+        addLog('success', `Settings updated: ${pair} is now ${currentEnabled ? 'DISABLED' : 'ENABLED'} in Auto Live settings.`);
+        // Dispatch global event so Settings tab reloads immediately
+        window.dispatchEvent(new CustomEvent('goldcrest:settings-updated'));
+        // Refresh universe scan and autoStatus
+        handleScanUniverse();
+        try {
+          const controlsRes = await fetch('/api/brokers/controls', { cache: 'no-store' });
+          const controlsData = await safeParseJson(controlsRes);
+          if (controlsData?.autoTrading) setAutoStatus(controlsData.autoTrading);
+        } catch {}
+      } else {
+        throw new Error(data?.error || 'Failed to update pair setting');
+      }
+    } catch (err: any) {
+      addLog('error', `Error updating setting for ${pair}: ${err.message}`);
+    } finally {
+      setTogglingPair(null);
+    }
+  }, [handleScanUniverse, safeParseJson, addLog]);
+
+  const fetchPredictionStatus = useCallback(async () => {
+    try {
+      const res = await fetch('/api/prediction/status');
+      const data = await safeParseJson(res);
+      if (data?.mode) setPredictionMode(data.mode);
+      if (Array.isArray(data?.recentPredictions)) setPredictionHistory(data.recentPredictions);
+    } catch {}
+  }, [safeParseJson]);
+
+  useEffect(() => {
+    if (activeTab === 'predictions') {
+      fetchPredictionStatus();
+      if (!predictionResult) {
+        handleEvaluatePrediction(predictionPair);
+      }
+      if (!universeScan) {
+        handleScanUniverse();
+      }
+    }
+  }, [activeTab, fetchPredictionStatus, handleEvaluatePrediction, handleScanUniverse, predictionPair, predictionResult, universeScan]);
 
   // Keep the displayed record-age counter moving once per second without refetching.
   useEffect(() => {
@@ -710,6 +839,7 @@ export const TradingHub: React.FC<TradingHubProps> = ({
         ['cockpit', 'Auto Live'],
         ['positions', 'Positions'],
         ['signals', 'Signals'],
+        ['predictions', 'Predictions & Evidence'],
         ['execution', 'Execution Log'],
         ['controls', 'Controls']
       ].map(([id, label]) => (
@@ -1034,6 +1164,528 @@ export const TradingHub: React.FC<TradingHubProps> = ({
             </div>
             <div className="text-sm font-bold text-white font-mono">Runtime Output</div>
             <div className="bg-slate-950 rounded-lg p-3 max-h-72 overflow-y-auto font-mono text-[11px] space-y-1">{logs.length === 0 ? <div className="text-slate-600">No UI telemetry.</div> : logs.map((log, i) => <div key={i}><span className="text-slate-600">[{log.timestamp}]</span> <span className={log.type === 'error' ? "text-rose-400" : log.type === 'success' ? "text-emerald-400" : "text-cyan-400"}>[{log.type.toUpperCase()}]</span> <span className="text-slate-300">{log.message}</span></div>)}</div>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'predictions' && (
+        <div className="space-y-4 font-mono text-xs">
+          {/* Top Safety Status Banner */}
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-3 shadow">
+            <div>
+              <div className="flex items-center gap-2">
+                <Cpu className="w-5 h-5 text-cyan-400" />
+                <span className="text-white font-bold text-sm uppercase">Redesigned Prediction & Evidence Engine</span>
+                <span className="px-2.5 py-0.5 rounded text-[10px] font-bold bg-cyan-950 border border-cyan-700 text-cyan-300">
+                  {predictionMode} OBSERVATION MODE
+                </span>
+              </div>
+              <p className="text-slate-400 text-[11px] mt-1">
+                Multi-factor prediction: Historical Analogs + News Currency Intelligence + Technical Structure + Conflict Vetoes.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleScanUniverse}
+                disabled={scanningUniverse}
+                className="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-bold transition flex items-center gap-1.5 disabled:opacity-50 text-[11px]"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>{scanningUniverse ? 'Scanning Universe...' : 'Scan Forex Universe'}</span>
+              </button>
+              <div className="px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-950 text-slate-300 text-[11px]">
+                Live Safety: <b className="text-emerald-400">ISOLATED</b>
+              </div>
+            </div>
+          </div>
+
+          {/* Universe Trade Matrix & Settings Synchronization Panel */}
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-3">
+              <div>
+                <div className="text-sm font-bold text-white flex items-center gap-2">
+                  <span>UNIVERSE TRADE SUGGESTIONS & SETTINGS SYNC</span>
+                  {universeScan?.timestamp && (
+                    <span className="text-[10px] font-normal text-slate-500">
+                      (Scanned {new Date(universeScan.timestamp).toLocaleTimeString()})
+                    </span>
+                  )}
+                </div>
+                <div className="text-[11px] text-slate-400 mt-0.5">
+                  Pairs suggested TO TRADE vs Pairs NOT TO TRADE. System flags high-conviction predictions disabled in settings so opportunities are not wasted.
+                </div>
+              </div>
+            </div>
+
+            {/* Summary Counters */}
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
+              <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800">
+                <div className="text-slate-500 text-[10px]">TOTAL UNIVERSE</div>
+                <div className="text-base font-bold text-white mt-0.5">{universeScan?.totalUniversePairs ?? '—'} Pairs</div>
+              </div>
+              <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800">
+                <div className="text-slate-500 text-[10px]">ENABLED IN SETTINGS</div>
+                <div className="text-base font-bold text-cyan-300 mt-0.5">{universeScan?.enabledInSettingsCount ?? '—'} Pairs</div>
+              </div>
+              <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800">
+                <div className="text-slate-500 text-[10px]">SUGGESTED TO TRADE</div>
+                <div className="text-base font-bold text-emerald-400 mt-0.5">{universeScan?.recommendedTradeCount ?? 0} Pairs</div>
+              </div>
+              <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800">
+                <div className="text-slate-500 text-[10px]">SUGGESTED NOT TO TRADE</div>
+                <div className="text-base font-bold text-slate-400 mt-0.5">{universeScan?.avoidNoTradeCount ?? '—'} Pairs</div>
+              </div>
+              <div className="bg-slate-950 p-2.5 rounded-lg border border-slate-800">
+                <div className="text-slate-500 text-[10px]">DISABLED IN SETTINGS</div>
+                <div className={`text-base font-bold mt-0.5 ${(universeScan?.missedOpportunitiesCount ?? 0) > 0 ? 'text-amber-400' : 'text-slate-500'}`}>
+                  {universeScan?.missedOpportunitiesCount ?? 0} Opportunities
+                </div>
+              </div>
+            </div>
+
+            {/* Settings Mismatch Alert Banner */}
+            {universeScan?.settingsMismatchAlert && universeScan?.missedOpportunities?.length > 0 && (
+              <div className="bg-amber-950/40 border border-amber-600/60 rounded-xl p-4 space-y-2.5 shadow-inner">
+                <div className="flex items-center gap-2 text-amber-300 font-bold text-xs">
+                  <ShieldAlert className="w-4 h-4 text-amber-400" />
+                  <span>PREDICTION OPPORTUNITY DISABLED IN SETTINGS ALERT</span>
+                </div>
+                <p className="text-[11px] text-amber-200/90 leading-relaxed">
+                  The prediction model identified high-conviction setups with positive expected value on the following pairs, but they are <b>DISABLED</b> in your Auto Live settings. Without enabling them, the system cannot execute these setups automatically:
+                </p>
+                <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-2 pt-1">
+                  {universeScan.missedOpportunities.map((m: any) => (
+                    <div key={m.pair} className="bg-slate-950 border border-amber-700/60 rounded-lg p-2.5 flex items-center justify-between gap-2">
+                      <div>
+                        <div className="text-white font-bold">{m.pair}</div>
+                        <div className="text-[10px] text-emerald-400">
+                          {m.recommendation} | EV: +{m.expectedValuePips} pips ({(m.calibratedConfidence * 100).toFixed(0)}% conf)
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleTogglePairInSettings(m.pair, false)}
+                        disabled={togglingPair === m.pair}
+                        className="px-2.5 py-1 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[10px] transition disabled:opacity-50 shrink-0"
+                      >
+                        {togglingPair === m.pair ? 'Enabling...' : `Enable ${m.pair}`}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Qualified Pairs Suggested TO TRADE */}
+            {universeScan?.recommendedTrades?.length > 0 && (
+              <div className="space-y-2">
+                <div className="text-emerald-400 font-bold text-xs flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                  <span>PAIRS SUGGESTED TO TRADE (QUALIFIED & ENABLED)</span>
+                </div>
+                <div className="overflow-x-auto border border-emerald-900/50 rounded-lg bg-slate-950">
+                  <table className="w-full text-left text-[11px]">
+                    <thead>
+                      <tr className="border-b border-emerald-900/40 text-slate-400 bg-emerald-950/20">
+                        <th className="py-2 px-3">Pair</th>
+                        <th>Direction</th>
+                        <th>Confidence</th>
+                        <th>Net Expected Value</th>
+                        <th>News Sentiment</th>
+                        <th>Historical Sample</th>
+                        <th>Settings Status</th>
+                        <th className="text-right px-3">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {universeScan.recommendedTrades.map((t: any) => (
+                        <tr key={t.pair} className="border-b border-slate-800/60 hover:bg-slate-900/40">
+                          <td className="py-2 px-3 font-bold text-white">{t.pair}</td>
+                          <td className={t.recommendation === 'TRADE_BUY' ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+                            {t.recommendation}
+                          </td>
+                          <td className="text-cyan-300">{(t.calibratedConfidence * 100).toFixed(1)}%</td>
+                          <td className="text-emerald-400 font-bold">+{t.expectedValuePips} pips</td>
+                          <td className="text-slate-300">{t.newsSentiment}</td>
+                          <td className="text-slate-400">{t.historicalSampleSize} analogs ({t.historicalWinRate * 100}% win)</td>
+                          <td>
+                            <span className="px-2 py-0.5 rounded text-[9px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-700">
+                              ENABLED IN AUTO LIVE
+                            </span>
+                          </td>
+                          <td className="text-right px-3">
+                            <button
+                              type="button"
+                              onClick={() => handleTogglePairInSettings(t.pair, true)}
+                              disabled={togglingPair === t.pair}
+                              className="px-2 py-0.5 rounded border border-slate-700 bg-slate-900 text-slate-400 hover:text-rose-300 hover:border-rose-800 text-[10px]"
+                            >
+                              {togglingPair === t.pair ? 'Updating...' : 'Disable'}
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* Pairs Suggested NOT TO TRADE / AVOID Table */}
+            <div className="space-y-2">
+              <div className="text-slate-400 font-bold text-xs flex items-center justify-between">
+                <span>PAIRS SUGGESTED NOT TO TRADE / AVOID (SAFETY FILTERED)</span>
+                <span className="text-[10px] text-slate-500">Filtered out to protect capital from low expectancy or conflicts</span>
+              </div>
+              <div className="overflow-x-auto border border-slate-800 rounded-lg bg-slate-950 max-h-64 overflow-y-auto">
+                <table className="w-full text-left text-[11px]">
+                  <thead>
+                    <tr className="border-b border-slate-800 text-slate-500 sticky top-0 bg-slate-950">
+                      <th className="py-2 px-3">Pair</th>
+                      <th>Model Output</th>
+                      <th>Confidence</th>
+                      <th>Expected Value</th>
+                      <th>Veto / Exclusion Reason</th>
+                      <th>Settings</th>
+                      <th className="text-right px-3">Toggle Setting</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(universeScan?.avoidPairs || []).map((a: any) => (
+                      <tr key={a.pair} className="border-b border-slate-800/40 text-slate-400 hover:bg-slate-900/30">
+                        <td className="py-1.5 px-3 font-bold text-slate-300">{a.pair}</td>
+                        <td>
+                          <span className="px-1.5 py-0.5 rounded text-[9px] bg-slate-900 border border-slate-800 text-amber-400">
+                            {a.recommendation}
+                          </span>
+                        </td>
+                        <td className="text-slate-400">{(a.calibratedConfidence * 100).toFixed(1)}%</td>
+                        <td className={a.expectedValuePips > 0 ? 'text-emerald-400' : 'text-slate-500'}>
+                          {a.expectedValuePips > 0 ? `+${a.expectedValuePips}` : a.expectedValuePips} pips
+                        </td>
+                        <td className="text-[10px] text-slate-400 max-w-xs truncate" title={a.vetoReason || a.primaryReason}>
+                          {a.vetoReason || a.primaryReason}
+                        </td>
+                        <td>
+                          <span className={`px-1.5 py-0.5 rounded text-[9px] ${a.isEnabledInSettings ? 'text-cyan-400 bg-cyan-950/40 border border-cyan-800/40' : 'text-slate-500 bg-slate-900'}`}>
+                            {a.isEnabledInSettings ? 'Active' : 'Disabled'}
+                          </span>
+                        </td>
+                        <td className="text-right px-3">
+                          <button
+                            type="button"
+                            onClick={() => handleTogglePairInSettings(a.pair, a.isEnabledInSettings)}
+                            disabled={togglingPair === a.pair}
+                            className="px-2 py-0.5 rounded border border-slate-800 bg-slate-900 text-slate-400 hover:text-white text-[10px]"
+                          >
+                            {togglingPair === a.pair ? '...' : a.isEnabledInSettings ? 'Disable' : 'Enable'}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          {/* Interactive Evaluation Bar */}
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+            <div className="text-slate-400 text-[11px] font-bold uppercase tracking-wider mb-3">On-Demand Prediction & Evidence Evaluator</div>
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex items-center gap-2">
+                <span className="text-slate-500">Pair:</span>
+                <select
+                  value={predictionPair}
+                  onChange={e => setPredictionPair(e.target.value)}
+                  className="bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white"
+                >
+                  {['EUR/USD', 'GBP/USD', 'USD/JPY', 'USD/CHF', 'AUD/USD', 'USD/CAD', 'EUR/JPY', 'GBP/JPY'].map(p => (
+                    <option key={p} value={p}>{p}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-slate-500">Horizon:</span>
+                <select
+                  value={predictionHorizon}
+                  onChange={e => setPredictionHorizon(e.target.value)}
+                  className="bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-white"
+                >
+                  <option value="5M">5M</option>
+                  <option value="15M">15M</option>
+                  <option value="1H">1H</option>
+                  <option value="4H">4H</option>
+                  <option value="1D">1D</option>
+                </select>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => handleEvaluatePrediction(predictionPair)}
+                disabled={evaluatingPrediction}
+                className="px-4 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-bold transition flex items-center gap-1.5 disabled:opacity-50"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>{evaluatingPrediction ? 'Evaluating Multi-Factor Evidence...' : 'Evaluate Prediction'}</span>
+              </button>
+            </div>
+
+            {/* Prediction Breakdown Result Card */}
+            {predictionResult && (
+              <div className="mt-4 pt-4 border-t border-slate-800 space-y-4">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <div className="bg-slate-950 p-3 rounded-lg border border-slate-800">
+                    <div className="text-slate-500 text-[10px]">PREDICTED DIRECTION</div>
+                    <div className={`text-lg font-bold mt-1 ${
+                      predictionResult.direction === 'UP' ? 'text-emerald-400' :
+                      predictionResult.direction === 'DOWN' ? 'text-rose-400' : 'text-amber-400'
+                    }`}>
+                      {predictionResult.direction}
+                    </div>
+                    <div className="text-[10px] text-slate-500 mt-0.5">Horizon: {predictionResult.horizon}</div>
+                  </div>
+
+                  <div className="bg-slate-950 p-3 rounded-lg border border-slate-800">
+                    <div className="text-slate-500 text-[10px]">CALIBRATED CONFIDENCE</div>
+                    <div className="text-lg font-bold text-white mt-1">
+                      {(predictionResult.calibratedConfidence * 100).toFixed(1)}%
+                    </div>
+                    <div className="text-[10px] text-slate-500 mt-0.5">Sample: {predictionResult.sampleSize} analogs</div>
+                  </div>
+
+                  <div className="bg-slate-950 p-3 rounded-lg border border-slate-800">
+                    <div className="text-slate-500 text-[10px]">NET EXPECTED VALUE</div>
+                    <div className={`text-lg font-bold mt-1 ${
+                      predictionResult.expectedValue > 0 ? 'text-emerald-400' : 'text-rose-400'
+                    }`}>
+                      {predictionResult.expectedValue > 0 ? '+' : ''}{predictionResult.expectedValue} pips
+                    </div>
+                    <div className="text-[10px] text-slate-500 mt-0.5">After spread & slippage</div>
+                  </div>
+
+                  <div className="bg-slate-950 p-3 rounded-lg border border-slate-800">
+                    <div className="text-slate-500 text-[10px]">TRADE RECOMMENDATION</div>
+                    <div className={`text-sm font-bold mt-1 px-2 py-1 rounded inline-block ${
+                      predictionResult.recommendation === 'TRADE_BUY' ? 'bg-emerald-950 text-emerald-300 border border-emerald-700' :
+                      predictionResult.recommendation === 'TRADE_SELL' ? 'bg-rose-950 text-rose-300 border border-rose-700' :
+                      'bg-slate-900 text-amber-300 border border-amber-800'
+                    }`}>
+                      {predictionResult.recommendation}
+                    </div>
+                    <div className="text-[10px] text-slate-500 mt-0.5">Default safe: NO_TRADE</div>
+                  </div>
+                </div>
+
+                {/* Evidence Pillars Grid */}
+                <div className="grid md:grid-cols-3 gap-3">
+                  {/* News Intelligence */}
+                  <div className="bg-slate-950/80 p-3 rounded-lg border border-slate-800 space-y-2">
+                    <div className="text-slate-400 font-bold flex items-center justify-between text-[11px]">
+                      <span>NEWS INTELLIGENCE</span>
+                      <span className={predictionResult.evidence?.news?.direction === 'BULLISH' ? 'text-emerald-400' : predictionResult.evidence?.news?.direction === 'BEARISH' ? 'text-rose-400' : 'text-slate-400'}>
+                        {predictionResult.evidence?.news?.direction || 'NEUTRAL'}
+                      </span>
+                    </div>
+                    <div className="space-y-1 text-[11px] text-slate-400">
+                      <div>Base Sentiment: <b className="text-white">{predictionResult.evidence?.news?.baseCurrencySentiment}</b></div>
+                      <div>Quote Sentiment: <b className="text-white">{predictionResult.evidence?.news?.quoteCurrencySentiment}</b></div>
+                      <div>Relative Score: <b className="text-cyan-300">{predictionResult.evidence?.news?.relativeSentiment}</b></div>
+                      <div>Conflict Score: <b className={predictionResult.evidence?.news?.conflictScore > 0.4 ? 'text-rose-400' : 'text-emerald-400'}>{(predictionResult.evidence?.news?.conflictScore * 100).toFixed(0)}%</b></div>
+                    </div>
+                  </div>
+
+                  {/* Historical Analogs */}
+                  <div className="bg-slate-950/80 p-3 rounded-lg border border-slate-800 space-y-2">
+                    <div className="text-slate-400 font-bold flex items-center justify-between text-[11px]">
+                      <span>HISTORICAL ANALOGS</span>
+                      <span className="text-cyan-300">{predictionResult.evidence?.historical?.sampleSize} matches</span>
+                    </div>
+                    <div className="space-y-1 text-[11px] text-slate-400">
+                      <div>Historical Up Prob: <b className="text-emerald-400">{(predictionResult.evidence?.historical?.historicalUpProbability * 100).toFixed(1)}%</b></div>
+                      <div>Historical Down Prob: <b className="text-rose-400">{(predictionResult.evidence?.historical?.historicalDownProbability * 100).toFixed(1)}%</b></div>
+                      <div>Historical Win Rate: <b className="text-white">{(predictionResult.evidence?.historical?.winRate * 100).toFixed(1)}%</b></div>
+                      <div>Sample Satiated: <b className={predictionResult.evidence?.historical?.isSampleSufficient ? 'text-emerald-400' : 'text-amber-400'}>{predictionResult.evidence?.historical?.isSampleSufficient ? 'YES' : 'NO (MIN 25)'}</b></div>
+                    </div>
+                  </div>
+
+                  {/* Technical & Rolling Penalty */}
+                  <div className="bg-slate-950/80 p-3 rounded-lg border border-slate-800 space-y-2">
+                    <div className="text-slate-400 font-bold flex items-center justify-between text-[11px]">
+                      <span>TECHNICAL & PENALTY</span>
+                      <span className="text-slate-300">{predictionResult.evidence?.technical?.trend}</span>
+                    </div>
+                    <div className="space-y-1 text-[11px] text-slate-400">
+                      <div>RSI (14): <b className="text-white">{predictionResult.evidence?.technical?.rsi}</b></div>
+                      <div>ATR Pips: <b className="text-white">{predictionResult.evidence?.technical?.atrPips} pips</b></div>
+                      <div>Rolling Loss Streak: <b className={predictionResult.evidence?.rollingPerformance?.consecutiveLosses > 0 ? 'text-amber-400' : 'text-slate-300'}>{predictionResult.evidence?.rollingPerformance?.consecutiveLosses}</b></div>
+                      <div>Penalty Multiplier: <b className="text-white">{predictionResult.evidence?.rollingPerformance?.penaltyMultiplier}x</b></div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Reasons and Veto Explanations */}
+                <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 text-[11px]">
+                  {predictionResult.vetoReasons?.length > 0 && (
+                    <div className="text-rose-400 font-bold mb-1">
+                      Veto Reasons: {predictionResult.vetoReasons.join(' | ')}
+                    </div>
+                  )}
+                  {predictionResult.reasons?.length > 0 && (
+                    <div className="text-slate-300">
+                      Evidence Synthesis: {predictionResult.reasons.join(' | ')}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Chronological Walk-Forward Backtest Card */}
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
+              <div>
+                <div className="text-slate-400 text-[11px] font-bold uppercase tracking-wider">Chronological Walk-Forward Backtest</div>
+                <div className="text-[10px] text-slate-500">Out-of-sample rolling windows with zero lookahead bias and baseline comparisons.</div>
+              </div>
+              <div className="flex items-center gap-2">
+                <select
+                  value={walkForwardPair}
+                  onChange={e => setWalkForwardPair(e.target.value)}
+                  className="bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-white"
+                >
+                  {['EUR/USD', 'GBP/USD', 'USD/JPY', 'AUD/USD', 'USD/CAD', 'USD/CHF'].map(p => (
+                    <option key={p} value={p}>{p}</option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => handleRunWalkForward(walkForwardPair)}
+                  disabled={runningWalkForward}
+                  className="px-3 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-bold transition disabled:opacity-50"
+                >
+                  {runningWalkForward ? 'Running...' : 'Run Walk-Forward Backtest'}
+                </button>
+              </div>
+            </div>
+
+            {walkForwardReport && (
+              <div className="space-y-3 pt-3 border-t border-slate-800">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+                  <div className="bg-slate-950 p-2.5 rounded border border-slate-800">
+                    <div className="text-slate-500 text-[10px]">WINDOWS EVALUATED</div>
+                    <div className="text-base font-bold text-white mt-0.5">{walkForwardReport.validationWindows}</div>
+                  </div>
+                  <div className="bg-slate-950 p-2.5 rounded border border-slate-800">
+                    <div className="text-slate-500 text-[10px]">TOTAL OBSERVATIONS</div>
+                    <div className="text-base font-bold text-white mt-0.5">{walkForwardReport.modelMetrics?.totalObservations}</div>
+                  </div>
+                  <div className="bg-slate-950 p-2.5 rounded border border-slate-800">
+                    <div className="text-slate-500 text-[10px]">NO_TRADE RATE</div>
+                    <div className="text-base font-bold text-cyan-300 mt-0.5">{walkForwardReport.modelMetrics?.noTradePct}%</div>
+                  </div>
+                  <div className="bg-slate-950 p-2.5 rounded border border-slate-800">
+                    <div className="text-slate-500 text-[10px]">BRIER SCORE</div>
+                    <div className="text-base font-bold text-white mt-0.5">{walkForwardReport.modelMetrics?.brierScore}</div>
+                  </div>
+                </div>
+
+                <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 overflow-x-auto">
+                  <div className="text-[10px] text-slate-400 font-bold uppercase mb-2">Out-of-Sample Performance vs Baselines</div>
+                  <table className="w-full text-left text-[11px]">
+                    <thead>
+                      <tr className="text-slate-500 border-b border-slate-800 pb-1">
+                        <th className="py-1">Strategy / Baseline</th>
+                        <th>Win Rate</th>
+                        <th>Profit Factor</th>
+                        <th>Expectancy (Pips)</th>
+                        <th>Trade Count</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr className="border-b border-slate-800/60 font-bold text-cyan-300">
+                        <td className="py-1.5">Redesigned Combined Model</td>
+                        <td>{(walkForwardReport.modelMetrics?.winRate * 100).toFixed(1)}%</td>
+                        <td>{walkForwardReport.modelMetrics?.profitFactor}</td>
+                        <td>{walkForwardReport.modelMetrics?.expectancyPips} pips</td>
+                        <td>{walkForwardReport.modelMetrics?.tradeCount} (Safely Filtered)</td>
+                      </tr>
+                      {walkForwardReport.baselines?.map((b: any) => (
+                        <tr key={b.baselineName} className="border-b border-slate-800/40 text-slate-400">
+                          <td className="py-1">{b.baselineName}</td>
+                          <td>{(b.winRate * 100).toFixed(1)}%</td>
+                          <td>{b.profitFactor}</td>
+                          <td className={b.expectancyPips < 0 ? 'text-rose-400' : 'text-emerald-400'}>{b.expectancyPips} pips</td>
+                          <td>{b.tradeCount}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Recent Stored Predictions Table */}
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <div className="text-slate-400 text-[11px] font-bold uppercase tracking-wider">Historical Predictions & Resolution Ledger</div>
+                <div className="text-[10px] text-slate-500">Persisted in SQLite predictions table for auditing and continuous calibration.</div>
+              </div>
+              <button
+                type="button"
+                onClick={fetchPredictionStatus}
+                className="px-2.5 py-1 rounded border border-slate-700 bg-slate-950 text-slate-300 text-[10px]"
+              >
+                Refresh
+              </button>
+            </div>
+
+            {predictionHistory.length === 0 ? (
+              <div className="py-6 text-center text-slate-500 font-mono text-xs">No stored predictions recorded yet.</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-[11px]">
+                  <thead>
+                    <tr className="text-slate-500 border-b border-slate-800 pb-1">
+                      <th className="py-1">Timestamp</th>
+                      <th>Pair</th>
+                      <th>Horizon</th>
+                      <th>Direction</th>
+                      <th>Confidence</th>
+                      <th>EV</th>
+                      <th>Recommendation</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {predictionHistory.map((p: any) => (
+                      <tr key={p.prediction_id} className="border-b border-slate-800/50">
+                        <td className="py-1.5 text-slate-500">{new Date(p.timestamp).toLocaleTimeString()}</td>
+                        <td className="text-white font-bold">{p.pair}</td>
+                        <td className="text-slate-400">{p.horizon}</td>
+                        <td className={p.direction === 'UP' ? 'text-emerald-400' : p.direction === 'DOWN' ? 'text-rose-400' : 'text-slate-400'}>
+                          {p.direction}
+                        </td>
+                        <td className="text-cyan-300">{(p.confidence * 100).toFixed(1)}%</td>
+                        <td className={p.expected_return > 0 ? 'text-emerald-400' : 'text-rose-400'}>{p.expected_return}</td>
+                        <td className={p.recommendation.includes('BUY') ? 'text-emerald-300' : p.recommendation.includes('SELL') ? 'text-rose-300' : 'text-slate-400'}>
+                          {p.recommendation}
+                        </td>
+                        <td>
+                          <span className="px-1.5 py-0.5 rounded text-[9px] bg-slate-950 border border-slate-800 text-slate-400">
+                            {p.actual_outcome || 'PENDING'}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         </div>
       )}

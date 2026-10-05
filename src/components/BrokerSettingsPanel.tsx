@@ -86,6 +86,7 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
   const [pairMessage, setPairMessage] = useState('');
   const [savingUniverse, setSavingUniverse] = useState(false);
   const [universeMessage, setUniverseMessage] = useState('');
+  const [pendingPairToggle, setPendingPairToggle] = useState<string | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -141,7 +142,16 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
     }
   };
 
-  useEffect(() => { void load(); }, []);
+  useEffect(() => {
+    void load();
+    const handleSettingsUpdated = () => { void load(); };
+    window.addEventListener('goldcrest:settings-updated', handleSettingsUpdated);
+    window.addEventListener('focus', handleSettingsUpdated);
+    return () => {
+      window.removeEventListener('goldcrest:settings-updated', handleSettingsUpdated);
+      window.removeEventListener('focus', handleSettingsUpdated);
+    };
+  }, []);
 
   const updateField = (broker: 'CTRADER' | 'FIVE_PAISA', key: string, value: string) =>
     setForms(prev => ({ ...prev, [broker]: { ...prev[broker], [key]: value } }));
@@ -498,11 +508,81 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
         <div className="flex items-start gap-3">
           <Sliders className="w-5 h-5 text-cyan-400 mt-0.5" />
           <div className="flex-1">
-            <div className="text-sm font-bold text-white">Auto Live Working Universe</div>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="text-sm font-bold text-white flex items-center gap-2">
+                <span>Auto Live Working Universe</span>
+                <span className="px-2 py-0.5 rounded text-[9px] font-bold bg-emerald-950 text-emerald-300 border border-emerald-700">
+                  REAL-TIME SQLITE PERSISTENCE ACTIVE
+                </span>
+              </div>
+              <div className="text-[10px] text-slate-400 font-mono">
+                Clicking any pair immediately saves changes to SQLite database and broadcasts to runtime engine.
+              </div>
+            </div>
 
             <div className="grid xl:grid-cols-2 gap-5 mt-4">
               <div>
-                <div className="text-[10px] uppercase text-slate-500 font-mono mb-2">Forex / cTrader</div>
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-[10px] uppercase text-slate-500 font-mono">Forex / cTrader Pairs</div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const allPairs = ['EUR/USD','GBP/USD','USD/JPY','USD/CHF','AUD/USD','USD/CAD','NZD/USD','EUR/GBP','EUR/JPY','GBP/JPY','AUD/JPY','EUR/AUD','GBP/AUD','XAU/USD'];
+                        setSavingUniverse(true);
+                        try {
+                          const res = await fetch('/api/config', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ autoLiveForexPairs: allPairs })
+                          });
+                          const data = await res.json();
+                          if (!res.ok) throw new Error(data.error || 'Failed to enable all pairs');
+                          setAutoLiveForexPairs(allPairs);
+                          setUniverseMessage('All 14 Forex pairs enabled and persisted to SQLite.');
+                          window.dispatchEvent(new CustomEvent('goldcrest:settings-updated'));
+                          onRefreshGlobal?.();
+                        } catch (err: any) {
+                          setUniverseMessage(err.message || 'Failed to enable all pairs');
+                        } finally {
+                          setSavingUniverse(false);
+                        }
+                      }}
+                      disabled={savingUniverse}
+                      className="px-2 py-0.5 rounded border border-cyan-800 bg-cyan-950 text-cyan-300 hover:bg-cyan-900 text-[10px] font-mono"
+                    >
+                      ENABLE ALL (14)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const minPair = ['EUR/USD'];
+                        setSavingUniverse(true);
+                        try {
+                          const res = await fetch('/api/config', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ autoLiveForexPairs: minPair })
+                          });
+                          const data = await res.json();
+                          if (!res.ok) throw new Error(data.error || 'Failed to update pairs');
+                          setAutoLiveForexPairs(minPair);
+                          setUniverseMessage('Forex universe reduced to EUR/USD and persisted to SQLite.');
+                          window.dispatchEvent(new CustomEvent('goldcrest:settings-updated'));
+                          onRefreshGlobal?.();
+                        } catch (err: any) {
+                          setUniverseMessage(err.message || 'Failed to update pairs');
+                        } finally {
+                          setSavingUniverse(false);
+                        }
+                      }}
+                      disabled={savingUniverse}
+                      className="px-2 py-0.5 rounded border border-slate-700 bg-slate-900 text-slate-400 hover:text-slate-200 text-[10px] font-mono"
+                    >
+                      RESET MINIMUM
+                    </button>
+                  </div>
+                </div>
                 <div className="text-[10px] text-slate-500 font-mono mb-2">Select supported pairs or add another broker-supported FX pair.</div>
                 <div className="flex gap-2 mb-3">
                   <input
@@ -513,7 +593,8 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
                   />
                   <button
                     type="button"
-                    onClick={() => {
+                    disabled={pendingPairToggle !== null}
+                    onClick={async () => {
                       const pair = newForexPair.trim().toUpperCase();
                       if (!/^[A-Z]{3}\/[A-Z]{3}$/.test(pair)) {
                         setPairMessage('Use BASE/QUOTE format, e.g. CAD/JPY.');
@@ -523,30 +604,84 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
                         setPairMessage(pair + ' is already selected.');
                         return;
                       }
-                      setAutoLiveForexPairs(prev => [...prev, pair]);
-                      setNewForexPair('');
-                      setPairMessage(pair + ' added. Save Working Universe to activate it.');
+                      setPendingPairToggle(pair);
+                      try {
+                        const res = await fetch('/api/prediction/enable-pair', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ pair })
+                        });
+                        const data = await res.json();
+                        if (!res.ok || !data.success) throw new Error(data.error || 'Failed to add pair');
+                        if (Array.isArray(data.activePairs)) {
+                          setAutoLiveForexPairs(data.activePairs);
+                        } else {
+                          setAutoLiveForexPairs(prev => [...prev, pair]);
+                        }
+                        setNewForexPair('');
+                        setPairMessage(`${pair} instantly added and saved to SQLite.`);
+                        window.dispatchEvent(new CustomEvent('goldcrest:settings-updated'));
+                        onRefreshGlobal?.();
+                      } catch (err: any) {
+                        setPairMessage(err.message || 'Failed to add pair.');
+                      } finally {
+                        setPendingPairToggle(null);
+                      }
                     }}
-                    className="shrink-0 px-3 py-2 rounded bg-cyan-700 hover:bg-cyan-600 text-white text-xs font-bold"
-                  >ADD PAIR</button>
+                    className="shrink-0 px-3 py-2 rounded bg-cyan-700 hover:bg-cyan-600 text-white text-xs font-bold disabled:opacity-50"
+                  >
+                    {pendingPairToggle === newForexPair.trim().toUpperCase() ? 'ADDING…' : 'ADD & ENABLE'}
+                  </button>
                 </div>
                 {pairMessage && <div className="text-[10px] text-cyan-300 font-mono mb-2">{pairMessage}</div>}
 
                 <div className="grid sm:grid-cols-2 gap-2">
                   {['EUR/USD','GBP/USD','USD/JPY','USD/CHF','AUD/USD','USD/CAD','NZD/USD','EUR/GBP','EUR/JPY','GBP/JPY','AUD/JPY','EUR/AUD','GBP/AUD','XAU/USD'].map(pair => {
                     const checked = autoLiveForexPairs.includes(pair);
+                    const isPending = pendingPairToggle === pair;
                     return (
-                      <label key={pair} className={`flex items-center gap-2 px-3 py-2 rounded border cursor-pointer ${
+                      <label key={pair} className={`flex items-center justify-between px-3 py-2 rounded border cursor-pointer transition ${
                         checked ? 'border-emerald-700 bg-emerald-950/30 text-emerald-300' : 'border-slate-800 bg-slate-950 text-slate-400'
-                      }`}>
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => setAutoLiveForexPairs(prev =>
-                            checked ? prev.filter(item => item !== pair) : [...prev, pair]
-                          )}
-                        />
-                        <span className="font-mono text-xs">{pair}</span>
+                      } ${isPending ? 'opacity-60 pointer-events-none' : ''}`}>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            disabled={isPending}
+                            onChange={async () => {
+                              setPendingPairToggle(pair);
+                              setUniverseMessage('');
+                              try {
+                                const endpoint = checked ? '/api/prediction/disable-pair' : '/api/prediction/enable-pair';
+                                const res = await fetch(endpoint, {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ pair })
+                                });
+                                const data = await res.json();
+                                if (!res.ok || !data.success) throw new Error(data.error || 'Failed to update pair');
+                                if (Array.isArray(data.activePairs)) {
+                                  setAutoLiveForexPairs(data.activePairs);
+                                } else {
+                                  setAutoLiveForexPairs(prev => checked ? prev.filter(p => p !== pair) : [...prev, pair]);
+                                }
+                                setUniverseMessage(`${pair} instantly ${checked ? 'DISABLED' : 'ENABLED'} and saved to SQLite.`);
+                                window.dispatchEvent(new CustomEvent('goldcrest:settings-updated'));
+                                onRefreshGlobal?.();
+                              } catch (err: any) {
+                                setUniverseMessage(err.message || 'Failed to update pair.');
+                              } finally {
+                                setPendingPairToggle(null);
+                              }
+                            }}
+                          />
+                          <span className="font-mono text-xs font-bold">{pair}</span>
+                        </div>
+                        <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded ${
+                          checked ? 'bg-emerald-900/60 text-emerald-200' : 'bg-slate-900 text-slate-500'
+                        }`}>
+                          {isPending ? 'SAVING…' : checked ? 'ACTIVE' : 'DISABLED'}
+                        </span>
                       </label>
                     );
                   })}
@@ -555,7 +690,8 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
 
               <div>
                 <div className="text-[10px] uppercase text-slate-500 font-mono mb-2">NSE / BSE Working Instruments</div>
-                <div className="grid sm:grid-cols-2 gap-2">
+                <div className="text-[10px] text-slate-500 font-mono mb-2">Indian Equity Derivatives active underlyings.</div>
+                <div className="grid sm:grid-cols-2 gap-2 mt-4">
                   {[
                     ['NIFTY', 'NIFTY 50', 'NSE'],
                     ['BANKNIFTY', 'NIFTY BANK', 'NSE'],
@@ -564,19 +700,51 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
                     ['SENSEX', 'BSE SENSEX 30', 'BSE']
                   ].map(([symbol, label, exchange]) => {
                     const checked = autoLiveIndianUnderlyings.includes(symbol);
+                    const isPending = pendingPairToggle === symbol;
                     return (
-                      <label key={symbol} className={`flex items-center gap-2 px-3 py-2 rounded border cursor-pointer ${
+                      <label key={symbol} className={`flex items-center justify-between px-3 py-2 rounded border cursor-pointer transition ${
                         checked ? 'border-emerald-700 bg-emerald-950/30 text-emerald-300' : 'border-slate-800 bg-slate-950 text-slate-400'
-                      }`}>
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => setAutoLiveIndianUnderlyings(prev =>
-                            checked ? prev.filter(item => item !== symbol) : [...prev, symbol]
-                          )}
-                        />
-                        <span className="font-mono text-xs">{symbol}</span>
-                        <span className="text-[9px] text-slate-600 ml-auto">{exchange}</span>
+                      } ${isPending ? 'opacity-60 pointer-events-none' : ''}`}>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            disabled={isPending}
+                            onChange={async () => {
+                              setPendingPairToggle(symbol);
+                              setUniverseMessage('');
+                              const updated = checked
+                                ? autoLiveIndianUnderlyings.filter(item => item !== symbol)
+                                : [...autoLiveIndianUnderlyings, symbol];
+                              try {
+                                const res = await fetch('/api/config', {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ autoLiveIndianUnderlyings: updated })
+                                });
+                                const data = await res.json();
+                                if (!res.ok) throw new Error(data.error || 'Failed to update underlying');
+                                setAutoLiveIndianUnderlyings(updated);
+                                setUniverseMessage(`${symbol} instantly ${checked ? 'DISABLED' : 'ENABLED'} and saved to SQLite.`);
+                                window.dispatchEvent(new CustomEvent('goldcrest:settings-updated'));
+                                onRefreshGlobal?.();
+                              } catch (err: any) {
+                                setUniverseMessage(err.message || 'Failed to update underlying');
+                              } finally {
+                                setPendingPairToggle(null);
+                              }
+                            }}
+                          />
+                          <span className="font-mono text-xs font-bold">{symbol}</span>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[9px] text-slate-600">{exchange}</span>
+                          <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded ${
+                            checked ? 'bg-emerald-900/60 text-emerald-200' : 'bg-slate-900 text-slate-500'
+                          }`}>
+                            {isPending ? 'SAVING…' : checked ? 'ACTIVE' : 'DISABLED'}
+                          </span>
+                        </div>
                       </label>
                     );
                   })}
@@ -584,44 +752,21 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
               </div>
             </div>
 
-            <div className="flex flex-wrap items-center gap-3 mt-4">
-              <button
-                type="button"
-                disabled={savingUniverse || autoLiveForexPairs.length === 0}
-                onClick={async () => {
-                  if (autoLiveForexPairs.length === 0) {
-                    setUniverseMessage('Select at least one Forex pair.');
-                    return;
-                  }
-                  setSavingUniverse(true);
-                  setUniverseMessage('');
-                  try {
-                    const res = await fetch('/api/config', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({
-                        autoLiveForexPairs,
-                        autoLiveIndianUnderlyings
-                      })
-                    });
-                    const data = await res.json();
-                    if (!res.ok) throw new Error(data.error || 'Failed to save working universe.');
-                    setUniverseMessage('Working universe saved to SQLite. Auto Live will use the selected Forex pairs.');
-                    onRefreshGlobal?.();
-                  } catch (err: any) {
-                    setUniverseMessage(err.message || 'Failed to save working universe.');
-                  } finally {
-                    setSavingUniverse(false);
-                  }
-                }}
-                className="px-4 py-2 rounded bg-cyan-700 hover:bg-cyan-600 disabled:opacity-50 text-white text-xs font-bold"
-              >
-                {savingUniverse ? 'SAVING…' : 'SAVE WORKING UNIVERSE'}
-              </button>
-              <span className="text-[10px] text-slate-500 font-mono">
-                {autoLiveForexPairs.length} Forex · {autoLiveIndianUnderlyings.length} NSE/BSE selected
-              </span>
-              {universeMessage && <span className="text-[10px] text-slate-400 font-mono">{universeMessage}</span>}
+            <div className="flex flex-wrap items-center justify-between gap-3 mt-4 pt-3 border-t border-slate-800">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-mono font-bold text-white">
+                  {autoLiveForexPairs.length} Forex Active
+                </span>
+                <span className="text-slate-600">·</span>
+                <span className="text-xs font-mono font-bold text-cyan-300">
+                  {autoLiveIndianUnderlyings.length} NSE/BSE Active
+                </span>
+              </div>
+              {universeMessage && (
+                <span className="text-[11px] text-emerald-400 font-mono bg-emerald-950/40 border border-emerald-800/60 px-3 py-1 rounded">
+                  {universeMessage}
+                </span>
+              )}
             </div>
           </div>
         </div>

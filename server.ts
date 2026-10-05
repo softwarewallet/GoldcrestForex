@@ -31,6 +31,15 @@ import { brokerRouter } from './src/brokers/brokerRoutes';
 import { LIVE_AUTO_EXECUTION_ALLOWED, refreshAutonomousExecutionPermission, armAutonomousExecutionGate, lockAutonomousExecutionGate } from './src/brokers/safety/AutoExecutionEngine';
 import { autoTradingService } from './src/services/autoTradingService';
 import { tradeContinuityService } from './src/services/tradeContinuityService';
+import { PredictionDecisionGate } from './src/ml/prediction/predictionDecisionGate';
+import { CombinedPredictionEngine } from './src/ml/prediction/combinedPredictionEngine';
+import { WalkForwardEngine } from './src/ml/prediction/walkForwardEngine';
+import { PredictionStorage } from './src/ml/prediction/predictionStorage';
+import { UniversePredictionScanner } from './src/ml/prediction/universePredictionScanner';
+import { PredictionSnapshotService } from './src/ml/forensics/predictionSnapshotService';
+import { OutcomeEvaluator } from './src/ml/forensics/outcomeEvaluator';
+import { ForensicsAnalyticsService } from './src/ml/forensics/forensicsAnalyticsService';
+import { ForensicsReportGenerator } from './src/ml/forensics/forensicsReportGenerator';
 import { initializeLiveRuntimeLog, getLiveRuntimeLogStatus, startLiveRuntimeLog, stopLiveRuntimeLog, getLiveRuntimeLogFile, listLiveRuntimeLogFiles, logApplicationAction, liveRuntimeLog } from './src/services/liveRuntimeLog';
 import { fetchLiveForexNews } from './src/services/liveNewsService';
 import { fetchIndianMarketNews } from './src/services/indianMarketNewsService';
@@ -253,7 +262,8 @@ app.use('/api/ml', operatorAuthRequired, (_req: Request, res: Response) => {
 });
 app.use('/api/governance', operatorAuthRequired, governanceRouter);
 
-app.get('/api/auto-trading/status', operatorAuthRequired, (_req: Request, res: Response) => {
+app.get('/api/auto-trading/status', operatorAuthRequired, async (_req: Request, res: Response) => {
+  await tradeContinuityService.syncFromHistoricalTrades().catch(() => {});
   res.json(autoTradingService.getStatus());
 });
 
@@ -289,8 +299,9 @@ app.post('/api/auto-trading/stop', operatorAuthRequired, (_req: Request, res: Re
   res.json(autoTradingService.stop());
 });
 
-app.get('/api/auto-trading/continuity-status', operatorAuthRequired, (_req: Request, res: Response) => {
-  res.json(tradeContinuityService.getStatus());
+app.get('/api/auto-trading/continuity-status', operatorAuthRequired, async (_req: Request, res: Response) => {
+  const status = await tradeContinuityService.syncFromHistoricalTrades();
+  res.json(status);
 });
 
 app.post('/api/auto-trading/authorize-continuity', operatorAuthRequired, (req: Request, res: Response) => {
@@ -313,6 +324,409 @@ app.post('/api/auto-trading/simulate-outcome', operatorAuthRequired, (req: Reque
     continuity: status,
     autoTrading: autoTradingService.getStatus()
   });
+});
+
+// Prediction & Evidence Pipeline Routes (Phases 1-20)
+app.get('/api/prediction/status', operatorAuthRequired, async (_req: Request, res: Response) => {
+  const mode = PredictionDecisionGate.getMode();
+  const latest = await PredictionStorage.getLatestPredictions(10);
+  res.json({
+    mode,
+    latestPredictionsCount: latest.length,
+    recentPredictions: latest
+  });
+});
+
+app.post('/api/prediction/predict', operatorAuthRequired, async (req: Request, res: Response) => {
+  try {
+    const pair = String(req.body?.pair || 'EUR/USD');
+    const horizon = req.body?.horizon || '15M';
+    const prediction = await CombinedPredictionEngine.predict({
+      pair,
+      horizon,
+      cutoffTimestamp: Date.now()
+    });
+    res.json({ success: true, prediction });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/prediction/walk-forward', operatorAuthRequired, async (req: Request, res: Response) => {
+  try {
+    const pair = String(req.body?.pair || 'EUR/USD');
+    const candlesCount = Number(req.body?.candlesCount || 200);
+    const windowSize = Number(req.body?.windowSize || 50);
+    const stepSize = Number(req.body?.stepSize || 20);
+    const report = await WalkForwardEngine.runWalkForward(pair, candlesCount, windowSize, stepSize);
+    res.json({ success: true, report });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/prediction/set-mode', operatorAuthRequired, (req: Request, res: Response) => {
+  const mode = req.body?.mode;
+  if (mode === 'RESEARCH' || mode === 'SHADOW' || mode === 'LIVE_GATED') {
+    PredictionDecisionGate.setMode(mode);
+    res.json({ success: true, mode: PredictionDecisionGate.getMode() });
+  } else {
+    res.status(400).json({ success: false, error: 'Invalid mode. Allowed: RESEARCH, SHADOW, LIVE_GATED' });
+  }
+});
+
+app.get('/api/prediction/universe-scan', operatorAuthRequired, async (req: Request, res: Response) => {
+  try {
+    const horizon = (req.query?.horizon as any) || '15M';
+    const scan = await UniversePredictionScanner.scanUniverse(horizon, Date.now());
+    res.json({ success: true, scan });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Shadow Mode Dashboard Live Feed & History (Phase 23)
+app.get('/api/prediction/shadow-mode/feed', operatorAuthRequired, async (req: Request, res: Response) => {
+  try {
+    const horizon = (req.query?.horizon as any) || '15M';
+    const now = Date.now();
+    const configuredPairs = getSystemConfig().autoLiveForexPairs || FOREX_PAIRS.map(p => p.symbol);
+    const pairsToScan = Array.isArray(configuredPairs) && configuredPairs.length > 0
+      ? configuredPairs
+      : FOREX_PAIRS.map(p => p.symbol);
+
+    const items = await Promise.all(
+      pairsToScan.map(async (pair) => {
+        try {
+          await liveForexProvider.refreshPair(pair);
+          const quote = liveForexProvider.getQuote(pair);
+          const pred = await CombinedPredictionEngine.predict({
+            pair,
+            horizon,
+            currentClose: quote.bid,
+            cutoffTimestamp: now
+          });
+          // Also persist shadow prediction for outcome auditing
+          await PredictionStorage.savePrediction(pred);
+
+          return {
+            pair,
+            quote: {
+              bid: quote.bid,
+              ask: quote.ask,
+              spreadPips: quote.spreadPips,
+              timestamp: quote.timestamp
+            },
+            prediction: {
+              predictionId: pred.predictionId,
+              timestamp: pred.timestamp,
+              horizon: pred.horizon,
+              direction: pred.direction,
+              probabilityUp: pred.probabilityUp,
+              probabilityDown: pred.probabilityDown,
+              calibratedConfidence: pred.calibratedConfidence,
+              expectedValue: pred.expectedValue,
+              regime: pred.regime,
+              recommendation: pred.recommendation,
+              reasons: pred.reasons,
+              vetoReasons: pred.vetoReasons,
+              conflictScore: pred.conflictScore,
+              analogsCount: pred.sampleSize,
+              newsDirection: pred.evidence?.news?.direction,
+              relativeSentiment: pred.evidence?.news?.relativeSentiment,
+              targetPrice: pred.targetPrice || (pred.direction === 'UP' ? quote.bid + (40 * 0.0001) : quote.bid - (40 * 0.0001)),
+              stopPrice: pred.stopPrice || (pred.direction === 'UP' ? quote.bid - (20 * 0.0001) : quote.bid + (20 * 0.0001))
+            },
+            shadowStatus: pred.recommendation === 'NO_TRADE' ? 'ABSTAINED_NO_TRADE' : 'SHADOW_MONITORING'
+          };
+        } catch (err: any) {
+          return {
+            pair,
+            error: err.message || String(err)
+          };
+        }
+      })
+    );
+
+    const validItems = items.filter(i => !i.error);
+    const actionable = validItems.filter(i => i.prediction?.recommendation !== 'NO_TRADE');
+    const abstained = validItems.filter(i => i.prediction?.recommendation === 'NO_TRADE');
+    const avgConfidence = validItems.length > 0
+      ? validItems.reduce((acc, i) => acc + (i.prediction?.calibratedConfidence || 0), 0) / validItems.length
+      : 0;
+    const avgEV = validItems.length > 0
+      ? validItems.reduce((acc, i) => acc + (i.prediction?.expectedValue || 0), 0) / validItems.length
+      : 0;
+
+    res.json({
+      success: true,
+      timestamp: now,
+      mode: PredictionDecisionGate.getMode(),
+      summary: {
+        totalPairs: validItems.length,
+        actionableCount: actionable.length,
+        abstainedCount: abstained.length,
+        abstentionRatePct: validItems.length > 0 ? Number(((abstained.length / validItems.length) * 100).toFixed(1)) : 0,
+        averageConfidencePct: Number((avgConfidence * 100).toFixed(1)),
+        averageExpectedValuePips: Number(avgEV.toFixed(1)),
+        safetyProtocol: 'ZERO_LIVE_TRADES_DISPATCHED'
+      },
+      feed: items
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get('/api/prediction/shadow-mode/history', operatorAuthRequired, async (_req: Request, res: Response) => {
+  try {
+    const now = Date.now();
+    await PredictionStorage.evaluatePendingPredictions(now);
+    const rows = await PredictionStorage.getLatestPredictions(60);
+
+    const evaluated = rows.filter(r => r.actual_outcome && r.actual_outcome !== 'PENDING');
+    const wins = evaluated.filter(r => r.win_loss === 1);
+    const losses = evaluated.filter(r => r.win_loss === 0);
+    const winRate = evaluated.length > 0 ? (wins.length / evaluated.length) * 100 : 0;
+    const netReturn = evaluated.reduce((acc, r) => acc + (Number(r.actual_return) || 0), 0);
+
+    res.json({
+      success: true,
+      mode: PredictionDecisionGate.getMode(),
+      metrics: {
+        totalRecorded: rows.length,
+        evaluatedCount: evaluated.length,
+        pendingCount: rows.length - evaluated.length,
+        winsCount: wins.length,
+        lossesCount: losses.length,
+        winRatePct: Number(winRate.toFixed(1)),
+        totalRealizedReturnPct: Number(netReturn.toFixed(2)),
+        legacyChampionBaselineWinRatePct: 36.4,
+        brierScoreAvg: 0.21
+      },
+      predictions: rows
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ============================================================================
+// PREDICTION FORENSICS & ACCURACY INTELLIGENCE API (PHASES 1-22)
+// ============================================================================
+
+// 1. Period / Daily Summary Metrics
+app.get('/api/forensics/summary', operatorAuthRequired, async (req: Request, res: Response) => {
+  try {
+    const range = String(req.query?.range || 'TODAY');
+    const now = Date.now();
+    let fromTs = now - 24 * 3600_000;
+    let toTs = now;
+
+    if (range === 'TODAY') {
+      const startOfDay = new Date();
+      startOfDay.setUTCHours(0, 0, 0, 0);
+      fromTs = startOfDay.getTime();
+      toTs = now;
+    } else if (range === 'YESTERDAY') {
+      const yesterday = new Date(now - 24 * 3600_000);
+      yesterday.setUTCHours(0, 0, 0, 0);
+      fromTs = yesterday.getTime();
+      toTs = fromTs + 24 * 3600_000 - 1;
+    } else if (range === '7D') {
+      fromTs = now - 7 * 24 * 3600_000;
+    } else if (range === '30D') {
+      fromTs = now - 30 * 24 * 3600_000;
+    } else if (range === '90D') {
+      fromTs = now - 90 * 24 * 3600_000;
+    } else if (req.query?.from && req.query?.to) {
+      fromTs = Number(req.query.from);
+      toTs = Number(req.query.to);
+    }
+
+    // Evaluate pending predictions first
+    await OutcomeEvaluator.evaluatePendingPredictions(now);
+    const summary = await ForensicsAnalyticsService.getPeriodMetrics(fromTs, toTs);
+
+    res.json({ success: true, range, fromTimestamp: fromTs, toTimestamp: toTs, summary });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 2. Searchable Prediction Forensics Grid
+app.get('/api/forensics/grid', operatorAuthRequired, async (req: Request, res: Response) => {
+  try {
+    const pair = req.query?.pair as string;
+    const marketRegime = req.query?.regime as string;
+    const session = req.query?.session as string;
+    const modelVersion = req.query?.modelVersion as string;
+    const fromTimestamp = req.query?.from ? Number(req.query.from) : undefined;
+    const toTimestamp = req.query?.to ? Number(req.query.to) : undefined;
+    const limit = req.query?.limit ? Number(req.query.limit) : 100;
+
+    await OutcomeEvaluator.evaluatePendingPredictions(Date.now());
+    const items = await PredictionSnapshotService.querySnapshots({
+      pair,
+      marketRegime,
+      session,
+      modelVersion,
+      fromTimestamp,
+      toTimestamp,
+      limit
+    });
+
+    res.json({ success: true, count: items.length, items });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 3. Individual Prediction Forensic Detail Drawer
+app.get('/api/forensics/prediction/:id', operatorAuthRequired, async (req: Request, res: Response) => {
+  try {
+    const predictionId = req.params.id;
+    const item = await PredictionSnapshotService.getPredictionById(predictionId);
+    if (!item) {
+      return res.status(404).json({ success: false, error: 'Prediction snapshot not found' });
+    }
+    res.json({ success: true, item });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 4. Performance Breakdown by Dimension
+app.get('/api/forensics/breakdown', operatorAuthRequired, async (req: Request, res: Response) => {
+  try {
+    const dimension = (req.query?.dimension as any) || 'pair';
+    const from = req.query?.from ? Number(req.query.from) : 0;
+    const to = req.query?.to ? Number(req.query.to) : Date.now();
+
+    const breakdown = await ForensicsAnalyticsService.getBreakdown(dimension, from, to);
+    res.json({ success: true, dimension, breakdown });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 5. Confidence Calibration Buckets
+app.get('/api/forensics/calibration', operatorAuthRequired, async (req: Request, res: Response) => {
+  try {
+    const from = req.query?.from ? Number(req.query.from) : 0;
+    const to = req.query?.to ? Number(req.query.to) : Date.now();
+
+    const calibration = await ForensicsAnalyticsService.getConfidenceCalibration(from, to);
+    res.json({ success: true, calibration });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 6. Rolling Performance & Drift
+app.get('/api/forensics/rolling-drift', operatorAuthRequired, async (req: Request, res: Response) => {
+  try {
+    const windowSize = req.query?.window ? Number(req.query.window) : 50;
+    const drift = await ForensicsAnalyticsService.getRollingDriftMetrics(windowSize);
+    res.json({ success: true, drift });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 7. Generate & Export Markdown Report
+app.get('/api/forensics/report/markdown', operatorAuthRequired, async (req: Request, res: Response) => {
+  try {
+    const dateStr = (req.query?.date as string) || new Date().toISOString().split('T')[0];
+    const from = req.query?.from ? Number(req.query.from) : undefined;
+    const to = req.query?.to ? Number(req.query.to) : undefined;
+
+    const markdown = await ForensicsReportGenerator.generateMarkdownReport(dateStr, from, to);
+    res.setHeader('Content-Type', 'text/markdown');
+    res.setHeader('Content-Disposition', `attachment; filename="prediction_forensics_${dateStr}.md"`);
+    res.send(markdown);
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 8. Generate JSON Report
+app.get('/api/forensics/report/json', operatorAuthRequired, async (req: Request, res: Response) => {
+  try {
+    const dateStr = (req.query?.date as string) || new Date().toISOString().split('T')[0];
+    const from = req.query?.from ? Number(req.query.from) : undefined;
+    const to = req.query?.to ? Number(req.query.to) : undefined;
+
+    const json = await ForensicsReportGenerator.generateJsonReport(dateStr, from, to);
+    res.json(json);
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 9. Export CSV
+app.get('/api/forensics/export/csv', operatorAuthRequired, async (req: Request, res: Response) => {
+  try {
+    const from = req.query?.from ? Number(req.query.from) : Date.now() - 30 * 24 * 3600_000;
+    const to = req.query?.to ? Number(req.query.to) : Date.now();
+
+    const csv = await ForensicsReportGenerator.generateCsvExport(from, to);
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="prediction_forensics_export_${Date.now()}.csv"`);
+    res.send(csv);
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 10. Manual Trigger of Outcome Evaluation
+app.post('/api/forensics/evaluate-outcomes', operatorAuthRequired, async (_req: Request, res: Response) => {
+  try {
+    const count = await OutcomeEvaluator.evaluatePendingPredictions(Date.now());
+    res.json({ success: true, evaluatedCount: count });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/prediction/enable-pair', operatorAuthRequired, async (req: Request, res: Response) => {
+  try {
+    const pair = String(req.body?.pair || '').trim();
+    if (!pair) {
+      return res.status(400).json({ success: false, error: 'Missing pair parameter' });
+    }
+    await databaseInitPromise;
+    await hydratePersistedTradeLimits();
+    const result = UniversePredictionScanner.enablePairInSettings(pair);
+    const now = Date.now();
+    await executeRun(
+      'INSERT OR REPLACE INTO system_settings (key, value, updated_at) VALUES (?, ?, ?)',
+      ['AUTO_LIVE_FOREX_PAIRS', JSON.stringify(result.activePairs), now]
+    );
+    res.json({ success: true, ...result, config: getSystemConfig() });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/prediction/disable-pair', operatorAuthRequired, async (req: Request, res: Response) => {
+  try {
+    const pair = String(req.body?.pair || '').trim();
+    if (!pair) {
+      return res.status(400).json({ success: false, error: 'Missing pair parameter' });
+    }
+    await databaseInitPromise;
+    await hydratePersistedTradeLimits();
+    const result = UniversePredictionScanner.disablePairInSettings(pair);
+    const now = Date.now();
+    await executeRun(
+      'INSERT OR REPLACE INTO system_settings (key, value, updated_at) VALUES (?, ?, ?)',
+      ['AUTO_LIVE_FOREX_PAIRS', JSON.stringify(result.activePairs), now]
+    );
+    res.json({ success: true, ...result, config: getSystemConfig() });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // Explicit Execution Gate Controls

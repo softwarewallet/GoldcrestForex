@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import {
   Bell, BookOpen, CandlestickChart,
-  ListChecks, Settings, Sparkles, Activity, History as HistoryIcon, Database, BarChart2
+  ListChecks, Settings, Sparkles, Activity, History as HistoryIcon, Database, BarChart2, Eye
 } from 'lucide-react';
 import { ForexSessionState, IndianSessionState } from '../markets/common/types';
 
@@ -19,6 +19,8 @@ interface GlobalAppShellProps {
 const nav = [
   { id: 'market_watch', label: 'Market Watch', icon: Activity },
   { id: 'trading', label: 'Cockpit', icon: CandlestickChart },
+  { id: 'shadow_mode', label: 'Shadow Mode', icon: Eye },
+  { id: 'forensics', label: 'Forensics', icon: Sparkles },
   { id: 'control_center', label: 'Control Center', icon: ListChecks },
   { id: 'history', label: 'History', icon: HistoryIcon },
   { id: 'database', label: 'Database', icon: Database },

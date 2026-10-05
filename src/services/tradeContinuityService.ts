@@ -239,26 +239,49 @@ class TradeContinuityService {
 
   public async syncFromHistoricalTrades(): Promise<TradeContinuityStatus> {
     try {
-      // Query recent closed trades from SQLite trades table if available
+      // Query all closed trades from SQLite trades table in chronological order (exit_time ASC)
       const rows = await executeQuery<any>(
-        'SELECT id, instrument, pnl, exit_time FROM trades WHERE exit_time IS NOT NULL AND pnl IS NOT NULL ORDER BY exit_time DESC LIMIT 50'
+        'SELECT id, instrument, pnl, exit_time FROM trades WHERE exit_time IS NOT NULL AND pnl IS NOT NULL ORDER BY exit_time ASC'
       );
       if (Array.isArray(rows) && rows.length > 0) {
-        // If we haven't tracked recent outcomes yet, reconstruct from database
-        if (this.recentTradeOutcomes.length === 0) {
-          const chronological = [...rows].reverse();
-          for (const row of chronological) {
-            this.recordTradeOutcome({
-              id: String(row.id),
-              symbol: String(row.instrument || 'FOREX'),
-              pnl: Number(row.pnl),
-              timestamp: Number(row.exit_time)
-            });
+        this.consecutiveLossCount = 0;
+        this.consecutiveProfitCount = 0;
+        this.recentTradeOutcomes = [];
+
+        for (const row of rows) {
+          const pnl = Number(row.pnl || 0);
+          const outcome: 'PROFIT' | 'LOSS' | 'BREAKEVEN' = pnl > 0.0001 ? 'PROFIT' : pnl < -0.0001 ? 'LOSS' : 'BREAKEVEN';
+
+          this.recentTradeOutcomes.push({
+            id: String(row.id),
+            symbol: String(row.instrument || 'FOREX'),
+            pnl,
+            outcome,
+            timestamp: Number(row.exit_time)
+          });
+
+          if (outcome === 'LOSS') {
+            this.consecutiveLossCount += 1;
+            this.consecutiveProfitCount = 0;
+            this.isProfitContinuityActive = false;
+          } else if (outcome === 'PROFIT') {
+            this.consecutiveProfitCount += 1;
+            this.consecutiveLossCount = 0;
+            if (this.consecutiveProfitCount >= PROFIT_STREAK_AUTO_CONTINUE_THRESHOLD) {
+              this.isProfitContinuityActive = true;
+              this.isContinuityPaused = false;
+              this.requiresContinuityAuthorization = false;
+            }
           }
         }
+
+        if (this.consecutiveLossCount >= LOSS_STREAK_PAUSE_THRESHOLD) {
+          this.isContinuityPaused = true;
+          this.requiresContinuityAuthorization = true;
+        }
       }
-    } catch {
-      // Best-effort database sync
+    } catch (err: any) {
+      liveRuntimeLog('WARN', 'TRADE_CONTINUITY_SYNC_ERROR', { error: err?.message || String(err) });
     }
     return this.getStatus();
   }

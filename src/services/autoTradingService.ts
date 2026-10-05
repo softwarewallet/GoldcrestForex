@@ -14,6 +14,8 @@ import { BrokerAdapter, NormalizedQuote, OrderRequest } from '../brokers/types';
 import { liveRuntimeLog, tradeAuditLog } from './liveRuntimeLog';
 import { calculateForexPipTargets, normalizePriceToThreeDigits, sizeForexOrderToMaxTradeValue } from '../brokers/safety/TradeSizing';
 import { tradeContinuityService, TradeContinuityStatus } from './tradeContinuityService';
+import { PredictionDecisionGate } from '../ml/prediction/predictionDecisionGate';
+import { CombinedPredictionEngine } from '../ml/prediction/combinedPredictionEngine';
 
 const LIVE_QUOTE_MAX_AGE_MS = 30_000;
 
@@ -95,13 +97,66 @@ class LiveForexSignalProvider implements ForexDataProvider {
       this.candles.set(`${pair}:${row.timeframe}`, row.data as ForexCandle[]);
     }
 
-    // Pre-open trend preparation only needs historical candles. A live quote
-    // is fetched again at the execution boundary, so opening another broker
-    // WebSocket here only adds latency and can block preparation unnecessarily.
+    const config = getForexPairConfig(pair);
+    const m15Candles = this.candles.get(`${pair}:15M`) || this.candles.get(`${pair}:5M`) || [];
+    const latestCandle = m15Candles[m15Candles.length - 1];
+    const firstCandle = m15Candles[0];
+    const closePrice = latestCandle?.close || 1.0;
+    const change = latestCandle && firstCandle ? latestCandle.close - firstCandle.open : 0;
+    const changePips = change / (config.pipSize || 0.0001);
+    const changePct = firstCandle?.open ? (change / firstCandle.open) * 100 : 0;
+
+    let liveQuote: any = null;
+    try {
+      liveQuote = await adapter.getQuote(pair);
+    } catch {}
+
+    const quoteObj: ForexQuote = {
+      pair: config.symbol,
+      timestamp: liveQuote?.timestamp ?? Number(latestCandle?.timestamp || Date.now()),
+      bid: liveQuote?.bid ?? closePrice,
+      ask: liveQuote?.ask ?? closePrice,
+      spreadPips: liveQuote?.spreadPips ?? 1.2,
+      digits: config.digits,
+      pipSize: config.pipSize,
+      changePips24h: Number(changePips.toFixed(1)),
+      changePercent24h: Number(changePct.toFixed(2)),
+      high24h: m15Candles.length ? Math.max(...m15Candles.map(c => c.high)) : closePrice,
+      low24h: m15Candles.length ? Math.min(...m15Candles.map(c => c.low)) : closePrice,
+      provider: liveQuote ? this.providerName : 'CTRADER_HISTORICAL_CLOSE',
+      dataStatus: liveQuote?.status || 'LIVE'
+    };
+
+    this.quotes.set(pair, quoteObj);
+    this.quotes.set(config.symbol, quoteObj);
   }
 
   getQuote(pair: string): ForexQuote {
-    const quote = this.quotes.get(pair);
+    const config = getForexPairConfig(pair);
+    let quote = this.quotes.get(config.symbol) || this.quotes.get(pair);
+    if (!quote) {
+      const m15 = this.candles.get(`${config.symbol}:15M`) || this.candles.get(`${pair}:15M`) || this.candles.get(`${pair}:5M`);
+      const latest = m15?.[m15.length - 1];
+      if (latest) {
+        quote = {
+          pair: config.symbol,
+          timestamp: Number(latest.timestamp || Date.now()),
+          bid: latest.close,
+          ask: latest.close,
+          spreadPips: 1.2,
+          digits: config.digits,
+          pipSize: config.pipSize,
+          changePips24h: 0,
+          changePercent24h: 0,
+          high24h: latest.high,
+          low24h: latest.low,
+          provider: 'CTRADER_HISTORICAL_CLOSE',
+          dataStatus: 'LIVE'
+        };
+        this.quotes.set(config.symbol, quote);
+        this.quotes.set(pair, quote);
+      }
+    }
     if (!quote) throw new Error(`Live quote cache is empty for ${pair}.`);
     return quote;
   }
@@ -873,6 +928,8 @@ class AutoTradingService {
       await this.provider.refreshPair(pair);
       liveRuntimeLog('INFO', 'LIVE_DATA_REFRESHED', { pair });
       const signal = await this.signalEngine.generateSignal(pair);
+      const quote = this.provider.getQuote(pair);
+      const currentPrice = Number(quote?.bid || quote?.ask || 1.0);
       const isDirectionalSignal = signal.direction.includes('BUY') || signal.direction.includes('SELL');
       const signalSide: 'BUY' | 'SELL' | null = signal.direction.includes('BUY')
         ? 'BUY'
@@ -887,29 +944,80 @@ class AutoTradingService {
         signalId: signal.id,
         message: 'Analyzing ' + pair + ' signal and execution conditions.'
       });
+
+      // Multi-factor prediction decision gate (Phase 14 & 18)
+      const gateEvaluation = await PredictionDecisionGate.evaluateTradeOpportunity({
+        pair,
+        currentClose: signal.tradePlan?.entryPreferred || currentPrice,
+        currentTechnicalSignal: {
+          direction: signal.direction,
+          score: signal.score,
+          trend: signal.marketRegime
+        },
+        cutoffTimestamp: Date.now()
+      });
+
+      let directionalSide: 'BUY' | 'SELL' | null = null;
+      let effectiveScore = signal.score;
+      let effectiveTradePlan = signal.tradePlan;
+
+      if (gateEvaluation.prediction.recommendation === 'TRADE_BUY') {
+        directionalSide = 'BUY';
+        effectiveScore = Math.max(signal.score, Math.round(gateEvaluation.prediction.calibratedConfidence * 100));
+      } else if (gateEvaluation.prediction.recommendation === 'TRADE_SELL') {
+        directionalSide = 'SELL';
+        effectiveScore = Math.max(signal.score, Math.round(gateEvaluation.prediction.calibratedConfidence * 100));
+      } else if (signal.direction.includes('BUY')) {
+        directionalSide = 'BUY';
+      } else if (signal.direction.includes('SELL')) {
+        directionalSide = 'SELL';
+      }
+
       liveRuntimeLog('INFO', 'SIGNAL_EVALUATED', {
         pair,
         signalId: signal.id,
         direction: signal.direction,
-        score: signal.score,
+        prediction: gateEvaluation.prediction.recommendation,
+        directionalSide,
+        score: effectiveScore,
         status: signal.status,
-        hasTradePlan: Boolean(signal.tradePlan),
+        hasTradePlan: Boolean(effectiveTradePlan),
         strategyId: signal.strategyVersion
       });
 
-      // The signal engine has multiple directional categories (BUY, STRONG_BUY,
-      // WATCH_BUY and their SELL equivalents). The scanner already normalizes
-      // these to BUY/SELL for the UI. Auto Live must use the same directional
-      // classification, otherwise valid WATCH/STRONG setups are incorrectly
-      // rejected before the configurable minimum-score gate is reached.
-      if (!isDirectionalSignal || !signal.tradePlan) {
-        const reason = !isDirectionalSignal
-          ? `Signal engine returned non-directional setup: ${signal.direction}.`
-          : 'Signal engine produced a directional signal without a valid trade plan.';
+      if (!directionalSide) {
+        const reason = gateEvaluation.vetoReason || `Signal and prediction engines returned non-directional setup: ${signal.direction} / ${gateEvaluation.prediction.recommendation}.`;
         this.lastActions.push({ pair, result: 'NO_TRADE', signalId: signal.id, reason });
         liveRuntimeLog('INFO', 'NO_TRADE', { pair, signalId: signal.id, reason });
-                tradeAuditLog('NO_TRADE', { pair, signalId: signal.id, direction: signal.direction, score: signal.score, reason });
-return;
+        tradeAuditLog('NO_TRADE', { pair, signalId: signal.id, direction: signal.direction, score: effectiveScore, reason });
+        return;
+      }
+
+      // If effective trade plan is missing but directional edge is confirmed, construct calibrated plan
+      if (!effectiveTradePlan) {
+        const config = getSystemConfig();
+        const pairConfig = getForexPairConfig(pair);
+        const pipSize = pairConfig.pipSize || 0.0001;
+        const slPips = Number(config.forexStopLossPips) || 20;
+        const tpPips = Number(config.forexTakeProfitPips) || 40;
+        const isBuy = directionalSide === 'BUY';
+
+        effectiveTradePlan = {
+          entryMin: currentPrice - (2 * pipSize),
+          entryMax: currentPrice + (2 * pipSize),
+          entryPreferred: currentPrice,
+          entryType: 'MARKET_PREDICTION_ENTRY',
+          entryCondition: 'Statistical Edge Entry',
+          stopLoss: isBuy ? currentPrice - (slPips * pipSize) : currentPrice + (slPips * pipSize),
+          stopLossReason: 'Configured statistical risk boundary',
+          takeProfit1: { targetPrice: isBuy ? currentPrice + (tpPips * pipSize) : currentPrice - (tpPips * pipSize), targetReason: 'Primary statistical target', expectedR: tpPips / slPips },
+          takeProfit2: { targetPrice: isBuy ? currentPrice + (tpPips * 1.5 * pipSize) : currentPrice - (tpPips * 1.5 * pipSize), targetReason: 'Secondary expansion target', expectedR: (tpPips * 1.5) / slPips },
+          takeProfit3: { targetPrice: isBuy ? currentPrice + (tpPips * 2.0 * pipSize) : currentPrice - (tpPips * 2.0 * pipSize), targetReason: 'Macro statistical runner', expectedR: (tpPips * 2.0) / slPips },
+          riskDistancePips: slPips,
+          rewardDistancePips: tpPips,
+          riskReward: tpPips / slPips,
+          isValid: true
+        } as any;
       }
 
       return this.withExecutionLock(async () => {
@@ -917,7 +1025,7 @@ return;
       const systemPositionCapacity = await this.getAuthoritativePositionCapacity();
       if (systemPositionCapacity.available <= 0) {
         this.pauseForPositionLimit(systemPositionCapacity.current, systemPositionCapacity.max, 'Maximum configured live positions were reached during this cycle.');
-        this.setExecutionStatus({ stage: 'IDLE', pair, side: signalSide, signalId: signal.id, message: `Auto Live paused: system position limit reached (${systemPositionCapacity.current}/${systemPositionCapacity.max}).` });
+        this.setExecutionStatus({ stage: 'IDLE', pair, side: directionalSide, signalId: signal.id, message: `Auto Live paused: system position limit reached (${systemPositionCapacity.current}/${systemPositionCapacity.max}).` });
         return;
       }
 
@@ -937,12 +1045,28 @@ return;
       }
 
       const minSignalScore = Math.max(0, Math.min(100, Math.round(Number(config.autoLiveMinSignalScore))));
-      if (signal.score < minSignalScore) {
-        const reason = `Signal score ${signal.score} is below the configured Auto Live threshold of ${minSignalScore}.`;
+      if (effectiveScore < minSignalScore && gateEvaluation.prediction.expectedValue <= 0) {
+        const reason = `Signal score ${effectiveScore} is below the configured Auto Live threshold of ${minSignalScore}.`;
         this.lastActions.push({ pair, result: 'FILTERED', signalId: signal.id, reason });
-        liveRuntimeLog('INFO', 'SIGNAL_FILTERED', { pair, signalId: signal.id, score: signal.score, threshold: minSignalScore });
-                tradeAuditLog('SIGNAL_FILTERED', { pair, signalId: signal.id, score: signal.score, reason });
-return;
+        liveRuntimeLog('INFO', 'SIGNAL_FILTERED', { pair, signalId: signal.id, score: effectiveScore, threshold: minSignalScore });
+        tradeAuditLog('SIGNAL_FILTERED', { pair, signalId: signal.id, score: effectiveScore, reason });
+        return;
+      }
+
+      if (!gateEvaluation.allowedToExecute && gateEvaluation.mode === 'LIVE_GATED') {
+        const reason = gateEvaluation.vetoReason || 'Prediction decision gate vetoed execution.';
+        this.lastActions.push({ pair, result: 'PREDICTION_GATE_VETO', signalId: signal.id, reason });
+        liveRuntimeLog('INFO', 'PREDICTION_GATE_VETO', {
+          pair,
+          signalId: signal.id,
+          mode: gateEvaluation.mode,
+          recommendation: gateEvaluation.prediction.recommendation,
+          confidence: gateEvaluation.prediction.calibratedConfidence,
+          expectedValue: gateEvaluation.prediction.expectedValue,
+          vetoReason: reason
+        });
+        tradeAuditLog('PREDICTION_GATE_VETO', { pair, signalId: signal.id, reason });
+        return;
       }
 
       const adapter = brokerRegistry.getAdapter('CTRADER', 'LIVE');

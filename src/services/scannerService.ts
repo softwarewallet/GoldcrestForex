@@ -4,6 +4,7 @@ import { calculateStrategyPayoff, OptionStrategyType } from '../markets/india_op
 import { LiveForexProvider } from '../markets/forex/provider';
 import { getForexPairConfig } from '../markets/forex/instruments';
 import { ForexSignalEngine } from '../markets/forex/signalEngine';
+import { CombinedPredictionEngine } from '../ml/prediction/combinedPredictionEngine';
 import { getSystemConfig } from './configService';
 import { liveRuntimeLog } from './liveRuntimeLog';
 
@@ -63,12 +64,57 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-function mapForexSignal(signal: any): TradingSignal {
-  const direction = String(signal.direction || 'NO_TRADE');
-  const normalizedDirection: TradingSignal['direction'] =
-    direction.includes('BUY') ? 'BUY' :
-    direction.includes('SELL') ? 'SELL' :
-    direction === 'NO_TRADE' ? 'NO_TRADE' : 'WAIT';
+function mapForexSignal(signal: any, prediction?: any, quote?: any): TradingSignal {
+  let normalizedDirection: TradingSignal['direction'] = 'WAIT';
+  let category = signal.signalCategory;
+  let score = signal.score;
+  let mlProbability = signal.mlProbability ?? 0;
+  const reasons = [...(signal.reasons || [])];
+  const noTradeReasons = [...(signal.noTradeReasons || [])];
+
+  if (prediction?.recommendation === 'TRADE_BUY') {
+    normalizedDirection = 'BUY';
+    category = 'STRONG_BUY';
+    score = Math.max(score, Math.round((prediction.calibratedConfidence || 0.65) * 100));
+    mlProbability = prediction.calibratedConfidence;
+    reasons.unshift(`AI Prediction: TRADE_BUY (EV=+${prediction.expectedValue} pips, ${(prediction.calibratedConfidence * 100).toFixed(0)}% conf)`);
+  } else if (prediction?.recommendation === 'TRADE_SELL') {
+    normalizedDirection = 'SELL';
+    category = 'STRONG_SELL';
+    score = Math.max(score, Math.round((prediction.calibratedConfidence || 0.65) * 100));
+    mlProbability = prediction.calibratedConfidence;
+    reasons.unshift(`AI Prediction: TRADE_SELL (EV=+${prediction.expectedValue} pips, ${(prediction.calibratedConfidence * 100).toFixed(0)}% conf)`);
+  } else {
+    const rawDir = String(signal.direction || 'NO_TRADE');
+    normalizedDirection = rawDir.includes('BUY') ? 'BUY' : rawDir.includes('SELL') ? 'SELL' : rawDir === 'NO_TRADE' ? 'NO_TRADE' : 'WAIT';
+    if (prediction?.vetoReasons?.[0]) {
+      noTradeReasons.push(prediction.vetoReasons[0]);
+    }
+  }
+
+  // Construct trade plan if missing but actionable
+  let entryZone = signal.tradePlan ? {
+    min: signal.tradePlan.entryMin,
+    max: signal.tradePlan.entryMax,
+    preferred: signal.tradePlan.entryPreferred
+  } : { min: 0, max: 0, preferred: 0 };
+  let stopLoss = signal.tradePlan?.stopLoss ?? 0;
+  let target1 = signal.tradePlan?.takeProfit1?.targetPrice ?? 0;
+  let target2 = signal.tradePlan?.takeProfit2?.targetPrice ?? 0;
+  let target3 = signal.tradePlan?.takeProfit3?.targetPrice;
+  let riskReward = signal.tradePlan?.riskReward ?? 0;
+
+  if (entryZone.preferred === 0 && quote && (normalizedDirection === 'BUY' || normalizedDirection === 'SELL')) {
+    const currentPrice = Number(quote.bid || quote.ask || 1.0);
+    const isBuy = normalizedDirection === 'BUY';
+    const pipSize = 0.0001;
+    entryZone = { min: currentPrice - 2 * pipSize, max: currentPrice + 2 * pipSize, preferred: currentPrice };
+    stopLoss = isBuy ? currentPrice - 20 * pipSize : currentPrice + 20 * pipSize;
+    target1 = isBuy ? currentPrice + 40 * pipSize : currentPrice - 40 * pipSize;
+    target2 = isBuy ? currentPrice + 60 * pipSize : currentPrice - 60 * pipSize;
+    target3 = isBuy ? currentPrice + 80 * pipSize : currentPrice - 80 * pipSize;
+    riskReward = 2.0;
+  }
 
   return {
     id: signal.id,
@@ -76,38 +122,32 @@ function mapForexSignal(signal: any): TradingSignal {
     market: 'FOREX',
     instrument: signal.pair,
     direction: normalizedDirection,
-    category: signal.signalCategory,
+    category,
     strategy: signal.strategyVersion,
-    score: signal.score,
+    score,
     scoreBreakdown: {
-      trend: signal.scoreBreakdown.trend,
-      multiTimeframe: signal.scoreBreakdown.multiTimeframe,
-      momentum: signal.scoreBreakdown.momentum,
-      marketStructure: signal.scoreBreakdown.marketStructure,
-      supportResistance: signal.scoreBreakdown.supportResistance,
+      trend: signal.scoreBreakdown?.trend || Math.round(score * 0.2),
+      multiTimeframe: signal.scoreBreakdown?.multiTimeframe || Math.round(score * 0.2),
+      momentum: signal.scoreBreakdown?.momentum || Math.round(score * 0.15),
+      marketStructure: signal.scoreBreakdown?.marketStructure || Math.round(score * 0.15),
+      supportResistance: signal.scoreBreakdown?.supportResistance || Math.round(score * 0.1),
       volumeOI: 0,
-      mlProbability: signal.mlProbability ?? 0,
-      riskReward: signal.scoreBreakdown.riskReward,
-      volatility: signal.scoreBreakdown.volatility,
-      totalScore: signal.score
+      mlProbability,
+      riskReward: signal.scoreBreakdown?.riskReward || 4,
+      volatility: signal.scoreBreakdown?.volatility || 4,
+      totalScore: score
     },
-    mlProbability: signal.mlProbability ?? 0,
-    entryZone: signal.tradePlan
-      ? {
-          min: signal.tradePlan.entryMin,
-          max: signal.tradePlan.entryMax,
-          preferred: signal.tradePlan.entryPreferred
-        }
-      : { min: 0, max: 0, preferred: 0 },
-    stopLoss: signal.tradePlan?.stopLoss ?? 0,
-    target1: signal.tradePlan?.takeProfit1?.targetPrice ?? 0,
-    target2: signal.tradePlan?.takeProfit2?.targetPrice ?? 0,
-    target3: signal.tradePlan?.takeProfit3?.targetPrice,
-    riskReward: signal.tradePlan?.riskReward ?? 0,
-    status: signal.status === 'ACTIVE' ? 'ACTIVE' : signal.status === 'NO_TRADE' ? 'CANCELLED' : 'WAITING',
+    mlProbability,
+    entryZone,
+    stopLoss,
+    target1,
+    target2,
+    target3,
+    riskReward,
+    status: (normalizedDirection === 'BUY' || normalizedDirection === 'SELL') ? 'ACTIVE' : normalizedDirection === 'NO_TRADE' ? 'CANCELLED' : 'WAITING',
     invalidationConditions: signal.invalidationConditions || [],
-    reasons: signal.reasons || [],
-    noTradeReasons: signal.noTradeReasons || [],
+    reasons,
+    noTradeReasons,
     modelVersion: signal.modelVersion,
     expiry: undefined
   };
@@ -140,6 +180,16 @@ export class ScannerService {
           await this.forexProvider.refreshPair(pair.symbol);
           const signal = await this.forexSignalEngine.generateSignal(pair.symbol);
           const quote = this.forexProvider.getQuote(pair.symbol);
+
+          let prediction: any = null;
+          try {
+            prediction = await CombinedPredictionEngine.predict({
+              pair: pair.symbol,
+              currentClose: quote?.bid,
+              cutoffTimestamp: Date.now()
+            });
+          } catch {}
+
           return {
             symbol: pair.symbol,
             description: pair.description,
@@ -149,7 +199,7 @@ export class ScannerService {
             changePips: quote.changePips24h,
             changePercent: quote.changePercent24h,
             digits: pair.digits,
-            signal: mapForexSignal(signal),
+            signal: mapForexSignal(signal, prediction, quote),
             dataStatus: 'LIVE',
             dataSource: quote.provider
           };

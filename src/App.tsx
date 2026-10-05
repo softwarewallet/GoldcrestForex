@@ -3,6 +3,8 @@ import { Header } from './components/Header';
 import { MarketHub } from './components/MarketHub';
 import { SignalsView } from './components/SignalsView';
 import { TradingHub } from './components/TradingHub';
+import { ShadowModeDashboard } from './components/ShadowModeDashboard';
+import { PredictionForensicsPage } from './components/PredictionForensicsPage';
 import { TradingOperationsDashboard } from './components/TradingOperationsDashboard';
 import { TradingControlCenter } from './components/TradingControlCenter';
 import { HistoryPage } from './components/HistoryPage';
@@ -343,6 +345,14 @@ export default function App() {
                 isEmergencyHalted={isEmergencyHalted}
                 onRequestEnvironmentChange={handleRequestEnvironmentChange}
               />
+            )}
+
+            {activeTab === 'shadow_mode' && (
+              <ShadowModeDashboard />
+            )}
+
+            {activeTab === 'forensics' && (
+              <PredictionForensicsPage />
             )}
 
             {(activeTab === 'pnl' || activeTab === 'accounting') && (
