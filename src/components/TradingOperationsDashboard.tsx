@@ -112,7 +112,7 @@ export const TradingOperationsDashboard: React.FC<TradingOperationsDashboardProp
           <div className="text-lg font-bold text-white mt-2">
             {Array.isArray(status?.brokers) ? status.brokers.filter((b: any) => b?.connected && b?.environment === 'LIVE').length : 0} / 2
           </div>
-          <div className="text-slate-500 mt-1">cTrader + 5paisa</div>
+          <div className="text-slate-500 mt-1">cTrader Open API</div>
         </div>
       </div>
 

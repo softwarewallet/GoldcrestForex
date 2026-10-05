@@ -18,7 +18,12 @@ import {
   TrendingUp,
   TrendingDown,
   Target,
-  X
+  X,
+  ShieldAlert,
+  Lock,
+  Unlock,
+  Flame,
+  Check
 } from 'lucide-react';
 import { TradingEnvironment, BrokerType } from '../brokers/types';
 import { OptionsTradingPanel } from './OptionsTradingPanel';
@@ -159,6 +164,28 @@ export const TradingHub: React.FC<TradingHubProps> = ({
       message: string;
       updatedAt: number;
     } | null;
+    continuity?: {
+      consecutiveLossCount: number;
+      consecutiveProfitCount: number;
+      lossLimitThreshold: number;
+      profitAutoContinuityThreshold: number;
+      isContinuityPaused: boolean;
+      requiresContinuityAuthorization: boolean;
+      isProfitContinuityActive: boolean;
+      lastAuthorization: {
+        authorizedAt: number | null;
+        authorizedBy: string | null;
+        note?: string | null;
+      } | null;
+      lastOutcome: {
+        id: string;
+        symbol: string;
+        pnl: number;
+        outcome: 'PROFIT' | 'LOSS' | 'BREAKEVEN';
+        timestamp: number;
+      } | null;
+      message: string;
+    };
   }
   const [activeTab, setActiveTab] = useState<'cockpit' | 'positions' | 'signals' | 'options' | 'execution' | 'controls'>('cockpit');
   const [autoStatus, setAutoStatus] = useState<AutoTradingStatusSnapshot | null>(null);
@@ -166,6 +193,9 @@ export const TradingHub: React.FC<TradingHubProps> = ({
   const [dailyLossLimitPct, setDailyLossLimitPct] = useState<number>(3);
   const [dailyLossSaving, setDailyLossSaving] = useState<boolean>(false);
   const [dailyLossSaveMessage, setDailyLossSaveMessage] = useState<string | null>(null);
+  const [isAuthorizingContinuity, setIsAuthorizingContinuity] = useState<boolean>(false);
+  const [continuityOperatorNote, setContinuityOperatorNote] = useState<string>('');
+  const [continuityNotification, setContinuityNotification] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
   // Helper to append telemetry console logs
   const addLog = useCallback((type: 'info' | 'success' | 'error' | 'warning' | 'nlp', message: string) => {
@@ -324,6 +354,61 @@ export const TradingHub: React.FC<TradingHubProps> = ({
       .catch((err) => console.warn('Failed to load persisted daily loss limit:', err))
     return () => { mounted = false; };
   }, [safeParseJson]);
+
+  const handleAuthorizeContinuity = useCallback(async () => {
+    setIsAuthorizingContinuity(true);
+    setContinuityNotification(null);
+    try {
+      const res = await fetch('/api/auto-trading/authorize-continuity', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          operatorId: maskedAccount || 'OPERATOR',
+          note: continuityOperatorNote || 'User authorized continuity from Cockpit'
+        })
+      });
+      const data = await safeParseJson(res);
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || data?.message || 'Failed to authorize continuity.');
+      }
+      setContinuityNotification({
+        type: 'success',
+        message: 'Continuity authorized. Auto Live trade execution has resumed.'
+      });
+      addLog('success', 'TRADE CONTINUITY AUTHORIZED: Circuit breaker cleared by operator. Auto-execution resumed.');
+      if (data?.autoTrading) {
+        setAutoStatus(data.autoTrading);
+      }
+      setContinuityOperatorNote('');
+    } catch (err: any) {
+      const msg = err?.message || 'Authorization failed';
+      setContinuityNotification({ type: 'error', message: msg });
+      addLog('error', `Continuity Authorization Error: ${msg}`);
+    } finally {
+      setIsAuthorizingContinuity(false);
+    }
+  }, [maskedAccount, continuityOperatorNote, safeParseJson, addLog]);
+
+  const handleSimulateStreak = useCallback(async (pnl: number, count = 1) => {
+    try {
+      let latestAutoTrading = null;
+      for (let i = 0; i < count; i++) {
+        const res = await fetch('/api/auto-trading/simulate-outcome', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pnl, symbol: 'EUR/USD' })
+        });
+        const data = await safeParseJson(res);
+        if (data?.autoTrading) latestAutoTrading = data.autoTrading;
+      }
+      if (latestAutoTrading) {
+        setAutoStatus(latestAutoTrading);
+      }
+      addLog(pnl > 0 ? 'success' : 'warning', `Simulated ${count} trade outcome(s): ${pnl > 0 ? '+' : ''}$${pnl}`);
+    } catch (err: any) {
+      addLog('error', `Simulation failed: ${err?.message || String(err)}`);
+    }
+  }, [safeParseJson, addLog]);
 
   // Initial load and polling setup
   useEffect(() => {
@@ -620,12 +705,11 @@ export const TradingHub: React.FC<TradingHubProps> = ({
     REJECTED: 'REJECTED'
   };
   const renderTabs = () => (
-    <div className="flex flex-wrap gap-2 border-b border-slate-800 pb-3">
+    <div className="flex flex-wrap gap-2 border-b border-slate-800" style={{ paddingBottom: '5px', marginBottom: '5px' }}>
       {[
         ['cockpit', 'Auto Live'],
         ['positions', 'Positions'],
         ['signals', 'Signals'],
-        ['options', 'NIFTY Options'],
         ['execution', 'Execution Log'],
         ['controls', 'Controls']
       ].map(([id, label]) => (
@@ -640,7 +724,7 @@ export const TradingHub: React.FC<TradingHubProps> = ({
 
   return (
     <div id="unified_trading_hub" className="space-y-4">
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-lg">
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-lg" style={{ paddingTop: '5px', paddingBottom: '5px', marginBottom: '5px' }}>
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
           <div>
             <div className="text-white font-bold text-base">Auto Live Trading Cockpit</div>
@@ -648,11 +732,13 @@ export const TradingHub: React.FC<TradingHubProps> = ({
           </div>
           <div className="flex flex-wrap gap-2 font-mono text-[11px]">
             <span className={"px-3 py-1 rounded-lg border font-bold " +
-              (autoStatus?.state === 'RUNNING' ? "text-emerald-300 bg-emerald-950/60 border-emerald-800" :
+              (autoStatus?.continuity?.isContinuityPaused ? "text-rose-300 bg-rose-950/80 border-rose-600 animate-pulse" :
+               autoStatus?.state === 'RUNNING' ? "text-emerald-300 bg-emerald-950/60 border-emerald-800" :
                autoStatus?.state === 'BLOCKED' ? "text-rose-300 bg-rose-950/60 border-rose-800" :
                "text-amber-300 bg-amber-950/60 border-amber-800")}>
-              AUTO LIVE: {autoStatus?.state || 'LOADING'}
-            </span>            <span className="px-3 py-1 rounded-lg border border-slate-700 bg-slate-950 text-slate-300">{selectedBroker} · LIVE</span>
+              {autoStatus?.continuity?.isContinuityPaused ? 'AUTO LIVE: PAUSED (20 LOSSES)' : `AUTO LIVE: ${autoStatus?.state || 'LOADING'}`}
+            </span>
+            <span className="px-3 py-1 rounded-lg border border-slate-700 bg-slate-950 text-slate-300">{selectedBroker} · LIVE</span>
           </div>
         </div>
       </div>
@@ -661,7 +747,182 @@ export const TradingHub: React.FC<TradingHubProps> = ({
 
       {activeTab === 'cockpit' && (
         <>
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+          {/* SECTION: TRADE CONTINUITY & CONSECUTIVE CIRCUIT BREAKER */}
+          {autoStatus?.continuity?.isContinuityPaused ? (
+            <div className="bg-rose-950/30 border-2 border-rose-600 rounded-xl p-5 shadow-2xl space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-rose-800/60 pb-3">
+                <div className="flex items-center space-x-3">
+                  <AlertTriangle className="w-6 h-6 text-rose-400 animate-pulse shrink-0" />
+                  <div>
+                    <h3 className="text-base font-bold text-white uppercase tracking-wider font-mono">
+                      Consecutive Loss Circuit Breaker Activated
+                    </h3>
+                    <p className="text-xs text-rose-300 font-mono mt-0.5">
+                      New trade execution is paused: constant 20 losing trades reached.
+                    </p>
+                  </div>
+                </div>
+                <div className="px-3 py-1 rounded-full text-xs font-bold font-mono bg-rose-900 border border-rose-500 text-rose-200 shrink-0">
+                  AUTHORIZATION REQUIRED
+                </div>
+              </div>
+
+              <div className="bg-slate-950/70 border border-rose-900/60 rounded-lg p-3 text-xs text-slate-300 leading-relaxed font-mono">
+                The autonomous engine recorded <strong>{autoStatus.continuity.consecutiveLossCount} consecutive losing trades</strong>.
+                In accordance with system invariants, the system has paused executing new trades.
+                An operator must review current market conditions and authorize continuity to resume automated trading.
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 font-mono text-xs">
+                <div className="bg-slate-900/80 border border-rose-800/80 p-3 rounded-xl">
+                  <div className="text-slate-400 text-[10px]">LOSING STREAK</div>
+                  <div className="text-xl font-bold text-rose-400 mt-1">{autoStatus.continuity.consecutiveLossCount} / 20</div>
+                  <div className="text-[10px] text-rose-300 mt-0.5">Limit Hit (Paused)</div>
+                </div>
+                <div className="bg-slate-900/80 border border-slate-800 p-3 rounded-xl">
+                  <div className="text-slate-400 text-[10px]">WINNING STREAK</div>
+                  <div className="text-xl font-bold text-white mt-1">{autoStatus.continuity.consecutiveProfitCount} / 10</div>
+                  <div className="text-[10px] text-slate-500 mt-0.5">Auto-Continue @ 10</div>
+                </div>
+                <div className="bg-slate-900/80 border border-slate-800 p-3 rounded-xl">
+                  <div className="text-slate-400 text-[10px]">CIRCUIT RULE</div>
+                  <div className="text-xs font-bold text-amber-400 mt-1">20 LOSSES = PAUSE</div>
+                  <div className="text-[10px] text-slate-500 mt-0.5">10 Wins = Auto-Resume</div>
+                </div>
+                <div className="bg-slate-900/80 border border-slate-800 p-3 rounded-xl">
+                  <div className="text-slate-400 text-[10px]">EXECUTION STATUS</div>
+                  <div className="text-xs font-bold text-rose-400 mt-1">LOCKED</div>
+                  <div className="text-[10px] text-slate-500 mt-0.5">Pending Authorization</div>
+                </div>
+              </div>
+
+              {continuityNotification && (
+                <div className={`p-3 rounded-lg border text-xs font-mono ${
+                  continuityNotification.type === 'success'
+                    ? 'border-emerald-700 bg-emerald-950/60 text-emerald-200'
+                    : 'border-rose-700 bg-rose-950/60 text-rose-200'
+                }`}>
+                  {continuityNotification.message}
+                </div>
+              )}
+
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 pt-2">
+                <input
+                  type="text"
+                  placeholder="Optional operator notes (e.g. Market volatility settled; authorizing continuity)..."
+                  value={continuityOperatorNote}
+                  onChange={e => setContinuityOperatorNote(e.target.value)}
+                  className="flex-1 bg-slate-950 border border-slate-700 text-slate-200 rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:border-rose-500"
+                />
+                <button
+                  type="button"
+                  onClick={handleAuthorizeContinuity}
+                  disabled={isAuthorizingContinuity}
+                  className="px-5 py-2.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs font-mono shadow-lg transition flex items-center justify-center gap-2 disabled:opacity-50 whitespace-nowrap cursor-pointer"
+                >
+                  <Unlock className="w-4 h-4" />
+                  <span>{isAuthorizingContinuity ? 'AUTHORIZING...' : 'AUTHORIZE CONTINUITY & RESUME TRADING'}</span>
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow space-y-3 font-mono text-xs">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-2">
+                <div className="flex items-center space-x-2">
+                  {autoStatus?.continuity?.isProfitContinuityActive ? (
+                    <Sparkles className="w-4 h-4 text-emerald-400" />
+                  ) : (
+                    <ShieldCheck className="w-4 h-4 text-cyan-400" />
+                  )}
+                  <span className="font-bold text-slate-200 uppercase tracking-wider text-xs">
+                    Trade Continuity & Streak Circuit Breaker
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  {autoStatus?.continuity?.isProfitContinuityActive ? (
+                    <span className="px-2.5 py-0.5 rounded text-[10px] font-bold bg-emerald-950 border border-emerald-600 text-emerald-300">
+                      10+ PROFIT TRADES ACTIVE (AUTO-CONTINUITY)
+                    </span>
+                  ) : (
+                    <span className="px-2.5 py-0.5 rounded text-[10px] font-bold bg-slate-950 border border-slate-700 text-slate-300">
+                      MONITORED: 20-LOSS PAUSE / 10-PROFIT AUTO-CONTINUE
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {autoStatus?.continuity?.isProfitContinuityActive && (
+                <div className="p-2.5 rounded-lg bg-emerald-950/40 border border-emerald-800 text-emerald-300 text-xs flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span>
+                    Continuity of 10+ profit trades achieved ({autoStatus.continuity.consecutiveProfitCount} consecutive wins).
+                    System is continuing to execute trades automatically.
+                  </span>
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+                <div className="bg-slate-950/60 p-2.5 rounded-lg border border-slate-800">
+                  <div className="text-slate-500 text-[10px]">LOSING STREAK</div>
+                  <div className="text-base font-bold text-white mt-0.5">
+                    {autoStatus?.continuity?.consecutiveLossCount ?? 0} / 20
+                  </div>
+                  <div className="text-[9px] text-slate-500">Pauses at 20</div>
+                </div>
+                <div className="bg-slate-950/60 p-2.5 rounded-lg border border-slate-800">
+                  <div className="text-slate-500 text-[10px]">WINNING STREAK</div>
+                  <div className="text-base font-bold text-emerald-400 mt-0.5">
+                    {autoStatus?.continuity?.consecutiveProfitCount ?? 0} / 10
+                  </div>
+                  <div className="text-[9px] text-slate-500">Auto-continues at 10</div>
+                </div>
+                <div className="bg-slate-950/60 p-2.5 rounded-lg border border-slate-800">
+                  <div className="text-slate-500 text-[10px]">CIRCUIT ACTION</div>
+                  <div className="text-xs font-bold text-cyan-300 mt-0.5">AUTO-GUARDED</div>
+                  <div className="text-[9px] text-slate-500">20L: Pause · 10W: Auto</div>
+                </div>
+                <div className="bg-slate-950/60 p-2.5 rounded-lg border border-slate-800">
+                  <div className="text-slate-500 text-[10px]">TEST CONTROLS</div>
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    <button
+                      type="button"
+                      onClick={() => handleSimulateStreak(-10, 1)}
+                      className="px-1.5 py-0.5 rounded bg-rose-950/60 border border-rose-800 text-[9px] text-rose-300 hover:bg-rose-900"
+                      title="Simulate 1 losing trade"
+                    >
+                      +1 Loss
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleSimulateStreak(25, 1)}
+                      className="px-1.5 py-0.5 rounded bg-emerald-950/60 border border-emerald-800 text-[9px] text-emerald-300 hover:bg-emerald-900"
+                      title="Simulate 1 winning trade"
+                    >
+                      +1 Win
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleSimulateStreak(-10, 20)}
+                      className="px-1.5 py-0.5 rounded bg-rose-900/80 border border-rose-600 text-[9px] text-white hover:bg-rose-800 font-bold"
+                      title="Simulate 20 consecutive losing trades to trigger circuit breaker"
+                    >
+                      Test 20 Losses
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleSimulateStreak(25, 10)}
+                      className="px-1.5 py-0.5 rounded bg-emerald-900/80 border border-emerald-600 text-[9px] text-white hover:bg-emerald-800 font-bold"
+                      title="Simulate 10 consecutive winning trades to trigger auto-continue"
+                    >
+                      Test 10 Wins
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="bg-slate-900 border border-slate-800 rounded-xl p-5" style={{ paddingTop: '5px', paddingBottom: '5px', marginBottom: '5px' }}>
             <div className="text-[10px] uppercase tracking-widest text-slate-500 font-mono">Current Activity</div>
             <div className="mt-2 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
               <div>
@@ -682,7 +943,7 @@ export const TradingHub: React.FC<TradingHubProps> = ({
                  executionStage === 'REJECTED' ? 'TRADE NOT EXECUTED' : 'AUTO LIVE MONITORING'}
               </div>
             </div>
-            <div className="grid grid-cols-5 gap-1 mt-5">
+            <div className="grid grid-cols-5 gap-1 mt-5" style={{ marginTop: '10px' }}>
               {['SCANNING_MARKET','ANALYZING_SIGNAL','PREPARING_ORDER','SAFETY_GATE','SUBMITTING_ORDER'].map(stage => (
                 <div key={stage} className={"h-1.5 rounded " +
                   (executionStage === stage ? "bg-cyan-400 animate-pulse" :
@@ -691,10 +952,10 @@ export const TradingHub: React.FC<TradingHubProps> = ({
             </div>
           </div>
 
-          <div className="grid md:grid-cols-3 gap-3">
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4"><div className="text-[10px] text-slate-500 font-mono uppercase">Active Positions</div><div className="text-2xl font-bold text-white mt-1">{runningTrades.length}</div></div>
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4"><div className="text-[10px] text-slate-500 font-mono uppercase">Actionable Signals</div><div className="text-2xl font-bold text-white mt-1">{visiblePlannedTrades.length}</div></div>
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4"><div className="text-[10px] text-slate-500 font-mono uppercase">Last Cycle</div><div className="text-xs text-slate-300 mt-2">{autoStatus?.lastCycleResult || 'Waiting.'}</div></div>
+          <div className="grid md:grid-cols-3 gap-3" style={{ marginBottom: '5px' }}>
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4" style={{ paddingTop: '5px', paddingBottom: '5px' }}><div className="text-[10px] text-slate-500 font-mono uppercase">Active Positions</div><div className="text-2xl font-bold text-white mt-1">{runningTrades.length}</div></div>
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4" style={{ paddingTop: '5px', paddingBottom: '5px' }}><div className="text-[10px] text-slate-500 font-mono uppercase">Actionable Signals</div><div className="text-2xl font-bold text-white mt-1">{visiblePlannedTrades.length}</div></div>
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4" style={{ paddingTop: '5px', paddingBottom: '5px' }}><div className="text-[10px] text-slate-500 font-mono uppercase">Last Cycle</div><div className="text-xs text-slate-300 mt-2">{autoStatus?.lastCycleResult || 'Waiting.'}</div></div>
           </div>
 
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">

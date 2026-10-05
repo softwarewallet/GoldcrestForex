@@ -878,9 +878,21 @@ brokerRouter.get('/today-trades-summary', async (_req: Request, res: Response) =
     }
   }
 
-  // Pending trades = currently open / pending trades in the system right now at fetch time
+  const isOpenedToday = (item: any) => {
+    const ts = item?.entryTime || item?.openTime || item?.timestamp || item?.createdTime || item?.time || item?.created_at;
+    if (!ts) return true;
+    const timeNum = typeof ts === 'string' ? new Date(ts).getTime() : Number(ts);
+    return Number.isFinite(timeNum) ? timeNum >= from : true;
+  };
+
+  const todayPendingPositions = (openPositions || []).filter(isOpenedToday).length;
+  const todayPendingOrders = (openOrders || []).filter(isOpenedToday).length;
+  const todayPendingTrades = todayPendingPositions + todayPendingOrders;
+
+  // Pending trades = currently open / pending trades in the system (can include carry-forward from last 1 or 2 days)
   const pendingTrades = (openPositions || []).length + (openOrders || []).length;
-  const totalTrades = closedTrades.length + pendingTrades;
+  // Total trades = strictly today's trades only (closed today + opened today)
+  const totalTrades = closedTrades.length + todayPendingTrades;
   const netPnL = realizedPnL + unrealizedPnL;
 
   const formattedNetPnL = `${netPnL >= 0 ? '+' : '-'}$${Math.abs(netPnL).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;

@@ -92,8 +92,7 @@ export const GlobalAppShell: React.FC<GlobalAppShellProps> = ({
 
         const winningTrades = Number(summaryData?.winningTrades || 0);
         const losingTrades = Number(summaryData?.losingTrades || 0);
-        const closedCount = winningTrades + losingTrades;
-        const totalTrades = Math.max(Number(summaryData?.totalTrades || 0), closedCount + pendingTrades);
+        const totalTrades = Number(summaryData?.totalTrades !== undefined ? summaryData.totalTrades : (winningTrades + losingTrades));
         const realizedPnL = Number(summaryData?.realizedPnL || 0);
         const netPnL = Number(summaryData?.netPnL !== undefined ? summaryData.netPnL : (realizedPnL + positionsUnrealizedPnL));
         const formattedNetPnL = summaryData?.formattedNetPnL || `${netPnL >= 0 ? '+' : '-'}$${Math.abs(netPnL).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;

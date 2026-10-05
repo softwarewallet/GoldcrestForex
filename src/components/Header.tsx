@@ -122,6 +122,48 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         </div>
 
+        {/* Sacred Blessings & Prosperity Center: Lord Ganesha & Goddess Lakshmi, Swastik, Om, Shubh Labh */}
+        <div
+          id="header_sacred_blessings"
+          title="Shri Ganesh Lakshmi Blessings & Prosperity · 卐 ॐ शुभ लाभ 卐"
+          className="mx-auto flex items-center gap-3 px-3 py-1.5 rounded-xl border border-amber-500/35 bg-gradient-to-r from-amber-950/30 via-slate-900/90 to-amber-950/30 shadow-[0_0_16px_rgba(245,158,11,0.12)] transition hover:border-amber-400/60 shrink-0"
+        >
+          {/* Left Auspicious Wing: Swastik & Shubh */}
+          <div className="flex flex-col items-center justify-center text-center select-none shrink-0 pr-1.5 border-r border-amber-500/25">
+            <span className="text-amber-400 text-sm font-bold leading-none">卐</span>
+            <span className="text-amber-300 font-serif font-black text-xs tracking-wider mt-0.5">शुभ</span>
+            <span className="text-[8px] text-amber-500/90 uppercase font-mono tracking-tighter">SHUBH</span>
+          </div>
+
+          {/* Central Sacred Divine Artwork: Lord Ganesha & Goddess Lakshmi */}
+          <div className="relative shrink-0 flex items-center">
+            <img
+              src="/src/assets/images/ganesh_lakshmi_banner_1791176799073.jpg"
+              alt="Lord Ganesha and Goddess Lakshmi - Blessings and Prosperity"
+              referrerPolicy="no-referrer"
+              className="h-[60px] w-auto max-w-[170px] sm:max-w-[210px] md:max-w-[240px] object-cover rounded-lg border border-amber-500/50 shadow-md transition-transform duration-300 hover:scale-[1.02]"
+            />
+            <div className="absolute inset-0 rounded-lg ring-1 ring-inset ring-amber-400/20 pointer-events-none" />
+          </div>
+
+          {/* Right Auspicious Wing: Labh & Om */}
+          <div className="flex flex-col items-center justify-center text-center select-none shrink-0 pl-1.5 border-l border-amber-500/25">
+            <span className="text-amber-400 text-sm font-bold leading-none">ॐ</span>
+            <span className="text-amber-300 font-serif font-black text-xs tracking-wider mt-0.5">लाभ</span>
+            <span className="text-[8px] text-amber-500/90 uppercase font-mono tracking-tighter">LABH</span>
+          </div>
+
+          {/* Blessings & Prosperity Title */}
+          <div className="hidden xl:flex flex-col justify-center select-none pl-1">
+            <div className="flex items-center gap-1 text-[11px] font-bold text-amber-300 font-serif whitespace-nowrap">
+              <span>श्री गणेश · महालक्ष्मी</span>
+            </div>
+            <div className="text-[9px] text-amber-400/90 font-mono tracking-wide whitespace-nowrap">
+              Blessings & Prosperity
+            </div>
+          </div>
+        </div>
+
         <div className="ml-auto flex items-center gap-2 shrink-0">
           <button
             id="btn_emergency_stop"

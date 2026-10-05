@@ -13,6 +13,7 @@ import { killSwitch } from '../brokers/safety/KillSwitch';
 import { BrokerAdapter, NormalizedQuote, OrderRequest } from '../brokers/types';
 import { liveRuntimeLog, tradeAuditLog } from './liveRuntimeLog';
 import { calculateForexPipTargets, normalizePriceToThreeDigits, sizeForexOrderToMaxTradeValue } from '../brokers/safety/TradeSizing';
+import { tradeContinuityService, TradeContinuityStatus } from './tradeContinuityService';
 
 const LIVE_QUOTE_MAX_AGE_MS = 30_000;
 
@@ -175,6 +176,7 @@ export interface AutoTradingStatus {
     news: LiveNewsSnapshot | null;
     status: 'IDLE' | 'RUNNING' | 'READY' | 'UNAVAILABLE';
   };
+  continuity: TradeContinuityStatus;
   requiresClosedMarketConfirmation?: boolean;
 }
 
@@ -317,7 +319,8 @@ class AutoTradingService {
         trendPairsEvaluated: this.preOpenTrendPairsEvaluated,
         news: this.preOpenNews,
         status: this.preOpenStatus
-      }
+      },
+      continuity: tradeContinuityService.getStatus()
     };
   }
 
@@ -702,6 +705,19 @@ class AutoTradingService {
         return;
       }
 
+      const continuityCheck = tradeContinuityService.canExecuteNewTrade();
+      if (!continuityCheck.allowed) {
+        this.lastCycleResult = continuityCheck.reason || 'Auto Live paused: 20 consecutive losing trades reached. Operator authorization required in Cockpit.';
+        this.setExecutionStatus({
+          stage: 'IDLE',
+          pair: null,
+          side: null,
+          signalId: null,
+          message: this.lastCycleResult
+        });
+        return;
+      }
+
       // Stop the scan before news/market analysis when the authoritative
       // system-wide live-position capacity is already full. The timer remains
       // active so a later cycle can detect a freed slot and resume.
@@ -1032,6 +1048,15 @@ return;
         score > 70 ? '2_TRADES' :
         score >= 65 ? '1_TRADE' :
         'BELOW_65';
+
+      const continuityCheck = tradeContinuityService.canExecuteNewTrade();
+      if (!continuityCheck.allowed) {
+        const reason = continuityCheck.reason || 'Auto Live execution paused: 20 consecutive losing trades reached. Operator authorization required in Cockpit.';
+        this.lastActions.push({ pair, result: 'BLOCKED', signalId: signal.id, reason });
+        liveRuntimeLog('WARN', 'AUTO_TRADING_CONTINUITY_BLOCKED', { pair, signalId: signal.id, reason });
+        tradeAuditLog('CONTINUITY_BLOCKED', { pair, signalId: signal.id, reason });
+        return;
+      }
 
       const positions = positionsBeforeExecution;
       const activePairPositionsCount = positions.filter(position =>

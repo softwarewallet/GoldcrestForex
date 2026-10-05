@@ -30,6 +30,7 @@ import { BrokerError } from './src/brokers/errors';
 import { brokerRouter } from './src/brokers/brokerRoutes';
 import { LIVE_AUTO_EXECUTION_ALLOWED, refreshAutonomousExecutionPermission, armAutonomousExecutionGate, lockAutonomousExecutionGate } from './src/brokers/safety/AutoExecutionEngine';
 import { autoTradingService } from './src/services/autoTradingService';
+import { tradeContinuityService } from './src/services/tradeContinuityService';
 import { initializeLiveRuntimeLog, getLiveRuntimeLogStatus, startLiveRuntimeLog, stopLiveRuntimeLog, getLiveRuntimeLogFile, listLiveRuntimeLogFiles, logApplicationAction, liveRuntimeLog } from './src/services/liveRuntimeLog';
 import { fetchLiveForexNews } from './src/services/liveNewsService';
 import { fetchIndianMarketNews } from './src/services/indianMarketNewsService';
@@ -286,6 +287,32 @@ app.post('/api/auto-trading/abandon-closed-start', operatorAuthRequired, (_req: 
 
 app.post('/api/auto-trading/stop', operatorAuthRequired, (_req: Request, res: Response) => {
   res.json(autoTradingService.stop());
+});
+
+app.get('/api/auto-trading/continuity-status', operatorAuthRequired, (_req: Request, res: Response) => {
+  res.json(tradeContinuityService.getStatus());
+});
+
+app.post('/api/auto-trading/authorize-continuity', operatorAuthRequired, (req: Request, res: Response) => {
+  const operatorId = req.body?.operatorId || 'OPERATOR';
+  const note = req.body?.note;
+  const status = tradeContinuityService.authorizeContinuity(operatorId, note);
+  res.json({
+    success: true,
+    continuity: status,
+    autoTrading: autoTradingService.getStatus()
+  });
+});
+
+app.post('/api/auto-trading/simulate-outcome', operatorAuthRequired, (req: Request, res: Response) => {
+  const pnl = Number(req.body?.pnl ?? 0);
+  const symbol = String(req.body?.symbol || 'EUR/USD');
+  const status = tradeContinuityService.simulateTradeOutcome(pnl, symbol);
+  res.json({
+    success: true,
+    continuity: status,
+    autoTrading: autoTradingService.getStatus()
+  });
 });
 
 // Explicit Execution Gate Controls
