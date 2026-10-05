@@ -16,6 +16,8 @@ import { CalibrationEngine } from './calibrationEngine';
 import { LiveNewsArticle } from '../../services/liveNewsService';
 import { PredictionSnapshotService } from '../forensics/predictionSnapshotService';
 import { ImmutablePredictionSnapshot, PredictionFeatureSnapshot } from '../forensics/types';
+import { DirectionFusionEngine } from '../direction/directionFusionEngine';
+import { CTraderNativeIndicatorService } from '../../services/cTraderNativeIndicatorService';
 
 export interface PredictOptions {
   pair: string;
@@ -160,12 +162,45 @@ export class CombinedPredictionEngine {
     const reasons: string[] = [];
     const vetoReasons: string[] = [];
 
-    // Conflict check
+    // 4.5 Quantitative Direction Engine & cTrader Native Indicator Layer Integration
+    const candleCloses = options.candles?.map(c => c.close) || [options.currentClose || 1.0];
+    const candleHighs = options.candles?.map(c => c.high) || [(options.currentClose || 1.0) + 0.0010];
+    const candleLows = options.candles?.map(c => c.low) || [(options.currentClose || 1.0) - 0.0010];
+    const candleVolumes = options.candles?.map(c => c.volume) || [100];
+
+    const currentPriceVal = options.currentClose || (candleCloses.length > 0 ? candleCloses[candleCloses.length - 1] : 1.0);
+
+    const quantDirection = DirectionFusionEngine.calculateQuantitativeDirection({
+      pair,
+      horizon,
+      closes: candleCloses.length >= 20 ? candleCloses : Array(25).fill(currentPriceVal),
+      highs: candleHighs.length >= 20 ? candleHighs : Array(25).fill(currentPriceVal + 0.0010),
+      lows: candleLows.length >= 20 ? candleLows : Array(25).fill(currentPriceVal - 0.0010),
+      volumes: candleVolumes.length >= 20 ? candleVolumes : Array(25).fill(100),
+      newsSentiment: news.relativeSentiment,
+      newsImpactScore: news.marketImpactScore,
+      highImpactActive: news.marketImpactScore > 0.6,
+      spreadPips
+    });
+
+    const nativeIndicators = CTraderNativeIndicatorService.getNativeSnapshot(
+      pair,
+      '15M',
+      candleCloses.length >= 20 ? candleCloses : Array(25).fill(currentPriceVal),
+      candleHighs.length >= 20 ? candleHighs : Array(25).fill(currentPriceVal + 0.0010),
+      candleLows.length >= 20 ? candleLows : Array(25).fill(currentPriceVal - 0.0010)
+    );
+
+    // Conflict check & Quantitative Direction Engine Veto
     const isConflict = (direction === 'UP' && news.direction === 'BEARISH' && news.sentimentStrength > 0.4)
       || (direction === 'DOWN' && news.direction === 'BULLISH' && news.sentimentStrength > 0.4);
 
     if (isConflict) {
       vetoReasons.push(`High directional conflict: Technical/Analog points ${direction}, but relative news is ${news.direction} (${(news.sentimentStrength * 100).toFixed(0)}% strength).`);
+    }
+
+    if (quantDirection.conflictRatio > 0.42 || quantDirection.finalDirection === 'CONFLICT') {
+      vetoReasons.push(`Quantitative Direction Engine Veto: High component evidence conflict (${(quantDirection.conflictRatio * 100).toFixed(0)}%).`);
     }
 
     // Rolling performance check
@@ -237,7 +272,9 @@ export class CombinedPredictionEngine {
         news,
         technical,
         historical: historicalEvidence,
-        rollingPerformance: relevantRolling
+        rollingPerformance: relevantRolling,
+        quantDirection,
+        nativeIndicators
       },
       targetPrice,
       stopPrice

@@ -110,6 +110,8 @@ export interface MultiFactorPredictionResult {
     technical: TechnicalEvidence;
     historical: HistoricalAnalogEvidence;
     rollingPerformance: RollingStrategyPerformance;
+    quantDirection?: any;
+    nativeIndicators?: any;
   };
   targetPrice?: number;
   stopPrice?: number;

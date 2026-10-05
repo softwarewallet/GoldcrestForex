@@ -5,6 +5,9 @@ import { SignalsView } from './components/SignalsView';
 import { TradingHub } from './components/TradingHub';
 import { ShadowModeDashboard } from './components/ShadowModeDashboard';
 import { PredictionForensicsPage } from './components/PredictionForensicsPage';
+import { DirectionAnalysisPage } from './components/DirectionAnalysisPage';
+import { NativeIndicatorsReportPage } from './components/NativeIndicatorsReportPage';
+import { DynamicExitAnalysisPage } from './components/DynamicExitAnalysisPage';
 import { TradingOperationsDashboard } from './components/TradingOperationsDashboard';
 import { TradingControlCenter } from './components/TradingControlCenter';
 import { HistoryPage } from './components/HistoryPage';
@@ -353,6 +356,18 @@ export default function App() {
 
             {activeTab === 'forensics' && (
               <PredictionForensicsPage />
+            )}
+
+            {activeTab === 'direction_analysis' && (
+              <DirectionAnalysisPage />
+            )}
+
+            {activeTab === 'native_indicators' && (
+              <NativeIndicatorsReportPage />
+            )}
+
+            {activeTab === 'dynamic_exits' && (
+              <DynamicExitAnalysisPage />
             )}
 
             {(activeTab === 'pnl' || activeTab === 'accounting') && (

@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import {
   Bell, BookOpen, CandlestickChart,
-  ListChecks, Settings, Sparkles, Activity, History as HistoryIcon, Database, BarChart2, Eye
+  ListChecks, Settings, Sparkles, Activity, History as HistoryIcon, Database, BarChart2, Eye, Compass, Zap, Sliders
 } from 'lucide-react';
 import { ForexSessionState, IndianSessionState } from '../markets/common/types';
 
@@ -21,6 +21,9 @@ const nav = [
   { id: 'trading', label: 'Cockpit', icon: CandlestickChart },
   { id: 'shadow_mode', label: 'Shadow Mode', icon: Eye },
   { id: 'forensics', label: 'Forensics', icon: Sparkles },
+  { id: 'direction_analysis', label: 'Direction', icon: Compass },
+  { id: 'native_indicators', label: 'Native Ind', icon: Zap },
+  { id: 'dynamic_exits', label: 'Dynamic Exits', icon: Sliders },
   { id: 'control_center', label: 'Control Center', icon: ListChecks },
   { id: 'history', label: 'History', icon: HistoryIcon },
   { id: 'database', label: 'Database', icon: Database },
