@@ -2,6 +2,22 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { FOREX_PAIRS } from '../markets/forex/instruments';
 
+export interface MartingaleConfig {
+  enabled: boolean;
+  scope: 'ALL' | 'SELECTED';
+  selectedPairs: string[];
+  adverseTriggerPips: number;
+  volumeMultiplier: number;
+  maxRecoveryLevels: number;
+  maximumVolume: number;
+  dynamicTP: boolean;
+  stopLoss: boolean;
+  resetAfterProfit: boolean;
+  maximumBasketDrawdownPct: number;
+  maximumMarginUtilizationPct: number;
+  maximumRecoveryDurationMin: number;
+}
+
 export interface SystemConfig {
   tradingMode: 'LIVE_ONLY';
   liveTradingEnabled: boolean;
@@ -30,15 +46,28 @@ export interface SystemConfig {
   autoLiveForexPairs: string[];
   autoLiveIndianUnderlyings: string[];
   financialDisclaimer: string;
+  martingale: MartingaleConfig;
 }
 
-const CONFIG_DIR = process.env.GOLDCREST_CONFIG_DIR
-  ? path.resolve(process.env.GOLDCREST_CONFIG_DIR)
-  : path.join(process.cwd(), 'data');
-const CONFIG_FILE = process.env.GOLDCREST_CONFIG_FILE
-  ? path.resolve(process.env.GOLDCREST_CONFIG_FILE)
-  : path.join(CONFIG_DIR, 'system-config.json');
-const CONFIG_TMP_FILE = `${CONFIG_FILE}.tmp`;
+const isServer = typeof window === 'undefined' && typeof process !== 'undefined' && Boolean(process?.versions?.node);
+
+function getConfigDir(): string {
+  if (!isServer || typeof process?.cwd !== 'function') return '/data';
+  return process.env.GOLDCREST_CONFIG_DIR
+    ? path.resolve(process.env.GOLDCREST_CONFIG_DIR)
+    : path.join(process.cwd(), 'data');
+}
+
+function getConfigFile(): string {
+  if (!isServer || typeof process?.cwd !== 'function') return '/data/system-config.json';
+  return process.env.GOLDCREST_CONFIG_FILE
+    ? path.resolve(process.env.GOLDCREST_CONFIG_FILE)
+    : path.join(getConfigDir(), 'system-config.json');
+}
+
+function getTmpConfigFile(): string {
+  return `${getConfigFile()}.tmp`;
+}
 
 /**
  * Only operator-editable, non-secret runtime settings are persisted.
@@ -67,7 +96,8 @@ const PERSISTED_KEYS: readonly (keyof SystemConfig)[] = [
   'forexTakeProfitPips',
   'autoLiveForexPairs',
   'autoLiveIndianUnderlyings',
-  'financialDisclaimer'
+  'financialDisclaimer',
+  'martingale'
 ];
 
 let activeConfig: SystemConfig = {
@@ -98,14 +128,31 @@ let activeConfig: SystemConfig = {
   autoLiveForexPairs: FOREX_PAIRS.map(pair => pair.symbol),
   autoLiveIndianUnderlyings: ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX'],
   financialDisclaimer:
-    'Trading in Forex and derivatives involves substantial risk of loss. Model outputs, signals, probabilities and technical analysis are estimates for informational and analytical purposes only and are not financial advice, guarantees, or assurances of future performance.'
+    'Trading in Forex and derivatives involves substantial risk of loss. Model outputs, signals, probabilities and technical analysis are estimates for informational and analytical purposes only and are not financial advice, guarantees, or assurances of future performance.',
+  martingale: {
+    enabled: false,
+    scope: 'ALL',
+    selectedPairs: [],
+    adverseTriggerPips: 5.0,
+    volumeMultiplier: 2.0,
+    maxRecoveryLevels: 5,
+    maximumVolume: 50.0,
+    dynamicTP: true,
+    stopLoss: false,
+    resetAfterProfit: true,
+    maximumBasketDrawdownPct: 15.0,
+    maximumMarginUtilizationPct: 50.0,
+    maximumRecoveryDurationMin: 120
+  }
 };
 
 let diskConfigLoaded = false;
 
 function ensureConfigDir(): void {
-  if (!fs.existsSync(CONFIG_DIR)) {
-    fs.mkdirSync(CONFIG_DIR, { recursive: true });
+  if (!isServer || !fs?.existsSync) return;
+  const dir = getConfigDir();
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
   }
 }
 
@@ -144,16 +191,18 @@ function sanitizePersistedConfig(input: unknown): Partial<SystemConfig> {
  * starting; the next successful save replaces it atomically.
  */
 export function loadPersistedSystemConfig(): SystemConfig {
+  if (!isServer || !fs?.readFileSync) return { ...activeConfig };
   if (diskConfigLoaded) return { ...activeConfig };
   diskConfigLoaded = true;
 
   try {
     ensureConfigDir();
-    if (!fs.existsSync(CONFIG_FILE)) {
+    const configFile = getConfigFile();
+    if (!fs.existsSync(configFile)) {
       return { ...activeConfig };
     }
 
-    const raw = fs.readFileSync(CONFIG_FILE, 'utf8');
+    const raw = fs.readFileSync(configFile, 'utf8');
     const parsed = JSON.parse(raw);
     const persisted = sanitizePersistedConfig(parsed);
 
@@ -170,6 +219,10 @@ export function loadPersistedSystemConfig(): SystemConfig {
 }
 
 export function persistSystemConfig(config: SystemConfig = activeConfig): void {
+  if (!isServer || !fs?.writeFileSync) {
+    activeConfig = { ...config };
+    return;
+  }
   try {
     ensureConfigDir();
 
@@ -178,13 +231,17 @@ export function persistSystemConfig(config: SystemConfig = activeConfig): void {
       persisted[key] = config[key];
     }
 
+    const configFile = getConfigFile();
+    const tmpConfigFile = getTmpConfigFile();
+
     const serialized = JSON.stringify(persisted, null, 2) + '\n';
-    fs.writeFileSync(CONFIG_TMP_FILE, serialized, 'utf8');
-    fs.renameSync(CONFIG_TMP_FILE, CONFIG_FILE);
+    fs.writeFileSync(tmpConfigFile, serialized, 'utf8');
+    fs.renameSync(tmpConfigFile, configFile);
   } catch (error) {
     console.error('[CONFIG] Failed to persist system configuration:', error);
     try {
-      if (fs.existsSync(CONFIG_TMP_FILE)) fs.unlinkSync(CONFIG_TMP_FILE);
+      const tmpConfigFile = getTmpConfigFile();
+      if (fs.existsSync(tmpConfigFile)) fs.unlinkSync(tmpConfigFile);
     } catch {}
     throw error;
   }

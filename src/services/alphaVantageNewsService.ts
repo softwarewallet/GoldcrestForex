@@ -143,12 +143,15 @@ export class AlphaVantageNewsService {
    * Gets the API key from environment variables or .env/.env.example.
    */
   public getApiKey(): string | null {
-    if (process.env.ALPHA_VANTAGE_API_KEY?.trim()) {
+    if (typeof process !== 'undefined' && process.env?.ALPHA_VANTAGE_API_KEY?.trim()) {
       return process.env.ALPHA_VANTAGE_API_KEY.trim();
+    }
+    if (typeof window !== 'undefined' || typeof process?.cwd !== 'function') {
+      return null;
     }
     try {
       const envPath = path.join(process.cwd(), '.env');
-      if (fs.existsSync(envPath)) {
+      if (fs?.existsSync && fs.existsSync(envPath)) {
         const content = fs.readFileSync(envPath, 'utf8');
         const match = content.match(/^ALPHA_VANTAGE_API_KEY\s*=\s*["']?([^"'\r\n]+)["']?/m);
         if (match && match[1]?.trim()) return match[1].trim();

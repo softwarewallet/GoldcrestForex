@@ -46,10 +46,19 @@ interface PersistedContinuityState {
   recentTradeOutcomes: TradeOutcomeRecord[];
 }
 
-const DATA_DIR = process.env.GOLDCREST_CONFIG_DIR
-  ? path.resolve(process.env.GOLDCREST_CONFIG_DIR)
-  : path.join(process.cwd(), 'data');
-const STATE_FILE = path.join(DATA_DIR, 'trade-continuity-state.json');
+const isServer = typeof window === 'undefined' && typeof process !== 'undefined' && Boolean(process?.versions?.node);
+
+function getDataDir(): string {
+  if (!isServer || typeof process?.cwd !== 'function') return '/data';
+  return process.env.GOLDCREST_CONFIG_DIR
+    ? path.resolve(process.env.GOLDCREST_CONFIG_DIR)
+    : path.join(process.cwd(), 'data');
+}
+
+function getStateFile(): string {
+  if (!isServer) return '/data/trade-continuity-state.json';
+  return path.join(getDataDir(), 'trade-continuity-state.json');
+}
 
 class TradeContinuityService {
   private consecutiveLossCount = 0;
@@ -65,9 +74,11 @@ class TradeContinuityService {
   }
 
   private loadPersistedState(): void {
+    if (!isServer || !fs?.existsSync) return;
     try {
-      if (fs.existsSync(STATE_FILE)) {
-        const raw = fs.readFileSync(STATE_FILE, 'utf-8');
+      const stateFile = getStateFile();
+      if (fs.existsSync(stateFile)) {
+        const raw = fs.readFileSync(stateFile, 'utf-8');
         const parsed = JSON.parse(raw) as Partial<PersistedContinuityState>;
         this.consecutiveLossCount = Math.max(0, Number(parsed.consecutiveLossCount || 0));
         this.consecutiveProfitCount = Math.max(0, Number(parsed.consecutiveProfitCount || 0));
@@ -83,9 +94,12 @@ class TradeContinuityService {
   }
 
   private persistState(): void {
+    if (!isServer || !fs?.writeFileSync) return;
     try {
-      if (!fs.existsSync(DATA_DIR)) {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
+      const dataDir = getDataDir();
+      const stateFile = getStateFile();
+      if (!fs.existsSync(dataDir)) {
+        fs.mkdirSync(dataDir, { recursive: true });
       }
       const state: PersistedContinuityState = {
         consecutiveLossCount: this.consecutiveLossCount,
@@ -96,7 +110,7 @@ class TradeContinuityService {
         lastAuthorization: this.lastAuthorization,
         recentTradeOutcomes: this.recentTradeOutcomes.slice(-50)
       };
-      fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), 'utf-8');
+      fs.writeFileSync(stateFile, JSON.stringify(state, null, 2), 'utf-8');
     } catch (err: any) {
       liveRuntimeLog('WARN', 'TRADE_CONTINUITY_PERSIST_ERROR', { error: err?.message || String(err) });
     }

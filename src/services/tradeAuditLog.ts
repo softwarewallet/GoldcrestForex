@@ -3,8 +3,14 @@ import path from 'node:path';
 
 export type TradeAuditStatus = 'REQUEST_SENT' | 'ACCEPTED' | 'FILLED' | 'REJECTED' | 'FAILED' | 'TIMEOUT';
 
-const LOG_DIR = path.resolve(process.cwd(), 'logs');
-const LOG_TIMEZONE = process.env.GOLDCREST_LOG_TIMEZONE || 'Asia/Kolkata';
+const isServer = typeof window === 'undefined' && typeof process !== 'undefined' && Boolean(process?.versions?.node);
+
+function getLogDir(): string {
+  if (!isServer || typeof process?.cwd !== 'function') return '/logs';
+  return path.resolve(process.cwd(), 'logs');
+}
+
+const LOG_TIMEZONE = (isServer && process.env.GOLDCREST_LOG_TIMEZONE) || 'Asia/Kolkata';
 
 function getLogDate(): string {
   try {
@@ -20,7 +26,8 @@ function getLogDate(): string {
 }
 
 function getDailyTradeLogFile(date = getLogDate()): string {
-  return path.join(LOG_DIR, `${date}-TradeLog.log`);
+  if (!isServer) return `/logs/${date}-TradeLog.log`;
+  return path.join(getLogDir(), `${date}-TradeLog.log`);
 }
 
 function sanitize(value: unknown): unknown {
@@ -47,7 +54,8 @@ function sanitize(value: unknown): unknown {
 }
 
 function append(record: Record<string, unknown>): void {
-  fs.mkdirSync(LOG_DIR, { recursive: true });
+  if (!isServer || !fs?.appendFileSync) return;
+  fs.mkdirSync(getLogDir(), { recursive: true });
   const file = getDailyTradeLogFile();
   fs.appendFileSync(
     file,

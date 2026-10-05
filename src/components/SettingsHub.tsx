@@ -17,6 +17,7 @@ import {
   Sparkles
 } from 'lucide-react';
 import { BrokerSettingsPanel } from './BrokerSettingsPanel';
+import { MartingaleSettingsPanel } from './MartingaleSettingsPanel';
 import { StrategyPlanningSettings } from './StrategyPlanningSettings';
 import { BrokerType, TradingEnvironment } from '../brokers/types';
 
@@ -200,7 +201,7 @@ export const SettingsHub: React.FC<SettingsHubProps> = ({
   onBrokerSelect,
   onRefreshGlobal
 }) => {
-  const [activeSettingsSection, setActiveSettingsSection] = useState<'BROKER_CONFIG' | 'LIVE_LOG' | 'STRATEGY_PLANNING'>('BROKER_CONFIG');
+  const [activeSettingsSection, setActiveSettingsSection] = useState<'BROKER_CONFIG' | 'LIVE_LOG' | 'STRATEGY_PLANNING' | 'MARTINGALE'>('BROKER_CONFIG');
 
   return (
     <div id="unified_settings_hub" className="space-y-4">
@@ -212,6 +213,7 @@ export const SettingsHub: React.FC<SettingsHubProps> = ({
           </span>
           {[
             { id: 'BROKER_CONFIG', label: 'BROKER & RISK CONFIGURATION', icon: Server },
+            { id: 'MARTINGALE', label: 'MARTINGALE / RECOVERY STRATEGY', icon: Layers },
             { id: 'STRATEGY_PLANNING', label: 'STRATEGY PLANNING & PRESETS', icon: Sparkles },
             { id: 'LIVE_LOG', label: 'LIVE RUNTIME LOG', icon: Activity }
           ].map(tab => {
@@ -247,6 +249,10 @@ export const SettingsHub: React.FC<SettingsHubProps> = ({
 
       {activeSettingsSection === 'STRATEGY_PLANNING' && (
         <StrategyPlanningSettings />
+      )}
+
+      {activeSettingsSection === 'MARTINGALE' && (
+        <MartingaleSettingsPanel />
       )}
 
       {/* Render Selected Sub-Section */}

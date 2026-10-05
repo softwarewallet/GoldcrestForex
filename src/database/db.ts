@@ -3,42 +3,58 @@ import fs from 'fs';
 import path from 'path';
 
 let dbInstance: Database | null = null;
-const DB_DIR = path.join(process.cwd(), 'data');
-const DB_FILE = path.join(DB_DIR, 'trading_analyst.sqlite');
+const isServer = typeof window === 'undefined' && typeof process !== 'undefined' && Boolean(process?.versions?.node);
+
+function getDbDir(): string {
+  if (!isServer || typeof process?.cwd !== 'function') return '/data';
+  return path.join(process.cwd(), 'data');
+}
+
+function getDbFile(): string {
+  if (!isServer) return '/data/trading_analyst.sqlite';
+  return path.join(getDbDir(), 'trading_analyst.sqlite');
+}
 
 export async function getDatabase(): Promise<Database> {
   if (dbInstance) return dbInstance;
 
-  if (!fs.existsSync(DB_DIR)) {
-    fs.mkdirSync(DB_DIR, { recursive: true });
-  }
-
   const SQL = await initSqlJs();
 
-  if (fs.existsSync(DB_FILE)) {
-    const fileBuffer = fs.readFileSync(DB_FILE);
-    dbInstance = new SQL.Database(fileBuffer);
-    // Always run schema migrations against existing databases so newly added
-    // SQLite-only persistence tables are available without manual reset.
-    initSchema(dbInstance);
-    seedInitialData(dbInstance);
-    persistDatabase();
+  if (isServer && fs?.existsSync) {
+    const dbDir = getDbDir();
+    const dbFile = getDbFile();
+
+    if (!fs.existsSync(dbDir)) {
+      fs.mkdirSync(dbDir, { recursive: true });
+    }
+
+    if (fs.existsSync(dbFile)) {
+      const fileBuffer = fs.readFileSync(dbFile);
+      dbInstance = new SQL.Database(fileBuffer);
+      initSchema(dbInstance);
+      seedInitialData(dbInstance);
+      persistDatabase();
+    } else {
+      dbInstance = new SQL.Database();
+      initSchema(dbInstance);
+      seedInitialData(dbInstance);
+      persistDatabase();
+    }
   } else {
     dbInstance = new SQL.Database();
     initSchema(dbInstance);
     seedInitialData(dbInstance);
-    persistDatabase();
   }
 
   return dbInstance;
 }
 
 export function persistDatabase(): void {
-  if (!dbInstance) return;
+  if (!dbInstance || !isServer || !fs?.writeFileSync) return;
   try {
     const data = dbInstance.export();
     const buffer = Buffer.from(data);
-    fs.writeFileSync(DB_FILE, buffer);
+    fs.writeFileSync(getDbFile(), buffer);
   } catch (err) {
     console.error('Error persisting SQLite database to disk:', err);
   }
@@ -628,6 +644,37 @@ function initSchema(db: Database) {
       value TEXT NOT NULL,
       updated_at INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS martingale_sequences (
+      id TEXT PRIMARY KEY,
+      sequence_id TEXT UNIQUE NOT NULL,
+      position_id TEXT NOT NULL,
+      pair TEXT NOT NULL,
+      direction TEXT NOT NULL,
+      base_volume REAL NOT NULL,
+      current_volume REAL NOT NULL,
+      recovery_level INTEGER NOT NULL,
+      last_trigger_price REAL NOT NULL,
+      next_trigger_price REAL NOT NULL,
+      current_tp REAL NOT NULL,
+      status TEXT NOT NULL,
+      started_at INTEGER NOT NULL,
+      last_recovery_at INTEGER,
+      completed_at INTEGER,
+      initial_prediction_score REAL,
+      current_prediction_score REAL,
+      initial_entry_price REAL NOT NULL,
+      current_average_entry REAL NOT NULL,
+      floating_pnl REAL,
+      max_floating_loss REAL,
+      max_margin_used REAL,
+      final_realized_pnl REAL,
+      completion_reason TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_martingale_pos ON martingale_sequences(position_id);
+    CREATE INDEX IF NOT EXISTS idx_martingale_pair ON martingale_sequences(pair);
+    CREATE INDEX IF NOT EXISTS idx_martingale_status ON martingale_sequences(status);
   `;
 
   db.run(schemaSQL);

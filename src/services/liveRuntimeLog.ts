@@ -3,8 +3,14 @@ import path from 'node:path';
 
 export type LiveLogLevel = 'INFO' | 'WARN' | 'ERROR' | 'TRADE' | 'SYSTEM';
 
-const LOG_DIR = path.resolve(process.cwd(), 'logs');
-const LOG_TIMEZONE = process.env.GOLDCREST_LOG_TIMEZONE || 'Asia/Kolkata';
+const isServer = typeof window === 'undefined' && typeof process !== 'undefined' && Boolean(process?.versions?.node);
+
+function getLogDir(): string {
+  if (!isServer || typeof process?.cwd !== 'function') return '/logs';
+  return path.resolve(process.cwd(), 'logs');
+}
+
+const LOG_TIMEZONE = (isServer && process.env.GOLDCREST_LOG_TIMEZONE) || 'Asia/Kolkata';
 
 function getLogDate(): string {
   try {
@@ -20,7 +26,8 @@ function getLogDate(): string {
 }
 
 function getDailyLogFile(date = getLogDate()): string {
-  return path.join(LOG_DIR, `goldcrest-live-${date}.log`);
+  if (!isServer) return `/logs/goldcrest-live-${date}.log`;
+  return path.join(getLogDir(), `goldcrest-live-${date}.log`);
 }
 
 let enabled = false;
@@ -61,8 +68,12 @@ export function installConsoleAuditCapture(): void {
 }
 
 function ensureLogFile(date = getLogDate()): string {
-  fs.mkdirSync(LOG_DIR, { recursive: true });
   const logFile = getDailyLogFile(date);
+  if (!isServer || !fs?.mkdirSync) return logFile;
+  const logDir = getLogDir();
+  if (!fs.existsSync(logDir)) {
+    fs.mkdirSync(logDir, { recursive: true });
+  }
   if (!fs.existsSync(logFile)) {
     fs.writeFileSync(logFile, '', 'utf8');
   }
@@ -164,10 +175,11 @@ export function liveRuntimeLog(level: LiveLogLevel, event: string, details?: unk
 }
 
 export function tradeAuditLog(event: string, details?: unknown): void {
+  if (!isServer || !fs?.appendFileSync) return;
   const date = getLogDate();
-  const file = path.join(LOG_DIR, `TradeLog-${date}.log`);
+  const file = path.join(getLogDir(), `TradeLog-${date}.log`);
   try {
-    fs.mkdirSync(LOG_DIR, { recursive: true });
+    fs.mkdirSync(getLogDir(), { recursive: true });
     const timestamp = new Date().toISOString();
     const detailText = details === undefined ? '' : ` | ${sanitize(details)}`;
     fs.appendFileSync(
@@ -176,12 +188,15 @@ export function tradeAuditLog(event: string, details?: unknown): void {
       'utf8'
     );
   } catch (error) {
-    process.stderr.write(`[TRADE-LOG] Failed to append trade log: ${String(error)}\n`);
+    if (typeof process !== 'undefined' && process.stderr) {
+      process.stderr.write(`[TRADE-LOG] Failed to append trade log: ${String(error)}\n`);
+    }
   }
 }
 
 export function getTradeLogFile(date = getLogDate()): string {
-  return path.join(LOG_DIR, `TradeLog-${date}.log`);
+  if (!isServer) return `/logs/TradeLog-${date}.log`;
+  return path.join(getLogDir(), `TradeLog-${date}.log`);
 }
 
 
@@ -199,12 +214,13 @@ export function listLiveRuntimeLogFiles(): Array<{
   sizeBytes: number;
   lastModifiedAt: string | null;
 }> {
+  if (!isServer || !fs?.readdirSync) return [];
   ensureLogFile();
-  const entries = fs.readdirSync(LOG_DIR, { withFileTypes: true });
+  const entries = fs.readdirSync(getLogDir(), { withFileTypes: true });
   return entries
     .filter(entry => entry.isFile() && /^goldcrest-live-\d{4}-\d{2}-\d{2}\.log$/.test(entry.name))
     .map(entry => {
-      const file = path.join(LOG_DIR, entry.name);
+      const file = path.join(getLogDir(), entry.name);
       let stat: fs.Stats | null = null;
       try { stat = fs.statSync(file); } catch { stat = null; }
       return {
