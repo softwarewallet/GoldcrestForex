@@ -33,6 +33,7 @@ import {
   fetchCTraderAssets,
   fetchCTraderConversionSymbols,
   amendLiveCTraderOrder,
+  amendLiveCTraderPositionSLTP,
   cancelLiveCTraderOrder,
   closeLiveCTraderPosition,
   CTraderRawAccount
@@ -891,14 +892,15 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
       const resolvedSymbol = symbolInfo?.symbolName || COMMON_CTRADER_SYMBOLS[symbolIdNum] || String(deal.symbolId);
 
       const detail = deal.closePositionDetail || deal.closePositionDetails;
+      const isClosedDeal = Boolean(detail) || Number(deal.closedVolume || 0) > 0;
       const moneyDigits = Number(detail?.moneyDigits ?? deal.moneyDigits ?? 2);
       const divisor = Number.isInteger(moneyDigits) && moneyDigits > 0 ? 10 ** moneyDigits : 100;
       const gross = detail
         ? Number(detail.grossProfit ?? detail.profit ?? 0) / divisor
-        : (Number(deal.grossProfit ?? deal.profit ?? 0) / divisor);
+        : 0;
       const commission = Number((detail?.commission ?? deal.commission) || 0) / divisor;
       const swap = Number((detail?.swap ?? deal.swap) || 0) / divisor;
-      const netAmount = (gross + commission + swap);
+      const netAmount = isClosedDeal ? (gross + commission + swap) : undefined;
       const entryPrice = detail && Number(detail.entryPrice || 0) > 0 ? Number(detail.entryPrice) : executionPrice;
 
       return {
@@ -915,13 +917,13 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
         filledQuantity: status === 'FILLED' ? volume : 0,
         averageFillPrice: executionPrice > 0 ? executionPrice : undefined,
         commission: commission !== 0 ? commission : (Number(deal.commission || 0) || undefined),
-        netAmount: Number.isFinite(netAmount) ? netAmount : undefined,
-        pnl: Number.isFinite(netAmount) ? netAmount : undefined,
-        realizedPnL: Number.isFinite(netAmount) ? netAmount : undefined,
+        netAmount: isClosedDeal && typeof netAmount === 'number' && Number.isFinite(netAmount) ? netAmount : undefined,
+        pnl: isClosedDeal && typeof netAmount === 'number' && Number.isFinite(netAmount) ? netAmount : undefined,
+        realizedPnL: isClosedDeal && typeof netAmount === 'number' && Number.isFinite(netAmount) ? netAmount : undefined,
         swap: swap !== 0 ? swap : undefined,
         timestamp: Number(deal.executionTimestamp || deal.utcLastUpdateTimestamp || Date.now()),
         brokerOrderId: String(deal.orderId),
-        isClosedDeal: Boolean(detail) || Number(deal.closedVolume || 0) > 0
+        isClosedDeal
       } as any;
     });
   }
@@ -1146,7 +1148,8 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
       this.config.clientId!,
       this.config.clientSecret!,
       this.config.accessToken!,
-      raw.isLive
+      raw.isLive,
+      order.positionId
     );
 
     if (submitted.status === 'REJECTED') {
@@ -1173,7 +1176,9 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
       timestamp: Date.now(),
       brokerOrderId,
       strategyId: order.strategyId,
-      signalId: order.signalId
+      signalId: order.signalId,
+      positionId: submitted.positionId ? String(submitted.positionId) : (order.positionId !== undefined ? String(order.positionId) : undefined),
+      brokerPositionId: submitted.positionId ? String(submitted.positionId) : (order.positionId !== undefined ? String(order.positionId) : undefined)
     };
 
     this.logAction('PLACE_ORDER', 'SUCCESS', this.config.accountId || '', {
@@ -1221,6 +1226,31 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
     const updated = refreshed.find(o => Number(o.brokerOrderId) === brokerId);
     if (updated) return updated;
     throw new BrokerError('ORDER_REJECTED', 'cTrader accepted the amendment but authoritative order state did not contain the order.', 'CTRADER', this.environment);
+  }
+
+  async modifyPosition(positionId: string, modifications: { stopLoss?: number; takeProfit?: number }): Promise<boolean> {
+    this.syncConfig();
+    this.validateCredentials();
+    if (!this.isLive) throw new BrokerError('ENVIRONMENT_MISMATCH', 'cTrader lifecycle actions require LIVE.', 'CTRADER', this.environment);
+    const raw = await this.resolveRawAccount();
+    const brokerId = Number(String(positionId).replace(/^ctrader-/, ''));
+    if (!Number.isSafeInteger(brokerId) || brokerId <= 0) throw new BrokerError('ORDER_REJECTED', 'Invalid cTrader position ID.', 'CTRADER', this.environment);
+
+    const result = await amendLiveCTraderPositionSLTP(
+      raw.ctidTraderAccountId,
+      brokerId,
+      modifications.stopLoss !== undefined && modifications.stopLoss > 0 ? normalizePriceToThreeDigits(Number(modifications.stopLoss)) : modifications.stopLoss,
+      modifications.takeProfit !== undefined && modifications.takeProfit > 0 ? normalizePriceToThreeDigits(Number(modifications.takeProfit)) : modifications.takeProfit,
+      this.config.clientId!,
+      this.config.clientSecret!,
+      this.config.accessToken!,
+      raw.isLive
+    );
+
+    if (![2, 3, 4].includes(result.executionType)) {
+      throw new BrokerError('ORDER_REJECTED', 'cTrader did not confirm the position SL/TP amendment.', 'CTRADER', this.environment);
+    }
+    return true;
   }
 
   async cancelOrder(orderId: string): Promise<boolean> {

@@ -23,6 +23,7 @@ import { analyzeMarketStructure } from './src/markets/forex/marketStructure';
 import { calculateSupportResistance } from './src/markets/forex/supportResistance';
 import { analyzeMultiTimeframe } from './src/markets/forex/multiTimeframe';
 import { explainForexAnalysis } from './src/services/geminiExplainer';
+import { MartingaleRecoveryService } from './src/services/martingaleRecoveryService';
 import { ForexTimeframe } from './src/markets/forex/types';
 
 // Phase 2B Broker Integration
@@ -41,6 +42,7 @@ import { OutcomeEvaluator } from './src/ml/forensics/outcomeEvaluator';
 import { ForensicsAnalyticsService } from './src/ml/forensics/forensicsAnalyticsService';
 import { ForensicsReportGenerator } from './src/ml/forensics/forensicsReportGenerator';
 import { DirectionFusionEngine } from './src/ml/direction/directionFusionEngine';
+import { ShortTpOptimizationEngine } from './src/ml/direction/shortTpOptimizationEngine';
 import { CTraderNativeIndicatorService } from './src/services/cTraderNativeIndicatorService';
 import { initializeLiveRuntimeLog, getLiveRuntimeLogStatus, startLiveRuntimeLog, stopLiveRuntimeLog, getLiveRuntimeLogFile, listLiveRuntimeLogFiles, logApplicationAction, liveRuntimeLog } from './src/services/liveRuntimeLog';
 import { fetchLiveForexNews } from './src/services/liveNewsService';
@@ -1235,8 +1237,8 @@ app.post('/api/config', operatorAuthRequired, async (req: Request, res: Response
 
     if (requestedForexTakeProfitPips !== undefined) {
       const value = Number(requestedForexTakeProfitPips);
-      if (!Number.isFinite(value) || value <= 0 || value > 10000) {
-        return res.status(400).json({ error: 'forexTakeProfitPips must be a positive number no greater than 10000.' });
+      if (!Number.isFinite(value) || value <= 0 || value > 5.0) {
+        return res.status(400).json({ error: 'forexTakeProfitPips must be a positive number no greater than 5.0 pips (Phase 44 hard maximum).' });
       }
       updates.forexTakeProfitPips = value;
     }
@@ -1595,6 +1597,16 @@ app.post('/api/forex/explain', async (req: Request, res: Response) => {
 
 
 
+// Phase 43.1 Martingale Monitoring
+app.get('/api/martingale/sequences', operatorAuthRequired, async (_req: Request, res: Response) => {
+  try {
+    const sequences = MartingaleRecoveryService.getAllActiveSequences();
+    res.json(sequences);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/notes', operatorAuthRequired, async (req: Request, res: Response) => {
   try {
     const rows = await executeQuery<any>('SELECT id, title, content, symbol, created_at, updated_at FROM trade_notes ORDER BY created_at DESC');
@@ -1631,6 +1643,50 @@ app.delete('/api/notes/:id', operatorAuthRequired, async (req: Request, res: Res
   try {
     await executeRun('DELETE FROM trade_notes WHERE id = ?', [req.params.id]);
     res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Phase 44: Short-TP (1-5 Pip) Optimization Engine Endpoints
+app.get('/api/short-tp/research', operatorAuthRequired, async (_req: Request, res: Response) => {
+  try {
+    const research = await ShortTpOptimizationEngine.runHistoricalResearch();
+    res.json(research);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/short-tp/evaluations', operatorAuthRequired, async (req: Request, res: Response) => {
+  try {
+    const limit = Number(req.query.limit) || 50;
+    const evaluations = await ShortTpOptimizationEngine.getRecentEvaluations(limit);
+    res.json(evaluations);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/short-tp/status', operatorAuthRequired, async (_req: Request, res: Response) => {
+  try {
+    const config = getSystemConfig().shortTPOptimization;
+    const summary = await ShortTpOptimizationEngine.getShadowSummary();
+    res.json({
+      config,
+      summary,
+      hardMaxTpPips: 5.0,
+      candidates: [1.0, 2.0, 3.0, 4.0, 5.0]
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/short-tp/evaluate', operatorAuthRequired, async (req: Request, res: Response) => {
+  try {
+    const decision = ShortTpOptimizationEngine.evaluateShortTP(req.body);
+    res.json(decision);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

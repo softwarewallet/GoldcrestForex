@@ -165,6 +165,18 @@ export class CTraderLiveAdapter extends CTraderBrokerAdapter {
       order.stopLoss = normalizePriceToInstrumentDigits(order.stopLoss, instrument.digits);
     }
     if (order.takeProfit !== undefined && order.takeProfit > 0) {
+      // Phase 44 Hard Maximum: Forex Take Profit must never exceed 5.0 pips from execution price
+      const pipSize = instrument.pipSize || (order.symbol.includes('JPY') ? 0.01 : 0.0001);
+      const isBuy = order.side === 'BUY';
+      const maxTpPrice = isBuy
+        ? normalizedExecutionPrice + (5.0 * pipSize)
+        : normalizedExecutionPrice - (5.0 * pipSize);
+      const exceedsMax = isBuy
+        ? order.takeProfit > maxTpPrice + (0.001 * pipSize)
+        : order.takeProfit < maxTpPrice - (0.001 * pipSize);
+      if (exceedsMax) {
+        order.takeProfit = maxTpPrice;
+      }
       order.takeProfit = normalizePriceToInstrumentDigits(order.takeProfit, instrument.digits);
     }
 
@@ -177,7 +189,9 @@ export class CTraderLiveAdapter extends CTraderBrokerAdapter {
   // Direct broker-route orders remain explicitly blocked. The autonomous
   // execution engine uses placeAutonomousOrder() only after its own gates pass.
   override async placeOrder(order: OrderRequest): Promise<NormalizedOrder> {
-    await this.enforceMaxTradeValueSizing(order);
+    if (!order.positionId) {
+      await this.enforceMaxTradeValueSizing(order);
+    }
     return super.placeOrder(order);
   }
 

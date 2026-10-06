@@ -725,7 +725,8 @@ export async function submitLiveCTraderOrder(
   clientId: string,
   clientSecret: string,
   accessToken: string,
-  isLive: boolean
+  isLive: boolean,
+  positionId?: string | number
 ): Promise<CTraderOrderSubmission> {
   if (!Number.isFinite(quantity) || quantity <= 0) {
     throw new Error('cTrader order volume must be positive.');
@@ -764,10 +765,15 @@ export async function submitLiveCTraderOrder(
         orderType: mappedType,
         tradeSide: mappedSide,
         volume,
-        clientOrderId: requestClientId,
-        // Hardcoded: every cTrader order must have a trailing stop loss.
-        trailingStopLoss: true
+        clientOrderId: requestClientId
       };
+      
+      if (positionId !== undefined) {
+        payload.positionId = Number(positionId);
+      } else {
+        // Hardcoded: every normal cTrader order must have a trailing stop loss.
+        payload.trailingStopLoss = true;
+      }
 
       if (orderType === 'LIMIT' && price !== undefined) payload.limitPrice = price;
       if (orderType === 'STOP' && price !== undefined) payload.stopPrice = price;

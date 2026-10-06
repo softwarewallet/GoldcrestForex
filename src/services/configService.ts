@@ -46,7 +46,19 @@ export interface SystemConfig {
   autoLiveForexPairs: string[];
   autoLiveIndianUnderlyings: string[];
   financialDisclaimer: string;
+  dailyProfitTargetUsd: number;
   martingale: MartingaleConfig;
+  shortTPOptimization: ShortTPOptimizationConfig;
+}
+
+export interface ShortTPOptimizationConfig {
+  enabled: boolean;
+  mode: 'SHADOW' | 'CONTROLLED_ACTIVE';
+  maxTpPips: number;
+  minExpectedNetR: number;
+  reversalProximityPct: number;
+  defaultRiskBoundaryPips: number;
+  lookbackObservations: number;
 }
 
 const isServer = typeof window === 'undefined' && typeof process !== 'undefined' && Boolean(process?.versions?.node);
@@ -97,7 +109,9 @@ const PERSISTED_KEYS: readonly (keyof SystemConfig)[] = [
   'autoLiveForexPairs',
   'autoLiveIndianUnderlyings',
   'financialDisclaimer',
-  'martingale'
+  'dailyProfitTargetUsd',
+  'martingale',
+  'shortTPOptimization'
 ];
 
 let activeConfig: SystemConfig = {
@@ -121,7 +135,8 @@ let activeConfig: SystemConfig = {
   autoLiveMinSignalScore: 75,
   autoLiveMaxTradesPerPair: 4,
   forexStopLossPips: 20,
-  forexTakeProfitPips: 40,
+  forexTakeProfitPips: 3.0,
+  dailyProfitTargetUsd: 500,
   // If the operator has not persisted a working-universe selection yet,
   // Auto Live evaluates the complete supported Forex universe rather than
   // silently falling back to the old five-pair subset.
@@ -143,6 +158,15 @@ let activeConfig: SystemConfig = {
     maximumBasketDrawdownPct: 15.0,
     maximumMarginUtilizationPct: 50.0,
     maximumRecoveryDurationMin: 120
+  },
+  shortTPOptimization: {
+    enabled: false,
+    mode: 'SHADOW',
+    maxTpPips: 5.0,
+    minExpectedNetR: 0.15,
+    reversalProximityPct: 80.0,
+    defaultRiskBoundaryPips: 15.0,
+    lookbackObservations: 500
   }
 };
 
@@ -168,7 +192,13 @@ function sanitizePersistedConfig(input: unknown): Partial<SystemConfig> {
     const value = input[key];
 
     if (typeof value === 'number') {
-      if (Number.isFinite(value)) (output as any)[key] = value;
+      if (Number.isFinite(value)) {
+        if (key === 'forexTakeProfitPips') {
+          (output as any)[key] = Math.min(5.0, Math.max(0.5, value));
+        } else {
+          (output as any)[key] = value;
+        }
+      }
       continue;
     }
 

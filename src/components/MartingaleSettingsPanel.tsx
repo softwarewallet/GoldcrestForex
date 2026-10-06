@@ -40,6 +40,7 @@ export const MartingaleSettingsPanel: React.FC = () => {
   });
 
   const [saveSuccess, setSaveSuccess] = useState<boolean>(false);
+  const [activeSequences, setActiveSequences] = useState<any[]>([]);
 
   useEffect(() => {
     let active = true;
@@ -56,9 +57,26 @@ export const MartingaleSettingsPanel: React.FC = () => {
         console.error('Failed to load martingale config:', err);
       }
     };
+    
+    const loadSequences = async () => {
+      try {
+        const res = await fetch('/api/martingale/sequences');
+        if (res.ok && active) {
+          const data = await res.json();
+          setActiveSequences(data);
+        }
+      } catch (err) {
+        console.error('Failed to load active sequences:', err);
+      }
+    };
+
     loadConfig();
+    loadSequences();
+    const interval = setInterval(loadSequences, 5000);
+    
     return () => {
       active = false;
+      clearInterval(interval);
     };
   }, []);
 
@@ -250,6 +268,72 @@ export const MartingaleSettingsPanel: React.FC = () => {
           />
         </div>
       </div>
+      
+      {/* Active Sequences Grid */}
+      {activeSequences.length > 0 && (
+        <div className="space-y-4 pt-2">
+          <div className="flex items-center gap-2 text-sm font-semibold text-slate-300">
+            <Layers className="w-4 h-4 text-indigo-400" />
+            <h3>Active Recovery Sequences ({activeSequences.length})</h3>
+          </div>
+          <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950">
+            <table className="w-full text-left text-[11px] font-mono">
+              <thead className="bg-slate-900/50 text-slate-400 border-b border-slate-800">
+                <tr>
+                  <th className="px-3 py-2.5">ID / Pair</th>
+                  <th className="px-3 py-2.5">Side</th>
+                  <th className="px-3 py-2.5">Level</th>
+                  <th className="px-3 py-2.5">Volume</th>
+                  <th className="px-3 py-2.5">Avg Entry</th>
+                  <th className="px-3 py-2.5">Next Trigger</th>
+                  <th className="px-3 py-2.5">Current TP</th>
+                  <th className="px-3 py-2.5">Last Recovery</th>
+                  <th className="px-3 py-2.5">Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/50">
+                {activeSequences.map(seq => (
+                  <tr key={seq.id} className="hover:bg-slate-800/30 transition-colors">
+                    <td className="px-3 py-2.5">
+                      <div className="text-white font-bold">{seq.pair}</div>
+                      <div className="text-[9px] text-slate-500">#{seq.positionId}</div>
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <span className={`px-1.5 py-0.5 rounded ${seq.direction === 'BUY' ? 'bg-emerald-900/40 text-emerald-400' : 'bg-rose-900/40 text-rose-400'}`}>
+                        {seq.direction}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2.5 text-slate-300">Lvl {seq.recoveryLevel}</td>
+                    <td className="px-3 py-2.5 text-slate-300">
+                      {seq.currentVolume >= 500
+                        ? `${(seq.currentVolume / 100000).toFixed(2)} lots`
+                        : `${seq.currentVolume.toFixed(2)} lots`}
+                    </td>
+                    <td className="px-3 py-2.5 text-slate-300">{seq.currentAverageEntry.toFixed(seq.pair.includes('JPY') ? 3 : 5)}</td>
+                    <td className={`px-3 py-2.5 font-bold ${seq.direction === 'BUY' ? 'text-rose-400' : 'text-emerald-400'}`}>
+                      {seq.nextTriggerPrice.toFixed(seq.pair.includes('JPY') ? 3 : 5)}
+                    </td>
+                    <td className="px-3 py-2.5 text-emerald-400 font-bold">{seq.currentDynamicTP.toFixed(seq.pair.includes('JPY') ? 3 : 5)}</td>
+                    <td className="px-3 py-2.5 text-[10px] text-slate-400">
+                      {seq.lastRecoveryAt ? new Date(seq.lastRecoveryAt).toLocaleTimeString() : 'Initial'}
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <span className={`px-2 py-0.5 rounded-full text-[9px] uppercase font-bold ${
+                        seq.status === 'WAITING_NEXT_TRIGGER' ? 'bg-blue-900/40 text-blue-400' :
+                        seq.status === 'RECOVERY_SUBMITTED' ? 'bg-amber-900/40 text-amber-400 animate-pulse' :
+                        seq.status === 'TP_MODIFICATION_PENDING' ? 'bg-indigo-900/40 text-indigo-400 animate-pulse' :
+                        'bg-slate-800 text-slate-400'
+                      }`}>
+                        {seq.status.replace(/_/g, ' ')}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* Footer / Save Button */}
       <div className="flex items-center justify-between border-t border-slate-800 pt-4">

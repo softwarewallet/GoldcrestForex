@@ -8,6 +8,7 @@ import { PredictionForensicsPage } from './components/PredictionForensicsPage';
 import { DirectionAnalysisPage } from './components/DirectionAnalysisPage';
 import { NativeIndicatorsReportPage } from './components/NativeIndicatorsReportPage';
 import { DynamicExitAnalysisPage } from './components/DynamicExitAnalysisPage';
+import { ShortTPOptimizationPage } from './components/ShortTPOptimizationPage';
 import { TradingOperationsDashboard } from './components/TradingOperationsDashboard';
 import { TradingControlCenter } from './components/TradingControlCenter';
 import { HistoryPage } from './components/HistoryPage';
@@ -368,6 +369,10 @@ export default function App() {
 
             {activeTab === 'dynamic_exits' && (
               <DynamicExitAnalysisPage />
+            )}
+
+            {activeTab === 'short_tp' && (
+              <ShortTPOptimizationPage />
             )}
 
             {(activeTab === 'pnl' || activeTab === 'accounting') && (

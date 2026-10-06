@@ -88,8 +88,11 @@ export function calculateForexPipTargets(
     throw new Error('INVALID_TAKE_PROFIT_PIPS: Take Profit in pips must be greater than zero.');
   }
 
+  // Phase 44 Hard Maximum: Forex Take Profit must never exceed 5.0 pips
+  const effectiveTakeProfitPips = Math.min(5.0, takeProfitPips);
+
   const stopDistance = stopLossPips * pipSize;
-  const takeProfitDistance = takeProfitPips * pipSize;
+  const takeProfitDistance = effectiveTakeProfitPips * pipSize;
   const stopLoss = side === 'BUY'
     ? entryPrice - stopDistance
     : entryPrice + stopDistance;
@@ -106,7 +109,7 @@ export function calculateForexPipTargets(
     stopLoss: Number(stopLoss.toFixed(digits)),
     takeProfit: Number(takeProfit.toFixed(digits)),
     stopLossPips,
-    takeProfitPips,
+    takeProfitPips: effectiveTakeProfitPips,
     pipSize
   };
 }

@@ -669,12 +669,44 @@ function initSchema(db: Database) {
       max_floating_loss REAL,
       max_margin_used REAL,
       final_realized_pnl REAL,
-      completion_reason TEXT
+      completion_reason TEXT,
+      broker TEXT,
+      environment TEXT,
+      last_broker_order_id TEXT,
+      last_broker_position_id TEXT,
+      last_recovery_volume REAL,
+      updated_at INTEGER
     );
 
     CREATE INDEX IF NOT EXISTS idx_martingale_pos ON martingale_sequences(position_id);
     CREATE INDEX IF NOT EXISTS idx_martingale_pair ON martingale_sequences(pair);
     CREATE INDEX IF NOT EXISTS idx_martingale_status ON martingale_sequences(status);
+
+    CREATE TABLE IF NOT EXISTS short_tp_evaluations (
+      id TEXT PRIMARY KEY,
+      prediction_id TEXT NOT NULL,
+      timestamp INTEGER NOT NULL,
+      pair TEXT NOT NULL,
+      direction TEXT NOT NULL,
+      entry_price REAL NOT NULL,
+      tp_candidates_json TEXT NOT NULL,
+      selected_tp_pips REAL,
+      target_price REAL,
+      expected_net_r REAL,
+      expected_net_pips REAL,
+      target_hit_probability REAL,
+      stop_probability REAL,
+      timeout_probability REAL,
+      decision TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      model_version TEXT NOT NULL,
+      research_version TEXT NOT NULL,
+      mode TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_short_tp_pred ON short_tp_evaluations(prediction_id);
+    CREATE INDEX IF NOT EXISTS idx_short_tp_pair ON short_tp_evaluations(pair);
   `;
 
   db.run(schemaSQL);
@@ -690,7 +722,13 @@ function initSchema(db: Database) {
     'ALTER TABLE signals ADD COLUMN market_regime TEXT;',
     'ALTER TABLE signals ADD COLUMN session TEXT;',
     'ALTER TABLE signals ADD COLUMN data_status TEXT;',
-    'ALTER TABLE signals ADD COLUMN strategy_version TEXT;'
+    'ALTER TABLE signals ADD COLUMN strategy_version TEXT;',
+    'ALTER TABLE martingale_sequences ADD COLUMN broker TEXT;',
+    'ALTER TABLE martingale_sequences ADD COLUMN environment TEXT;',
+    'ALTER TABLE martingale_sequences ADD COLUMN last_broker_order_id TEXT;',
+    'ALTER TABLE martingale_sequences ADD COLUMN last_broker_position_id TEXT;',
+    'ALTER TABLE martingale_sequences ADD COLUMN last_recovery_volume REAL;',
+    'ALTER TABLE martingale_sequences ADD COLUMN updated_at INTEGER;'
   ];
   try {
     db.run('ALTER TABLE execution_intents ADD COLUMN claim_token TEXT;');

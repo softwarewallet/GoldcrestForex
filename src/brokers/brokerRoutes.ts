@@ -801,18 +801,23 @@ brokerRouter.get('/today-trades-summary', async (_req: Request, res: Response) =
         ? await adapter.getOrderHistoryRange(from, to)
         : await adapter.getOrderHistory();
 
-      const todayHistory = (history || []).filter(o => Number(o.timestamp) >= from);
-      closedTrades.push(...todayHistory);
+      // Only include deals that closed a position today
+      const todayClosedDeals = (history || []).filter(o => {
+        const ts = Number(o.timestamp);
+        if (ts < from) return false;
+        if (o.isClosedDeal !== undefined) {
+          return Boolean(o.isClosedDeal);
+        }
+        return (o.realizedPnL !== undefined || o.netAmount !== undefined || o.pnl !== undefined) && o.status === 'FILLED';
+      });
+      closedTrades.push(...todayClosedDeals);
     } catch {
       // Best-effort
     }
   }));
 
-  // 2. Fetch current live positions & orders (all currently pending/open trades in the system)
-  const [openPositions, openOrders] = await Promise.all([
-    fetchLivePositions().catch(() => positionsCache.payload || []),
-    fetchLiveOrders().catch(() => ordersCache.payload || [])
-  ]);
+  // 2. Fetch current live positions (all currently pending/open trades in the system)
+  const openPositions = await fetchLivePositions().catch(() => positionsCache.payload || []);
 
   // 3. Query SQLite recorded trades for today
   try {
@@ -832,7 +837,8 @@ brokerRouter.get('/today-trades-summary', async (_req: Request, res: Response) =
             averageFillPrice: st.exit_price,
             filledQuantity: st.size,
             netAmount: st.pnl,
-            status: st.status
+            status: st.status,
+            isClosedDeal: true
           });
         }
       }
@@ -850,10 +856,10 @@ brokerRouter.get('/today-trades-summary', async (_req: Request, res: Response) =
     let pnl = 0;
     if (typeof trade.netAmount === 'number' && Number.isFinite(trade.netAmount)) {
       pnl = trade.netAmount;
-    } else if (typeof trade.pnl === 'number' && Number.isFinite(trade.pnl)) {
-      pnl = trade.pnl;
     } else if (typeof trade.realizedPnL === 'number' && Number.isFinite(trade.realizedPnL)) {
       pnl = trade.realizedPnL;
+    } else if (typeof trade.pnl === 'number' && Number.isFinite(trade.pnl)) {
+      pnl = trade.pnl;
     } else {
       const entry = Number(trade.price ?? trade.entryPrice ?? 0);
       const exit = Number(trade.averageFillPrice ?? trade.closingPrice ?? trade.exitPrice ?? 0);
@@ -873,31 +879,25 @@ brokerRouter.get('/today-trades-summary', async (_req: Request, res: Response) =
     }
   }
 
-  for (const pos of openPositions) {
+  for (const pos of (Array.isArray(openPositions) ? openPositions : [])) {
     const uPnl = Number(pos.unrealizedPnL ?? pos.unrealizedPnl ?? 0);
     if (Number.isFinite(uPnl)) {
       unrealizedPnL += uPnl;
     }
   }
 
-  const isOpenedToday = (item: any) => {
-    const ts = item?.entryTime || item?.openTime || item?.timestamp || item?.createdTime || item?.time || item?.created_at;
-    if (!ts) return true;
-    const timeNum = typeof ts === 'string' ? new Date(ts).getTime() : Number(ts);
-    return Number.isFinite(timeNum) ? timeNum >= from : true;
-  };
-
-  const todayPendingPositions = (openPositions || []).filter(isOpenedToday).length;
-  const todayPendingOrders = (openOrders || []).filter(isOpenedToday).length;
-  const todayPendingTrades = todayPendingPositions + todayPendingOrders;
-
-  // Pending trades = currently open / pending trades in the system (can include carry-forward from last 1 or 2 days)
-  const pendingTrades = (openPositions || []).length + (openOrders || []).length;
-  // Total trades = strictly today's trades only (closed today + opened today)
-  const totalTrades = closedTrades.length + todayPendingTrades;
+  // Pending trades = currently open positions in the system
+  const pendingTrades = Array.isArray(openPositions) ? openPositions.length : 0;
+  // Total trades = completed today (winning + losing) + currently open pending
+  const totalTrades = winningTrades + losingTrades + pendingTrades;
   const netPnL = realizedPnL + unrealizedPnL;
 
   const formattedNetPnL = `${netPnL >= 0 ? '+' : '-'}$${Math.abs(netPnL).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+  const config = getSystemConfig();
+  const dailyProfitTargetUsd = Number(config.dailyProfitTargetUsd ?? 500);
+  const remainingTargetUsd = dailyProfitTargetUsd - netPnL;
+  const formattedRemainingTarget = `${remainingTargetUsd >= 0 ? '$' : '-$'}${Math.abs(remainingTargetUsd).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
   res.json({
     totalTrades,
@@ -908,6 +908,9 @@ brokerRouter.get('/today-trades-summary', async (_req: Request, res: Response) =
     unrealizedPnL,
     netPnL,
     formattedNetPnL,
+    dailyProfitTargetUsd,
+    remainingTargetUsd,
+    formattedRemainingTarget,
     date: startOfDay.toISOString().split('T')[0],
     from,
     to
@@ -1049,7 +1052,7 @@ brokerRouter.post('/order', async (req: Request, res: Response) => {
           Number(orderReq.price),
           precisionInstrument.pipSize,
           config.forexStopLossPips,
-          config.forexTakeProfitPips
+          Math.min(5.0, Number(config.forexTakeProfitPips) || 3.0)
         );
         orderReq.stopLoss = pipTargets.stopLoss;
         orderReq.takeProfit = pipTargets.takeProfit;

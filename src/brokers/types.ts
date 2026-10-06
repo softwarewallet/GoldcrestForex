@@ -127,8 +127,16 @@ export interface NormalizedOrder {
   strategyId?: string;
   signalId?: string;
   rejectionReason?: string;
+  /** Linked position identity when the order modifies or increases an existing position. */
+  positionId?: string | number;
+  brokerPositionId?: string;
   /** Broker-native execution events when the adapter can expose them authoritatively. */
   fillEvents?: NormalizedFill[];
+  netAmount?: number;
+  pnl?: number;
+  realizedPnL?: number;
+  swap?: number;
+  isClosedDeal?: boolean;
 }
 
 export interface OrderRequest {
@@ -145,6 +153,8 @@ export interface OrderRequest {
   strategyId?: string;
   signalId?: string;
   comment?: string;
+  /** Optional: link order to an existing position (e.g. for Martingale recovery volume increase) */
+  positionId?: string | number;
 }
 
 export interface OrderModification {
@@ -221,6 +231,7 @@ export interface BrokerAdapter {
   getInstruments(): Promise<BrokerInstrument[]>;
   placeOrder(order: OrderRequest): Promise<NormalizedOrder>;
   modifyOrder(orderId: string, modifications: OrderModification): Promise<NormalizedOrder>;
+  modifyPosition?(positionId: string, modifications: { stopLoss?: number; takeProfit?: number }): Promise<boolean>;
   cancelOrder(orderId: string): Promise<boolean>;
   closePosition(positionId: string, quantity?: number): Promise<boolean>;
   getOrderStatus(orderId: string, requestedQuantity?: number): Promise<NormalizedOrder>;

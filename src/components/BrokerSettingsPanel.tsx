@@ -65,10 +65,11 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
   const [loading, setLoading] = useState(true);
   const [maxForexUsd, setMaxForexUsd] = useState(100000);
   const [maxIndianInr, setMaxIndianInr] = useState(1000000);
+  const [dailyProfitTargetUsd, setDailyProfitTargetUsd] = useState(500);
   const [savingLimits, setSavingLimits] = useState(false);
   const [limitMessage, setLimitMessage] = useState('');
   const [forexStopLossPips, setForexStopLossPips] = useState(20);
-  const [forexTakeProfitPips, setForexTakeProfitPips] = useState(40);
+  const [forexTakeProfitPips, setForexTakeProfitPips] = useState(3.0);
   const [savingForexPipTargets, setSavingForexPipTargets] = useState(false);
   const [forexPipTargetsMessage, setForexPipTargetsMessage] = useState('');
   const [autoLiveMinSignalScore, setAutoLiveMinSignalScore] = useState(75);
@@ -129,6 +130,9 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
         }
         if (Number.isFinite(Number(config.forexTakeProfitPips))) {
           setForexTakeProfitPips(Number(config.forexTakeProfitPips));
+        }
+        if (Number.isFinite(Number(config.dailyProfitTargetUsd))) {
+          setDailyProfitTargetUsd(Number(config.dailyProfitTargetUsd));
         }
         if (Array.isArray(config.autoLiveForexPairs) && config.autoLiveForexPairs.length > 0) {
           setAutoLiveForexPairs(config.autoLiveForexPairs);
@@ -273,8 +277,17 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
         <div className="flex items-start gap-3">
           <ShieldCheck className="w-5 h-5 text-amber-400 mt-0.5" />
           <div className="flex-1">
-            <div className="text-sm font-bold text-white">Maximum Trade Value Limits</div>
-            <div className="grid md:grid-cols-2 gap-4 mt-4">
+            <div className="text-sm font-bold text-white">Daily Profit Target & Trade Value Limits</div>
+            <div className="grid md:grid-cols-3 gap-4 mt-4">
+              <label className="block space-y-1">
+                <span className="text-[10px] uppercase text-emerald-400 font-mono flex items-center gap-1"><DollarSign className="w-3 h-3" /> Daily Profit Target</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-slate-500 font-mono">$</span>
+                  <input type="number" min="1" step="1" value={dailyProfitTargetUsd} onChange={e => setDailyProfitTargetUsd(Number(e.target.value))} className={inputClass} />
+                  <span className="text-[10px] text-slate-500 font-mono whitespace-nowrap">USD</span>
+                </div>
+                <span className="text-[9px] text-slate-500 block">Remaining Target = Daily Target - Today's Net P&L</span>
+              </label>
               <label className="block space-y-1">
                 <span className="text-[10px] uppercase text-slate-500 font-mono flex items-center gap-1"><DollarSign className="w-3 h-3" /> cTrader / Forex maximum</span>
                 <div className="flex items-center gap-2">
@@ -282,6 +295,7 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
                   <input type="number" min="0.01" step="0.01" value={maxForexUsd} onChange={e => setMaxForexUsd(Number(e.target.value))} className={inputClass} />
                   <span className="text-[10px] text-slate-500 font-mono whitespace-nowrap">USD</span>
                 </div>
+                <span className="text-[9px] text-slate-500 block">Maximum notional trade size</span>
               </label>
               <label className="block space-y-1">
                 <span className="text-[10px] uppercase text-slate-500 font-mono flex items-center gap-1"><IndianRupee className="w-3 h-3" /> 5paisa / Indian maximum</span>
@@ -290,13 +304,14 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
                   <input type="number" min="0.01" step="0.01" value={maxIndianInr} onChange={e => setMaxIndianInr(Number(e.target.value))} className={inputClass} />
                   <span className="text-[10px] text-slate-500 font-mono whitespace-nowrap">INR</span>
                 </div>
+                <span className="text-[9px] text-slate-500 block">Maximum Indian order size</span>
               </label>
             </div>
             <div className="flex items-center gap-3 mt-4">
               <button
                 onClick={async () => {
-                  if (!Number.isFinite(maxForexUsd) || maxForexUsd <= 0 || !Number.isFinite(maxIndianInr) || maxIndianInr <= 0) {
-                    setLimitMessage('Both maximum trade values must be positive numbers.');
+                  if (!Number.isFinite(maxForexUsd) || maxForexUsd <= 0 || !Number.isFinite(maxIndianInr) || maxIndianInr <= 0 || !Number.isFinite(dailyProfitTargetUsd) || dailyProfitTargetUsd <= 0) {
+                    setLimitMessage('Daily profit target and trade value limits must be positive numbers.');
                     return;
                   }
                   setSavingLimits(true);
@@ -305,11 +320,15 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
                     const res = await fetch('/api/config', {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ maxTradeValueForexUsd: maxForexUsd, maxTradeValueIndianInr: maxIndianInr })
+                      body: JSON.stringify({
+                        maxTradeValueForexUsd: maxForexUsd,
+                        maxTradeValueIndianInr: maxIndianInr,
+                        dailyProfitTargetUsd
+                      })
                     });
                     const data = await res.json();
                     if (!res.ok) throw new Error(data.error || 'Failed to save limits');
-                    setLimitMessage('Trade value limits saved to SQLite and enforced server-side.');
+                    setLimitMessage('Daily profit target and trade value limits saved to SQLite and active.');
                     onRefreshGlobal?.();
                   } catch (err: any) {
                     setLimitMessage(err.message || 'Failed to save limits');
@@ -320,7 +339,7 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
                 disabled={savingLimits}
                 className="px-4 py-2 rounded bg-amber-700 hover:bg-amber-600 disabled:opacity-50 text-white text-xs font-bold"
               >
-                {savingLimits ? 'SAVING…' : 'SAVE TRADE LIMITS'}
+                {savingLimits ? 'SAVING…' : 'SAVE TARGETS & LIMITS'}
               </button>
               {limitMessage && <span className="text-[10px] text-slate-400 font-mono">{limitMessage}</span>}
             </div>
@@ -342,15 +361,15 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
                 </div>
               </label>
               <label className="block space-y-1">
-                <span className="text-[10px] uppercase text-slate-500 font-mono">Take Profit</span>
+                <span className="text-[10px] uppercase text-slate-500 font-mono">Take Profit (Max 5.0 Pips)</span>
                 <div className="flex items-center gap-2">
-                  <input type="number" min="0.1" max="10000" step="0.1" value={forexTakeProfitPips} onChange={e => setForexTakeProfitPips(Number(e.target.value))} className={inputClass} />
+                  <input type="number" min="0.5" max="5.0" step="0.5" value={forexTakeProfitPips} onChange={e => setForexTakeProfitPips(Number(e.target.value))} className={inputClass} />
                   <span className="text-[10px] text-slate-500 font-mono whitespace-nowrap">PIPS</span>
                 </div>
               </label>
             </div>
             <div className="mt-3 text-[10px] text-slate-600 font-mono">
-              BUY: SL below entry / TP above entry · SELL: SL above entry / TP below entry.
+              BUY: SL below entry / TP above entry · SELL: SL above entry / TP below entry (Hard Maximum TP: 5.0 Pips).
             </div>
             <div className="flex items-center gap-3 mt-4">
               <button
@@ -363,8 +382,8 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
                     setForexPipTargetsMessage('Stop Loss must be greater than 0 and no greater than 10000 pips.');
                     return;
                   }
-                  if (!Number.isFinite(takeProfit) || takeProfit <= 0 || takeProfit > 10000) {
-                    setForexPipTargetsMessage('Take Profit must be greater than 0 and no greater than 10000 pips.');
+                  if (!Number.isFinite(takeProfit) || takeProfit <= 0 || takeProfit > 5.0) {
+                    setForexPipTargetsMessage('Take Profit must be between 0.5 and 5.0 pips (Phase 44 hard maximum).');
                     return;
                   }
                   setSavingForexPipTargets(true);

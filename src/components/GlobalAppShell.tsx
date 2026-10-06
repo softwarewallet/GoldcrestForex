@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import {
   Bell, BookOpen, CandlestickChart,
-  ListChecks, Settings, Sparkles, Activity, History as HistoryIcon, Database, BarChart2, Eye, Compass, Zap, Sliders
+  ListChecks, Settings, Sparkles, Activity, History as HistoryIcon, Database, BarChart2, Eye, Compass, Zap, Sliders, Target
 } from 'lucide-react';
 import { ForexSessionState, IndianSessionState } from '../markets/common/types';
 
@@ -24,6 +24,7 @@ const nav = [
   { id: 'direction_analysis', label: 'Direction', icon: Compass },
   { id: 'native_indicators', label: 'Native Ind', icon: Zap },
   { id: 'dynamic_exits', label: 'Dynamic Exits', icon: Sliders },
+  { id: 'short_tp', label: 'Short TP (1-5p)', icon: Target },
   { id: 'control_center', label: 'Control Center', icon: ListChecks },
   { id: 'history', label: 'History', icon: HistoryIcon },
   { id: 'database', label: 'Database', icon: Database },
@@ -40,6 +41,9 @@ interface TodayTradesSummary {
   pendingTrades: number;
   netPnL: number;
   formattedNetPnL: string;
+  dailyProfitTargetUsd: number;
+  remainingTargetUsd: number;
+  formattedRemainingTarget: string;
 }
 
 export const GlobalAppShell: React.FC<GlobalAppShellProps> = ({
@@ -54,7 +58,10 @@ export const GlobalAppShell: React.FC<GlobalAppShellProps> = ({
     losingTrades: 0,
     pendingTrades: 0,
     netPnL: 0,
-    formattedNetPnL: '$0.00'
+    formattedNetPnL: '$0.00',
+    dailyProfitTargetUsd: 500,
+    remainingTargetUsd: 500,
+    formattedRemainingTarget: '$500.00'
   });
 
   useEffect(() => {
@@ -90,17 +97,16 @@ export const GlobalAppShell: React.FC<GlobalAppShellProps> = ({
           }
         }
 
-        const pendingTrades = Math.max(
-          Number(summaryData?.pendingTrades || 0),
-          positionsCount + ordersCount
-        );
-
+        const pendingTrades = Number(summaryData?.pendingTrades !== undefined ? summaryData.pendingTrades : positionsCount);
         const winningTrades = Number(summaryData?.winningTrades || 0);
         const losingTrades = Number(summaryData?.losingTrades || 0);
-        const totalTrades = Number(summaryData?.totalTrades !== undefined ? summaryData.totalTrades : (winningTrades + losingTrades));
+        const totalTrades = Number(summaryData?.totalTrades !== undefined ? summaryData.totalTrades : (winningTrades + losingTrades + pendingTrades));
         const realizedPnL = Number(summaryData?.realizedPnL || 0);
         const netPnL = Number(summaryData?.netPnL !== undefined ? summaryData.netPnL : (realizedPnL + positionsUnrealizedPnL));
         const formattedNetPnL = summaryData?.formattedNetPnL || `${netPnL >= 0 ? '+' : '-'}$${Math.abs(netPnL).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+        const dailyProfitTargetUsd = Number(summaryData?.dailyProfitTargetUsd ?? 500);
+        const remainingTargetUsd = Number(summaryData?.remainingTargetUsd !== undefined ? summaryData.remainingTargetUsd : (dailyProfitTargetUsd - netPnL));
+        const formattedRemainingTarget = summaryData?.formattedRemainingTarget || `${remainingTargetUsd >= 0 ? '$' : '-$'}${Math.abs(remainingTargetUsd).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
         if (mounted) {
           setTodayTrades({
@@ -109,7 +115,10 @@ export const GlobalAppShell: React.FC<GlobalAppShellProps> = ({
             losingTrades,
             pendingTrades,
             netPnL,
-            formattedNetPnL
+            formattedNetPnL,
+            dailyProfitTargetUsd,
+            remainingTargetUsd,
+            formattedRemainingTarget
           });
         }
       } catch {
@@ -214,6 +223,13 @@ export const GlobalAppShell: React.FC<GlobalAppShellProps> = ({
           <span className="text-slate-400 uppercase text-[11px] tracking-wide">Today's Net P&L:</span>
           <span className={`font-bold ${todayTrades.netPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
             {todayTrades.formattedNetPnL}
+          </span>
+        </div>
+
+        <div className="flex items-center gap-2 whitespace-nowrap">
+          <span className="text-slate-400 uppercase text-[11px] tracking-wide">Remaining Target:</span>
+          <span className={`font-bold ${todayTrades.remainingTargetUsd <= 0 ? 'text-emerald-400' : 'text-cyan-300'}`}>
+            {todayTrades.formattedRemainingTarget}
           </span>
         </div>
 
