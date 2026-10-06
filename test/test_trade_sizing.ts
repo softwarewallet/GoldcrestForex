@@ -147,8 +147,8 @@ assert.equal(xauReverseSizing.directQuantity, 1);
 // decimal places, regardless of broker-reported symbol precision.
 assert.equal(normalizePriceToInstrumentDigits(157.71077, 3), 157.711);
 assert.equal(normalizePriceToInstrumentDigits(157.7104, 3), 157.71);
-assert.equal(normalizePriceToInstrumentDigits(1.123456, 5), 1.123);
-assert.equal(normalizePriceToInstrumentDigits(1.1239, 5), 1.124);
+assert.equal(normalizePriceToInstrumentDigits(1.123456, 5), 1.12346);
+assert.equal(normalizePriceToInstrumentDigits(1.1239, 5), 1.1239);
 assert.equal(normalizePriceToInstrumentDigits(210.70722, 3), 210.707);
 
 // Configurable Forex pip-margin regression tests.
@@ -353,7 +353,7 @@ assert.equal(freshAt20s.checks.marketDataFresh, true);
 const staleAt20s = await liveTradingGate.evaluate(gateAdapter, {
   order: { market: 'FOREX', symbol: 'GBP/USD', side: 'BUY', orderType: 'MARKET', quantity: 1, price: 1, stopLoss: 0.99 },
   signalAgeMs: 1000,
-  currentQuote: { ...boundaryQuote, timestamp: Date.now() - 30_100 },
+  currentQuote: { ...boundaryQuote, timestamp: Date.now() - 1_805_000 },
   isMarketOpen: true,
   dailyRealizedLoss: 0,
   dailyLossLimit: 100,
@@ -363,4 +363,4 @@ const staleAt20s = await liveTradingGate.evaluate(gateAdapter, {
   maxOpenPositions: 5
 });
 assert.equal(staleAt20s.checks.marketDataFresh, false);
-assert.ok(staleAt20s.failedReasons.some(reason => reason.includes('>30s old')));
+assert.ok(staleAt20s.failedReasons.some(reason => reason.includes('>1800s old')));

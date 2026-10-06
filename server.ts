@@ -934,11 +934,12 @@ async function hydratePersistedTradeLimits(): Promise<void> {
 
   for (const [dbKey, configKey] of [
     ['AUTO_LIVE_FOREX_PAIRS', 'autoLiveForexPairs'],
-    ['AUTO_LIVE_INDIAN_UNDERLYINGS', 'autoLiveIndianUnderlyings']
+    ['AUTO_LIVE_INDIAN_UNDERLYINGS', 'autoLiveIndianUnderlyings'],
+    ['MARTINGALE', 'martingale']
   ] as Array<[string, string]>) {
     try {
       const parsed = JSON.parse(values[dbKey] || 'null');
-      if (Array.isArray(parsed) && parsed.every(item => typeof item === 'string')) {
+      if (parsed !== null) {
         persistedUpdates[configKey] = parsed;
       }
     } catch {}
@@ -1273,7 +1274,7 @@ app.post('/api/config', operatorAuthRequired, async (req: Request, res: Response
     // cannot reset a different setting. configService has already written the
     // same merged configuration to an atomic JSON file.
     await executeRun(
-      'INSERT OR REPLACE INTO system_settings (key, value, updated_at) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?)',
+      'INSERT OR REPLACE INTO system_settings (key, value, updated_at) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?)',
       [
         'SELECTED_CTRADER_ACCOUNT_ID', String(updated.selectedCtraderAccountId || ''), now,
         'SELECTED_CTRADER_ACCOUNT_CURRENCY', String(updated.selectedCtraderAccountCurrency || ''), now,
@@ -1295,7 +1296,8 @@ app.post('/api/config', operatorAuthRequired, async (req: Request, res: Response
         'FOREX_TAKE_PROFIT_PIPS', String(updated.forexTakeProfitPips), now,
         'AUTO_LIVE_FOREX_PAIRS', JSON.stringify(updated.autoLiveForexPairs || []), now,
         'AUTO_LIVE_INDIAN_UNDERLYINGS', JSON.stringify(updated.autoLiveIndianUnderlyings || []), now,
-        'FINANCIAL_DISCLAIMER', String(updated.financialDisclaimer || ''), now
+        'FINANCIAL_DISCLAIMER', String(updated.financialDisclaimer || ''), now,
+        'MARTINGALE', JSON.stringify(updated.martingale || {}), now
       ]
     );
     res.json({ success: true, config: updated });

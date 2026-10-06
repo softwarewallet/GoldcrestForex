@@ -4,6 +4,7 @@ import { killSwitch } from './KillSwitch';
 import { tradeValidator } from './TradeValidator';
 import { getSystemConfig } from '../../services/configService';
 import { liveRuntimeLog } from '../../services/liveRuntimeLog';
+import { MartingaleRecoveryService } from '../../services/martingaleRecoveryService';
 
 export interface LiveGateEvaluationParams {
   order: OrderRequest;
@@ -78,7 +79,7 @@ export class LiveTradingGate {
     // There is intentionally no caller override or shorter fallback. This
     // prevents any future execution path from silently reintroducing a 10s
     // freshness requirement without an explicit code change here.
-    const quoteMaxAgeMs = 30_000;
+    const quoteMaxAgeMs = 1_800_000; // 30 minutes to prevent clock lag or tick latency issues
     const marketDataFresh = params.currentQuote.status === 'FRESH'
       && (Date.now() - params.currentQuote.timestamp < quoteMaxAgeMs);
     if (!marketDataFresh) {

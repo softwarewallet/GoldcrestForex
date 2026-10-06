@@ -39,10 +39,8 @@ export function normalizePriceToInstrumentDigits(price: number, digits?: number)
   if (!Number.isFinite(price) || price <= 0) {
     throw new Error('INVALID_PRICE: Price must be a positive finite number.');
   }
-  // The optional digits argument is retained for API compatibility, but
-  // executable Goldcrest prices are always normalized to three decimals.
-  void digits;
-  return Number(price.toFixed(GOLD_CREST_PRICE_DIGITS));
+  const d = typeof digits === 'number' && Number.isInteger(digits) && digits >= 0 ? digits : 5;
+  return Number(price.toFixed(d));
 }
 
 export interface ForexPipTargets {
@@ -103,9 +101,10 @@ export function calculateForexPipTargets(
     throw new Error('INVALID_PIP_TARGETS: Calculated Stop Loss or Take Profit is not positive.');
   }
 
+  const digits = pipSize === 0.01 ? 3 : 5;
   return {
-    stopLoss: normalizePriceToThreeDigits(stopLoss),
-    takeProfit: normalizePriceToThreeDigits(takeProfit),
+    stopLoss: Number(stopLoss.toFixed(digits)),
+    takeProfit: Number(takeProfit.toFixed(digits)),
     stopLossPips,
     takeProfitPips,
     pipSize

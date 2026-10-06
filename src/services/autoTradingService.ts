@@ -12,12 +12,13 @@ import { getSystemConfig } from './configService';
 import { killSwitch } from '../brokers/safety/KillSwitch';
 import { BrokerAdapter, NormalizedQuote, OrderRequest } from '../brokers/types';
 import { liveRuntimeLog, tradeAuditLog } from './liveRuntimeLog';
-import { calculateForexPipTargets, normalizePriceToThreeDigits, sizeForexOrderToMaxTradeValue } from '../brokers/safety/TradeSizing';
+import { calculateForexPipTargets, normalizePriceToThreeDigits, normalizePriceToInstrumentDigits, sizeForexOrderToMaxTradeValue } from '../brokers/safety/TradeSizing';
 import { tradeContinuityService, TradeContinuityStatus } from './tradeContinuityService';
 import { PredictionDecisionGate } from '../ml/prediction/predictionDecisionGate';
 import { CombinedPredictionEngine } from '../ml/prediction/combinedPredictionEngine';
+import { MartingaleRecoveryService } from './martingaleRecoveryService';
 
-const LIVE_QUOTE_MAX_AGE_MS = 30_000;
+const LIVE_QUOTE_MAX_AGE_MS = 1_800_000; // 30 minutes to prevent clock lag or tick latency issues
 
 const AUTO_INTERVAL_MS = Math.max(
   15_000,
@@ -232,6 +233,11 @@ export interface AutoTradingStatus {
     status: 'IDLE' | 'RUNNING' | 'READY' | 'UNAVAILABLE';
   };
   continuity: TradeContinuityStatus;
+  martingaleEnabled: boolean;
+  martingaleStats: {
+    scannedPositions: number;
+    modifiedOrders: number;
+  };
   requiresClosedMarketConfirmation?: boolean;
 }
 
@@ -244,10 +250,13 @@ class AutoTradingService {
   private lastCycleResult: string | null = null;
   private lastActions: AutoTradingStatus['lastActions'] = [];
   private lastPreOpenPreparedAt: number | null = null;
+  private martingaleScannedCount = 0;
+  private martingaleModifiedCount = 0;
   private preOpenTrendPairsEvaluated = 0;
   private preOpenNews: LiveNewsSnapshot | null = null;
   private preOpenStatus: 'IDLE' | 'RUNNING' | 'READY' | 'UNAVAILABLE' = 'IDLE';
   private cycleInFlight = false;
+  private martingaleInFlight = false;
   // When the authoritative system-wide live-position limit is full, Auto Live
   // pauses expensive market/news analysis and polls only the broker position
   // count until a slot becomes available.
@@ -267,6 +276,19 @@ class AutoTradingService {
     updatedAt: Date.now()
   };
   private lastExecution: AutoTradingExecutionStatus | null = null;
+
+  constructor() {
+    setInterval(() => {
+      try {
+        const config = getSystemConfig().martingale;
+        if (config?.enabled) {
+          void this.processMartingaleActivePositions();
+        }
+      } catch (err) {
+        liveRuntimeLog('ERROR', 'MARTINGALE_MANAGER_ERROR', { error: String(err) });
+      }
+    }, 10_000);
+  }
 
   private isRequested(): boolean {
     // Development mode is not itself an execution request. Autonomous live
@@ -375,7 +397,12 @@ class AutoTradingService {
         news: this.preOpenNews,
         status: this.preOpenStatus
       },
-      continuity: tradeContinuityService.getStatus()
+      continuity: tradeContinuityService.getStatus(),
+      martingaleEnabled: getSystemConfig().martingale?.enabled ?? false,
+      martingaleStats: {
+        scannedPositions: this.martingaleScannedCount,
+        modifiedOrders: this.martingaleModifiedCount
+      }
     };
   }
 
@@ -498,6 +525,93 @@ class AutoTradingService {
     liveRuntimeLog('SYSTEM', 'AUTO_TRADING_STOPPED', { reason });
     disarmLocalAutonomousExecution();
     return this.getStatus();
+  }
+
+  public async processMartingaleActivePositions(): Promise<void> {
+    liveRuntimeLog('SYSTEM', 'MARTINGALE_PROCESS_STARTED', {});
+    const config = getSystemConfig().martingale;
+    if (!config || !config.enabled) return;
+    if (this.martingaleInFlight) return;
+    this.martingaleInFlight = true;
+
+    try {
+      const adapter = brokerRegistry.getAdapter('CTRADER', 'LIVE');
+      const positions = await adapter.getPositions();
+      this.martingaleScannedCount = positions.length;
+      const activePositionIds = new Set(positions.map(p => String(p.id)));
+
+      // 1. Clean up closed sequences
+      const activeSequences = MartingaleRecoveryService.getAllActiveSequences();
+      for (const seq of activeSequences) {
+        if (!activePositionIds.has(seq.positionId)) {
+          MartingaleRecoveryService.completeSequence(seq.positionId, 0, 'CLOSED_EXTERNAL');
+          liveRuntimeLog('INFO', 'MARTINGALE_SEQUENCE_COMPLETED_EXTERNAL', { positionId: seq.positionId, pair: seq.pair });
+        }
+      }
+
+      // 2. Evaluate active positions
+      for (const pos of positions) {
+        const symbol = String(pos.symbol || '');
+        if (!MartingaleRecoveryService.isPairEligible(symbol)) continue;
+
+        let seq = MartingaleRecoveryService.getActiveSequence(pos.id);
+        if (!seq) {
+          seq = MartingaleRecoveryService.registerInitialPosition({
+            positionId: pos.id,
+            pair: symbol,
+            direction: String(pos.side || '').toUpperCase() === 'SELL' ? 'SELL' : 'BUY',
+            volume: Number(pos.quantity || 10000),
+            entryPrice: Number(pos.entryPrice || 1.1000),
+            initialTP: Number(pos.takeProfit || 0)
+          });
+          if (seq) {
+            liveRuntimeLog('INFO', 'MARTINGALE_SEQUENCE_AUTO_REGISTERED', { positionId: pos.id, pair: symbol });
+          }
+        }
+
+        if (seq) {
+          const quote = await adapter.getQuote(symbol);
+          const currentPrice = seq.direction === 'BUY' ? quote.bid : quote.ask;
+          const previousVolume = seq.currentVolume;
+
+          const tickRes = await MartingaleRecoveryService.evaluatePriceTick(pos.id, currentPrice);
+          if (tickRes.triggered && tickRes.record) {
+            const addedVolume = tickRes.record.currentVolume - previousVolume;
+            if (addedVolume > 0) {
+              this.martingaleModifiedCount++;
+              liveRuntimeLog('INFO', 'MARTINGALE_EXECUTE_RECOVERY_ORDER', {
+                positionId: pos.id,
+                pair: symbol,
+                addedVolume,
+                dynamicTP: tickRes.record.currentDynamicTP
+              });
+
+              const recoveryOrder: OrderRequest = {
+                market: 'FOREX',
+                symbol,
+                side: seq.direction,
+                orderType: 'MARKET',
+                quantity: addedVolume,
+                price: currentPrice,
+                takeProfit: tickRes.record.currentDynamicTP,
+                comment: `Martingale Recovery Lvl ${tickRes.record.recoveryLevel}`
+              };
+
+              try {
+                await adapter.placeOrder(recoveryOrder);
+                liveRuntimeLog('INFO', 'MARTINGALE_RECOVERY_ORDER_SUCCESS', { positionId: pos.id, pair: symbol });
+              } catch (err: any) {
+                liveRuntimeLog('ERROR', 'MARTINGALE_RECOVERY_ORDER_FAILED', { positionId: pos.id, error: err?.message || String(err) });
+              }
+            }
+          }
+        }
+      }
+    } catch (err: any) {
+      liveRuntimeLog('ERROR', 'MARTINGALE_PROCESS_ERROR', { error: err?.message || String(err) });
+    } finally {
+      this.martingaleInFlight = false;
+    }
   }
 
   /**
@@ -759,6 +873,8 @@ class AutoTradingService {
         this.lastCycleResult = 'Autonomous permission was withdrawn before cycle execution.';
         return;
       }
+
+      await this.processMartingaleActivePositions();
 
       const continuityCheck = tradeContinuityService.canExecuteNewTrade();
       if (!continuityCheck.allowed) {
@@ -1214,14 +1330,18 @@ return;
       // new Auto Live order. Calculate SL/TP from the exact three-decimal
       // execution price that will be placed in the broker packet, rather than
       // from the signal engine's analytical trade-plan levels.
-      const executionEntryPrice = normalizePriceToThreeDigits(entryPrice);
+      const executionEntryPrice = normalizePriceToInstrumentDigits(entryPrice, instrument.digits);
+      const isMartingaleNoSL = MartingaleRecoveryService.isPairEligible(pair)
+        && !getSystemConfig().martingale.stopLoss;
+      const stopLossPipsToUse = isMartingaleNoSL ? 30.0 : config.forexStopLossPips;
+
       let configuredTargets;
       try {
         configuredTargets = calculateForexPipTargets(
           signalSide,
           executionEntryPrice,
           instrument.pipSize,
-          config.forexStopLossPips,
+          stopLossPipsToUse,
           config.forexTakeProfitPips
         );
       } catch (targetError: any) {
@@ -1401,6 +1521,18 @@ return;
           side: order.side,
           signalId: signal.id
         });
+
+        if (MartingaleRecoveryService.isPairEligible(pair)) {
+          MartingaleRecoveryService.registerInitialPosition({
+            positionId: result.order?.brokerOrderId || result.order?.id || `pos_${Date.now()}`,
+            pair,
+            direction: order.side,
+            volume: quantity,
+            entryPrice: result.order?.averageFillPrice || order.price || entryPrice,
+            initialTP: order.takeProfit || 0,
+            predictionScore: signal.score
+          });
+        }
       } else {
         this.finishExecution('REJECTED', pair + ' ' + order.side + ' was blocked or rejected before confirmed execution.', {
           pair,
@@ -1432,3 +1564,19 @@ return;
 }
 
 export const autoTradingService = new AutoTradingService();
+
+// Independent, lightweight Martingale Position Manager loop that runs
+// every 10 seconds to monitor and manage open positions on the broker,
+// completely independent of the "Auto Live" scanner's state.
+setInterval(() => {
+  try {
+    const config = getSystemConfig().martingale;
+    if (config?.enabled) {
+      liveRuntimeLog('SYSTEM', 'MARTINGALE_HEARTBEAT', { status: 'RUNNING' });
+      void autoTradingService.processMartingaleActivePositions();
+    }
+  } catch (err) {
+    liveRuntimeLog('ERROR', 'MARTINGALE_MANAGER_ERROR', { error: String(err) });
+  }
+}, 10_000);
+

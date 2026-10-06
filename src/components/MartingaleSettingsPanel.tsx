@@ -4,29 +4,63 @@
 
 import React, { useState, useEffect } from 'react';
 import { ShieldAlert, CheckCircle, Save, Sliders, Layers } from 'lucide-react';
-import { getSystemConfig, updateSystemConfig, SystemConfig } from '../services/configService';
 import { FOREX_PAIRS } from '../markets/forex/instruments';
 
+export interface MartingaleConfig {
+  enabled: boolean;
+  scope: 'ALL' | 'SELECTED';
+  selectedPairs: string[];
+  adverseTriggerPips: number;
+  volumeMultiplier: number;
+  maxRecoveryLevels: number;
+  maximumVolume: number;
+  dynamicTP: boolean;
+  stopLoss: boolean;
+  resetAfterProfit: boolean;
+  maximumBasketDrawdownPct: number;
+  maximumMarginUtilizationPct: number;
+  maximumRecoveryDurationMin: number;
+}
+
 export const MartingaleSettingsPanel: React.FC = () => {
-  const [config, setConfig] = useState<SystemConfig['martingale']>(() => {
-    return getSystemConfig().martingale || {
-      enabled: false,
-      scope: 'ALL',
-      selectedPairs: [],
-      adverseTriggerPips: 5.0,
-      volumeMultiplier: 2.0,
-      maxRecoveryLevels: 5,
-      maximumVolume: 50.0,
-      dynamicTP: true,
-      stopLoss: false,
-      resetAfterProfit: true,
-      maximumBasketDrawdownPct: 15.0,
-      maximumMarginUtilizationPct: 50.0,
-      maximumRecoveryDurationMin: 120
-    };
+  const [config, setConfig] = useState<MartingaleConfig>({
+    enabled: false,
+    scope: 'ALL',
+    selectedPairs: [],
+    adverseTriggerPips: 5.0,
+    volumeMultiplier: 2.0,
+    maxRecoveryLevels: 5,
+    maximumVolume: 50.0,
+    dynamicTP: true,
+    stopLoss: false,
+    resetAfterProfit: true,
+    maximumBasketDrawdownPct: 15.0,
+    maximumMarginUtilizationPct: 50.0,
+    maximumRecoveryDurationMin: 120
   });
 
   const [saveSuccess, setSaveSuccess] = useState<boolean>(false);
+
+  useEffect(() => {
+    let active = true;
+    const loadConfig = async () => {
+      try {
+        const res = await fetch('/api/config', { cache: 'no-store' });
+        if (res.ok && active) {
+          const systemConfig = await res.json();
+          if (systemConfig.martingale) {
+            setConfig(systemConfig.martingale);
+          }
+        }
+      } catch (err) {
+        console.error('Failed to load martingale config:', err);
+      }
+    };
+    loadConfig();
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const handleTogglePair = (symbol: string) => {
     const current = config.selectedPairs || [];
@@ -37,9 +71,19 @@ export const MartingaleSettingsPanel: React.FC = () => {
   };
 
   const handleSave = async () => {
-    await updateSystemConfig({ martingale: config });
-    setSaveSuccess(true);
-    setTimeout(() => setSaveSuccess(false), 3000);
+    try {
+      const res = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ martingale: config })
+      });
+      if (res.ok) {
+        setSaveSuccess(true);
+        setTimeout(() => setSaveSuccess(false), 3000);
+      }
+    } catch (err) {
+      console.error('Failed to save martingale config:', err);
+    }
   };
 
   return (

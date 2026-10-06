@@ -106,6 +106,19 @@ export const TradingOperationsDashboard: React.FC<TradingOperationsDashboardProp
 
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
           <div className="flex items-center justify-between">
+            <span className="text-slate-400">MARTINGALE RECOVERY</span>
+            <Server className={`w-4 h-4 ${status?.autoTrading?.martingaleEnabled ? 'text-emerald-400' : 'text-slate-500'}`} />
+          </div>
+          <div className="text-lg font-bold text-white mt-2">
+            {status?.autoTrading?.martingaleEnabled ? 'ACTIVE' : 'DISABLED'}
+          </div>
+          <div className="text-slate-500 mt-1 truncate">
+            {status?.autoTrading?.martingaleEnabled ? 'Monitoring all positions.' : 'Strategy inactive.'}
+          </div>
+        </div>
+
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+          <div className="flex items-center justify-between">
             <span className="text-slate-400">LIVE BROKERS</span>
             <Wallet className="w-4 h-4 text-sky-400" />
           </div>

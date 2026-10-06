@@ -1,3 +1,4 @@
+console.log('[DEBUG] brokerRoutes loaded');
 import { Router, Request, Response } from 'express';
 import { brokerRegistry } from './registry';
 import { killSwitch } from './safety/KillSwitch';
@@ -15,6 +16,7 @@ import { executeQuery, executeRun } from '../database/db';
 import { calculateForexPipTargets, normalizePriceToThreeDigits, normalizePriceToInstrumentDigits, sizeForexOrderToMaxTradeValue } from './safety/TradeSizing';
 import { liveRuntimeLog } from '../services/liveRuntimeLog';
 import { autoTradingService } from '../services/autoTradingService';
+console.log('[DEBUG] brokerRoutes imported, autoTradingService imported:', !!autoTradingService);
 import { generateTradeComparisonReport } from '../services/tradeComparisonService';
 
 export const brokerRouter = Router();

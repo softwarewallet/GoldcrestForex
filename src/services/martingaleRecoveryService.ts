@@ -174,7 +174,9 @@ export class MartingaleRecoveryService {
     }
 
     const nextVolume = record.currentVolume * (config.volumeMultiplier || 2.0);
-    if (nextVolume > config.maximumVolume) {
+    // Treat maximumVolume from config as LOTS (1 lot = 100,000 units)
+    const maxUnits = config.maximumVolume * 100000;
+    if (nextVolume > maxUnits) {
       logBrokerAction({
         source: 'MARTINGALE',
         broker: 'CTRADER',

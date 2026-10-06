@@ -130,9 +130,9 @@ let activeConfig: SystemConfig = {
   financialDisclaimer:
     'Trading in Forex and derivatives involves substantial risk of loss. Model outputs, signals, probabilities and technical analysis are estimates for informational and analytical purposes only and are not financial advice, guarantees, or assurances of future performance.',
   martingale: {
-    enabled: false,
+    enabled: true,
     scope: 'ALL',
-    selectedPairs: [],
+    selectedPairs: ['EUR/AUD'],
     adverseTriggerPips: 5.0,
     volumeMultiplier: 2.0,
     maxRecoveryLevels: 5,
