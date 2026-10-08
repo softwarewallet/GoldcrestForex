@@ -823,9 +823,9 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
 
       // cTrader Open API exposes monetary values in integer units. The
       // close-position detail's moneyDigits specifies the decimal exponent
-      // required to convert them into deposit-currency amounts.
-      const moneyDigits = Number(detail.moneyDigits ?? deal.moneyDigits ?? 0);
-      const divisor = Number.isInteger(moneyDigits) && moneyDigits > 0 ? 10 ** moneyDigits : 1;
+      // required to convert them into deposit-currency amounts. Default to 2 (cents = /100).
+      const moneyDigits = Number(detail.moneyDigits ?? deal.moneyDigits ?? 2);
+      const divisor = Number.isInteger(moneyDigits) && moneyDigits > 0 ? 10 ** moneyDigits : 100;
       const gross = Number(detail.grossProfit ?? detail.profit ?? 0) / divisor;
       const commission = Number(detail.commission ?? 0) / divisor;
       const swap = Number(detail.swap ?? 0) / divisor;
@@ -1239,8 +1239,8 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
     const result = await amendLiveCTraderPositionSLTP(
       raw.ctidTraderAccountId,
       brokerId,
-      modifications.stopLoss !== undefined && modifications.stopLoss > 0 ? normalizePriceToThreeDigits(Number(modifications.stopLoss)) : modifications.stopLoss,
-      modifications.takeProfit !== undefined && modifications.takeProfit > 0 ? normalizePriceToThreeDigits(Number(modifications.takeProfit)) : modifications.takeProfit,
+      modifications.stopLoss !== undefined && modifications.stopLoss > 0 ? Number(Number(modifications.stopLoss).toFixed(5)) : modifications.stopLoss,
+      modifications.takeProfit !== undefined && modifications.takeProfit > 0 ? Number(Number(modifications.takeProfit).toFixed(5)) : modifications.takeProfit,
       this.config.clientId!,
       this.config.clientSecret!,
       this.config.accessToken!,

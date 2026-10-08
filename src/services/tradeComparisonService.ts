@@ -119,8 +119,9 @@ export function normalizePairSymbol(rawSymbol: string): string {
 export async function generateTradeComparisonReport(from: number, to: number): Promise<TradeComparisonReport> {
   const LIVE_BROKERS: BrokerType[] = ['CTRADER', 'FIVE_PAISA'];
   const trades: RawTradeRecord[] = [];
+  const seenTradeIds = new Set<string>();
 
-  // 1. Load from broker adapter order history range
+  // 1. Load authoritative closed deals from broker adapters
   await Promise.all(LIVE_BROKERS.map(async broker => {
     try {
       const adapter = brokerRegistry.getAdapter(broker, 'LIVE');
@@ -133,26 +134,55 @@ export async function generateTradeComparisonReport(from: number, to: number): P
         const timestamp = Number(order.timestamp || 0);
         if (timestamp < from || timestamp > to) continue;
 
+        // Authoritative filter: Only include deals that closed a position (realized outcome)
+        // Opening orders/deals (isClosedDeal === false) have no realized P&L and must not be counted as closed trades
+        if (order.isClosedDeal !== undefined && !order.isClosedDeal) {
+          continue;
+        }
+
+        // Must be a filled execution
+        if (order.status && order.status !== 'FILLED') {
+          continue;
+        }
+
+        let pnl: number | null = null;
+        if (typeof (order as any).netAmount === 'number' && Number.isFinite((order as any).netAmount)) {
+          pnl = (order as any).netAmount;
+        } else if (typeof (order as any).realizedPnL === 'number' && Number.isFinite((order as any).realizedPnL)) {
+          pnl = (order as any).realizedPnL;
+        } else if (typeof (order as any).pnl === 'number' && Number.isFinite((order as any).pnl)) {
+          pnl = (order as any).pnl;
+        }
+
         const entry = Number(order.price ?? 0);
-        const exit = Number(order.averageFillPrice ?? order.price ?? 0);
+        const exit = Number(order.averageFillPrice ?? 0);
         const qty = Number(order.filledQuantity ?? order.quantity ?? 0);
         const comm = Number(order.commission ?? 0);
         const side: 'BUY' | 'SELL' = (String(order.side || '').toUpperCase().includes('SELL')) ? 'SELL' : 'BUY';
         const symbol = normalizePairSymbol(String(order.symbol || 'UNKNOWN'));
 
-        let pnl = 0;
-        if (typeof (order as any).netAmount === 'number' && Number.isFinite((order as any).netAmount)) {
-          pnl = (order as any).netAmount;
-        } else if (typeof (order as any).pnl === 'number' && Number.isFinite((order as any).pnl)) {
-          pnl = (order as any).pnl;
-        } else if (typeof (order as any).realizedPnL === 'number' && Number.isFinite((order as any).realizedPnL)) {
-          pnl = (order as any).realizedPnL;
-        } else if (entry > 0 && exit > 0 && qty > 0 && Math.abs(exit - entry) > 0.00001) {
-          pnl = side === 'SELL' ? (entry - exit) * qty : (exit - entry) * qty;
+        // Fallback for non-cTrader closed deals with missing netAmount
+        // Strictly require both entry > 0 and exit > 0 with valid price movement
+        if (pnl === null && order.isClosedDeal && entry > 0 && exit > 0 && qty > 0 && Math.abs(exit - entry) > 0.00001) {
+          const rawDiff = side === 'SELL' ? (entry - exit) : (exit - entry);
+          if (symbol.includes('JPY') && !symbol.startsWith('JPY')) {
+            // Quote currency is JPY (0.01 per pip) -> convert JPY profit to USD
+            pnl = (rawDiff * qty) / (exit > 50 ? exit : 150.0);
+          } else {
+            pnl = rawDiff * qty;
+          }
         }
 
+        if (pnl === null) {
+          continue;
+        }
+
+        const id = String(order.id || `order-${timestamp}-${trades.length}`);
+        if (seenTradeIds.has(id)) continue;
+        seenTradeIds.add(id);
+
         trades.push({
-          id: String(order.id || `order-${timestamp}-${Math.random()}`),
+          id,
           broker,
           symbol,
           side,
@@ -160,9 +190,9 @@ export async function generateTradeComparisonReport(from: number, to: number): P
           exitPrice: exit,
           quantity: qty,
           timestamp,
-          pnl,
+          pnl: Math.round(pnl * 100) / 100,
           commission: comm,
-          status: String(order.status || 'FILLED')
+          status: 'CLOSED'
         });
       }
     } catch {
@@ -175,24 +205,34 @@ export async function generateTradeComparisonReport(from: number, to: number): P
     const sqliteRows = await executeQuery<any>(
       `SELECT id, instrument, direction, entry_price, exit_price, size, pnl, status, entry_time, exit_time 
        FROM trades 
-       WHERE (exit_time >= ? AND exit_time <= ?) OR (entry_time >= ? AND entry_time <= ?)`,
+       WHERE (status = 'CLOSED' OR exit_time IS NOT NULL OR pnl IS NOT NULL)
+         AND ((exit_time >= ? AND exit_time <= ?) OR (entry_time >= ? AND entry_time <= ?))`,
       [from, to, from, to]
     );
 
     for (const r of sqliteRows) {
       const id = String(r.id);
-      if (!trades.some(t => t.id === id)) {
-        const timestamp = Number(r.exit_time || r.entry_time || from);
-        const entry = Number(r.entry_price || 0);
-        const exit = Number(r.exit_price || entry);
-        const qty = Number(r.size || 0);
-        const side: 'BUY' | 'SELL' = String(r.direction || 'BUY').toUpperCase().includes('SELL') ? 'SELL' : 'BUY';
-        const symbol = normalizePairSymbol(String(r.instrument || 'UNKNOWN'));
-        let pnl = Number(r.pnl || 0);
-        if (!Number.isFinite(pnl) && entry > 0 && exit > 0 && qty > 0 && Math.abs(exit - entry) > 0.00001) {
-          pnl = side === 'SELL' ? (entry - exit) * qty : (exit - entry) * qty;
-        }
+      if (seenTradeIds.has(id)) continue;
 
+      const timestamp = Number(r.exit_time || r.entry_time || from);
+      const entry = Number(r.entry_price || 0);
+      const exit = Number(r.exit_price || entry);
+      const qty = Number(r.size || 0);
+      const side: 'BUY' | 'SELL' = String(r.direction || 'BUY').toUpperCase().includes('SELL') ? 'SELL' : 'BUY';
+      const symbol = normalizePairSymbol(String(r.instrument || 'UNKNOWN'));
+
+      let pnl: number | null = typeof r.pnl === 'number' && Number.isFinite(r.pnl) ? r.pnl : null;
+      if (pnl === null && entry > 0 && exit > 0 && qty > 0 && Math.abs(exit - entry) > 0.00001) {
+        const rawDiff = side === 'SELL' ? (entry - exit) : (exit - entry);
+        if (symbol.includes('JPY') && !symbol.startsWith('JPY')) {
+          pnl = (rawDiff * qty) / (exit > 50 ? exit : 150.0);
+        } else {
+          pnl = rawDiff * qty;
+        }
+      }
+
+      if (pnl !== null) {
+        seenTradeIds.add(id);
         trades.push({
           id,
           broker: 'SQLITE',
@@ -202,9 +242,9 @@ export async function generateTradeComparisonReport(from: number, to: number): P
           exitPrice: exit,
           quantity: qty,
           timestamp,
-          pnl: Number.isFinite(pnl) ? pnl : 0,
+          pnl: Math.round(pnl * 100) / 100,
           commission: 0,
-          status: String(r.status || 'CLOSED')
+          status: 'CLOSED'
         });
       }
     }
@@ -214,43 +254,6 @@ export async function generateTradeComparisonReport(from: number, to: number): P
 
   // Sort trades chronologically
   trades.sort((a, b) => a.timestamp - b.timestamp);
-
-  // 3. Round-trip FIFO matching for trades that have pnl == 0 (e.g. raw buy/sell deal streams)
-  const openFillsPerSymbol = new Map<string, Array<{ side: 'BUY' | 'SELL'; price: number; qty: number; timestamp: number; tradeIndex: number }>>();
-
-  for (let i = 0; i < trades.length; i++) {
-    const t = trades[i];
-    if (t.pnl === 0 && t.entryPrice > 0 && t.quantity > 0) {
-      const fills = openFillsPerSymbol.get(t.symbol) || [];
-      const oppositeIdx = fills.findIndex(f => f.side !== t.side && f.qty > 0);
-
-      if (oppositeIdx >= 0) {
-        const opp = fills[oppositeIdx];
-        const matchedQty = Math.min(opp.qty, t.quantity);
-        const calcPnl = opp.side === 'BUY'
-          ? (t.entryPrice - opp.price) * matchedQty
-          : (opp.price - t.entryPrice) * matchedQty;
-
-        t.pnl = Math.round(calcPnl * 100) / 100;
-        t.exitPrice = t.entryPrice;
-        t.entryPrice = opp.price;
-
-        opp.qty -= matchedQty;
-        if (opp.qty <= 0.0001) {
-          fills.splice(oppositeIdx, 1);
-        }
-      } else {
-        fills.push({
-          side: t.side,
-          price: t.entryPrice,
-          qty: t.quantity,
-          timestamp: t.timestamp,
-          tradeIndex: i
-        });
-        openFillsPerSymbol.set(t.symbol, fills);
-      }
-    }
-  }
 
   // Aggregations
   let totalWins = 0;

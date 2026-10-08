@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { FOREX_PAIRS } from '../markets/forex/instruments';
+import { AutoLiveSchedulerConfig, normalizeSchedulerConfig, DEFAULT_RISK_WINDOWS } from './schedulerUtils';
+export type { AutoLiveSchedulerConfig };
 
 export interface MartingaleConfig {
   enabled: boolean;
@@ -49,6 +51,7 @@ export interface SystemConfig {
   dailyProfitTargetUsd: number;
   martingale: MartingaleConfig;
   shortTPOptimization: ShortTPOptimizationConfig;
+  autoLiveScheduler: AutoLiveSchedulerConfig;
 }
 
 export interface ShortTPOptimizationConfig {
@@ -111,10 +114,11 @@ const PERSISTED_KEYS: readonly (keyof SystemConfig)[] = [
   'financialDisclaimer',
   'dailyProfitTargetUsd',
   'martingale',
-  'shortTPOptimization'
+  'shortTPOptimization',
+  'autoLiveScheduler'
 ];
 
-let activeConfig: SystemConfig = {
+export const DEFAULT_SYSTEM_CONFIG: SystemConfig = {
   tradingMode: 'LIVE_ONLY',
   liveTradingEnabled: process.env.LIVE_TRADING_ENABLED === 'true',
   dataStatus: 'UNAVAILABLE',
@@ -145,7 +149,7 @@ let activeConfig: SystemConfig = {
   financialDisclaimer:
     'Trading in Forex and derivatives involves substantial risk of loss. Model outputs, signals, probabilities and technical analysis are estimates for informational and analytical purposes only and are not financial advice, guarantees, or assurances of future performance.',
   martingale: {
-    enabled: true,
+    enabled: false,
     scope: 'ALL',
     selectedPairs: ['EUR/AUD'],
     adverseTriggerPips: 5.0,
@@ -167,8 +171,17 @@ let activeConfig: SystemConfig = {
     reversalProximityPct: 80.0,
     defaultRiskBoundaryPips: 15.0,
     lookbackObservations: 500
+  },
+  autoLiveScheduler: {
+    enabled: false,
+    timezone: 'LOCAL',
+    windows: [...DEFAULT_RISK_WINDOWS],
+    startTime: '22:00',
+    endTime: '05:00'
   }
 };
+
+let activeConfig: SystemConfig = { ...DEFAULT_SYSTEM_CONFIG };
 
 let diskConfigLoaded = false;
 
@@ -204,6 +217,20 @@ function sanitizePersistedConfig(input: unknown): Partial<SystemConfig> {
 
     if (typeof value === 'string') {
       if (value.trim() !== '') (output as any)[key] = value;
+      continue;
+    }
+
+    if (key === 'martingale' && isRecord(value)) {
+      (output as any).martingale = {
+        ...DEFAULT_SYSTEM_CONFIG.martingale,
+        ...value,
+        enabled: false // Always disabled by default when application starts or restarts
+      };
+      continue;
+    }
+
+    if (key === 'autoLiveScheduler' && isRecord(value)) {
+      (output as any).autoLiveScheduler = normalizeSchedulerConfig(value as any);
       continue;
     }
 

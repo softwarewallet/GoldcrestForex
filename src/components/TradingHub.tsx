@@ -27,6 +27,8 @@ import {
 } from 'lucide-react';
 import { TradingEnvironment, BrokerType } from '../brokers/types';
 import { OptionsTradingPanel } from './OptionsTradingPanel';
+import { AutoLiveSchedulerPanel } from './AutoLiveSchedulerPanel';
+import { SchedulerEvaluationResult } from '../services/schedulerUtils';
 
 interface TradingHubProps {
   environment: TradingEnvironment;
@@ -134,7 +136,7 @@ export const TradingHub: React.FC<TradingHubProps> = ({
   const [triggerNotification, setTriggerNotification] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
   type AutoExecutionStage = 'IDLE' | 'SCANNING_MARKET' | 'ANALYZING_SIGNAL' | 'PREPARING_ORDER' | 'SAFETY_GATE' | 'SUBMITTING_ORDER' | 'TRADE_EXECUTED' | 'REJECTED';
   interface AutoTradingStatusSnapshot {
-    state: 'STOPPED' | 'PREPARING' | 'RUNNING' | 'BLOCKED';
+    state: 'STOPPED' | 'PREPARING' | 'RUNNING' | 'PAUSED_LIMIT' | 'PAUSED_SCHEDULE' | 'BLOCKED';
     autonomousPermission: boolean;
     minSignalScore: number;
     maxTradesPerPair: number;
@@ -191,6 +193,7 @@ export const TradingHub: React.FC<TradingHubProps> = ({
       scannedPositions: number;
       modifiedOrders: number;
     };
+    scheduler?: SchedulerEvaluationResult;
   }
   const [activeTab, setActiveTab] = useState<'cockpit' | 'positions' | 'signals' | 'options' | 'execution' | 'controls' | 'predictions'>('cockpit');
   const [autoStatus, setAutoStatus] = useState<AutoTradingStatusSnapshot | null>(null);
@@ -868,11 +871,24 @@ export const TradingHub: React.FC<TradingHubProps> = ({
           <div className="flex flex-wrap gap-2 font-mono text-[11px]">
             <span className={"px-3 py-1 rounded-lg border font-bold " +
               (autoStatus?.continuity?.isContinuityPaused ? "text-rose-300 bg-rose-950/80 border-rose-600 animate-pulse" :
+               autoStatus?.state === 'PAUSED_SCHEDULE' ? "text-amber-300 bg-amber-950/90 border-amber-500 animate-pulse" :
                autoStatus?.state === 'RUNNING' ? "text-emerald-300 bg-emerald-950/60 border-emerald-800" :
                autoStatus?.state === 'BLOCKED' ? "text-rose-300 bg-rose-950/60 border-rose-800" :
                "text-amber-300 bg-amber-950/60 border-amber-800")}>
-              {autoStatus?.continuity?.isContinuityPaused ? 'AUTO LIVE: PAUSED (20 LOSSES)' : `AUTO LIVE: ${autoStatus?.state || 'LOADING'}`}
+              {autoStatus?.continuity?.isContinuityPaused ? 'AUTO LIVE: PAUSED (20 LOSSES)' :
+               autoStatus?.state === 'PAUSED_SCHEDULE' ? 'AUTO LIVE: PAUSED (RISK WINDOW)' :
+               `AUTO LIVE: ${autoStatus?.state || 'LOADING'}`}
             </span>
+            {autoStatus?.scheduler?.enabled && (
+              <span className={"px-3 py-1 rounded-lg border font-bold " +
+                (autoStatus.scheduler.inRiskWindow
+                  ? "text-amber-300 bg-amber-950/70 border-amber-600 animate-pulse"
+                  : "text-slate-300 bg-slate-900 border-slate-700")}>
+                {autoStatus.scheduler.inRiskWindow
+                  ? `BLACKOUT ACTIVE (${autoStatus.scheduler.startTime12}–${autoStatus.scheduler.endTime12})`
+                  : `SCHEDULE: ${autoStatus.scheduler.startTime12}–${autoStatus.scheduler.endTime12}`}
+              </span>
+            )}
             <span className={"px-3 py-1 rounded-lg border font-bold " +
               (autoStatus?.martingaleEnabled ? "text-emerald-300 bg-emerald-950/60 border-emerald-800" :
                "text-slate-400 bg-slate-900 border-slate-700")}>
@@ -946,6 +962,12 @@ export const TradingHub: React.FC<TradingHubProps> = ({
               </table></div>
             )}
           </div>
+
+          <AutoLiveSchedulerPanel
+            initialConfig={autoStatus?.scheduler}
+            currentStatus={autoStatus?.scheduler}
+            autoLiveState={autoStatus?.state}
+          />
         </>
       )}
 
@@ -1554,6 +1576,13 @@ export const TradingHub: React.FC<TradingHubProps> = ({
             {autoStatusError && <div className="text-rose-300 border border-rose-900 bg-rose-950/30 rounded p-2">{autoStatusError}</div>}
           </div></div>
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-4"><div className="text-sm font-bold text-white font-mono mb-3">Secondary Tools</div><div className="text-xs text-slate-500">Detailed diagnostics, configuration and historical information should be kept in dedicated application pages rather than the default Auto Live cockpit.</div></div>
+          <div className="lg:col-span-2">
+            <AutoLiveSchedulerPanel
+              initialConfig={autoStatus?.scheduler}
+              currentStatus={autoStatus?.scheduler}
+              autoLiveState={autoStatus?.state}
+            />
+          </div>
         </div>
       )}
     </div>

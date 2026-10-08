@@ -8,6 +8,7 @@ import { DynamicExitEngine } from '../ml/exits/dynamicExitEngine';
 import { logBrokerAction } from '../brokers/auditLog';
 import { BrokerAdapter, NormalizedPosition, OrderRequest } from '../brokers/types';
 import { liveRuntimeLog } from './liveRuntimeLog';
+import { getForexPairConfig } from '../markets/forex/instruments';
 
 export type MartingaleState =
   | 'IDLE'
@@ -69,6 +70,10 @@ export class MartingaleRecoveryService {
     try {
       const rows = await executeQuery(`SELECT * FROM martingale_sequences WHERE status NOT IN ('COMPLETED', 'ABORTED')`);
       for (const row of rows) {
+        let status = row.status as MartingaleState;
+        if (['TRIGGER_DETECTED', 'RECOVERY_PENDING', 'RECOVERY_SUBMITTED', 'RECOVERY_CONFIRMED', 'TP_RECALCULATION_PENDING', 'TP_MODIFICATION_PENDING'].includes(status)) {
+          status = 'WAITING_NEXT_TRIGGER';
+        }
         const record: MartingaleSequenceRecord = {
           id: row.id,
           sequenceId: row.sequence_id,
@@ -87,7 +92,7 @@ export class MartingaleRecoveryService {
           maxFloatingLoss: Number(row.max_floating_loss || 0),
           maxMarginUsed: Number(row.max_margin_used || 0),
           accumulatedCosts: 0.5,
-          status: row.status as MartingaleState,
+          status,
           startedAt: Number(row.started_at),
           lastRecoveryAt: row.last_recovery_at ? Number(row.last_recovery_at) : undefined,
           completedAt: row.completed_at ? Number(row.completed_at) : undefined,
@@ -123,15 +128,28 @@ export class MartingaleRecoveryService {
       return;
     }
 
-    const activePositionIds = new Set(positions.map(p => String(p.id)));
+    const cleanPosId = (id: string | number) => String(id || '').replace(/^ctrader-/, '').trim();
+    const activePositionIds = new Set<string>();
+    for (const p of positions) {
+      activePositionIds.add(String(p.id));
+      activePositionIds.add(cleanPosId(p.id));
+    }
+
     const currentKeys = Array.from(this.activeSequences.keys());
 
     // 1. Mark closed sequences
     for (const key of currentKeys) {
       const record = this.activeSequences.get(key);
       if (!record) continue;
-      if (record.broker === broker && record.environment === environment && !activePositionIds.has(record.positionId)) {
+      const recCleanId = cleanPosId(record.positionId);
+      if (
+        record.broker === broker &&
+        record.environment === environment &&
+        !activePositionIds.has(String(record.positionId)) &&
+        !activePositionIds.has(recCleanId)
+      ) {
         this.completeSequence(record.positionId, 0, 'CLOSED_EXTERNAL', broker, environment);
+        console.log(`[MARTINGALE] 🔒 Closed sequence #${record.positionId} [${record.pair}] (Position no longer open on broker).`);
         liveRuntimeLog('INFO', 'MARTINGALE_RECONCILE_CLOSED', { positionId: record.positionId, pair: record.pair });
       }
     }
@@ -139,10 +157,14 @@ export class MartingaleRecoveryService {
     // 2. Discover new positions and reconcile existing volume
     for (const pos of positions) {
       if (!this.isPairEligible(pos.symbol)) continue;
+      const cleanId = cleanPosId(pos.id);
       const key = this.getLookupKey(broker, environment, String(pos.id));
-      if (this.activeSequences.has(key)) {
-        const record = this.activeSequences.get(key)!;
+      const altKey = this.getLookupKey(broker, environment, cleanId);
+      
+      const record = this.activeSequences.get(key) || this.activeSequences.get(altKey);
+      if (record) {
         if (Math.abs(record.currentVolume - pos.quantity) > 0.001) {
+          console.log(`[MARTINGALE] 🔄 Reconciled volume change for #${record.positionId} [${record.pair}]: oldVol=${record.currentVolume}, newVol=${pos.quantity}, avgEntry=${pos.entryPrice}`);
           record.currentVolume = pos.quantity;
           record.currentAverageEntry = pos.entryPrice;
           if (pos.takeProfit && pos.takeProfit > 0) {
@@ -154,11 +176,12 @@ export class MartingaleRecoveryService {
             const inferredLevel = Math.round(Math.log2(ratio));
             if (inferredLevel > record.recoveryLevel) {
               record.recoveryLevel = inferredLevel;
-              const pipSize = record.pair.includes('JPY') ? 0.01 : 0.0001;
+              const pipSize = getForexPairConfig(record.pair).pipSize;
               const triggerPips = (config.adverseTriggerPips || 5.0) * (record.recoveryLevel + 1);
+              const digits = getForexPairConfig(record.pair).digits || (record.pair.includes('JPY') ? 3 : 5);
               record.nextTriggerPrice = record.direction === 'BUY'
-                ? Number((record.initialEntryPrice - (triggerPips * pipSize)).toFixed(record.pair.includes('JPY') ? 3 : 5))
-                : Number((record.initialEntryPrice + (triggerPips * pipSize)).toFixed(record.pair.includes('JPY') ? 3 : 5));
+                ? Number((record.initialEntryPrice - (triggerPips * pipSize)).toFixed(digits))
+                : Number((record.initialEntryPrice + (triggerPips * pipSize)).toFixed(digits));
             }
           }
           record.updatedAt = Date.now();
@@ -168,7 +191,7 @@ export class MartingaleRecoveryService {
       }
 
       // Register new discovery (Auto Live, manual, or pre-existing)
-      this.registerInitialPosition({
+      const newRec = this.registerInitialPosition({
         positionId: String(pos.id),
         pair: pos.symbol,
         direction: pos.side,
@@ -178,6 +201,9 @@ export class MartingaleRecoveryService {
         broker,
         environment
       });
+      if (newRec) {
+        console.log(`[MARTINGALE] 🆕 Registered new open position for tracking: #${pos.id} [${pos.symbol} ${pos.side}] Entry=${pos.entryPrice}, Vol=${pos.quantity}, 5-Pip Trigger=${newRec.nextTriggerPrice}`);
+      }
       liveRuntimeLog('INFO', 'MARTINGALE_RECONCILE_DISCOVERED', { positionId: pos.id, pair: pos.symbol });
     }
   }
@@ -188,11 +214,13 @@ export class MartingaleRecoveryService {
   public static isPairEligible(pair: string): boolean {
     const config = getSystemConfig().martingale;
     if (!config || !config.enabled) return false;
-    if (config.scope === 'ALL') return true;
+    if (config.scope === 'ALL' || !config.scope) return true;
     if (config.scope === 'SELECTED') {
-      return Array.isArray(config.selectedPairs) && config.selectedPairs.includes(pair);
+      const norm = String(pair || '').replace(/[^A-Z]/g, '').toUpperCase();
+      const selected = Array.isArray(config.selectedPairs) ? config.selectedPairs : [];
+      return selected.some(s => String(s || '').replace(/[^A-Z]/g, '').toUpperCase() === norm);
     }
-    return false;
+    return true;
   }
 
   /**
@@ -220,7 +248,9 @@ export class MartingaleRecoveryService {
     if (this.activeSequences.has(key)) return this.activeSequences.get(key)!;
 
     const config = getSystemConfig().martingale;
-    const pipSize = options.pair.includes('JPY') ? 0.01 : 0.0001;
+    const pairConfig = getForexPairConfig(options.pair);
+    const pipSize = pairConfig.pipSize;
+    const digits = pairConfig.digits || (options.pair.includes('JPY') ? 3 : 5);
     const triggerPips = config.adverseTriggerPips || 5.0;
 
     const sequenceId = `mart_${options.pair.replace('/', '')}_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
@@ -238,7 +268,7 @@ export class MartingaleRecoveryService {
       currentVolume: options.volume,
       recoveryLevel: 0,
       lastTriggerPrice: options.entryPrice,
-      nextTriggerPrice: Number(nextTrigger.toFixed(options.pair.includes('JPY') ? 3 : 5)),
+      nextTriggerPrice: Number(nextTrigger.toFixed(digits)),
       initialEntryPrice: options.entryPrice,
       currentAverageEntry: options.entryPrice,
       currentDynamicTP: options.initialTP,
@@ -284,6 +314,13 @@ export class MartingaleRecoveryService {
     const record = this.activeSequences.get(key);
     if (!record) return { triggered: false, reason: 'POSITION_NOT_MANAGED' };
 
+    // Auto-heal stale locks and pending states older than 30 seconds
+    const isStalePending = record.updatedAt && (Date.now() - record.updatedAt > 30_000);
+    if (isStalePending && !['CLOSING', 'COMPLETED', 'ABORTED'].includes(record.status)) {
+      record.status = 'WAITING_NEXT_TRIGGER';
+      this.executionLocks.delete(key);
+    }
+
     // Idempotency & Lock Guard: Do not re-evaluate a locked or in-flight recovery
     if (
       this.executionLocks.has(key) ||
@@ -297,14 +334,23 @@ export class MartingaleRecoveryService {
       return { triggered: false, reason: 'MARTINGALE_DISABLED' };
     }
 
+    const pipSize = getForexPairConfig(record.pair).pipSize;
+    const triggerPips = config.adverseTriggerPips || 5.0;
+
     // Check Trigger Condition:
-    // BUY adverse: executable bid price falls to or below next trigger
-    // SELL adverse: executable ask price rises to or above next trigger
+    // BUY adverse: executable bid price falls to or below next trigger (>= 5 pips adverse)
+    // SELL adverse: executable ask price rises to or above next trigger (>= 5 pips adverse)
     const isBuy = record.direction === 'BUY';
     const evalPrice = quote ? (isBuy ? quote.bid : quote.ask) : currentPrice;
-    const isTriggered = isBuy
-      ? evalPrice <= record.nextTriggerPrice + 1e-7
-      : evalPrice >= record.nextTriggerPrice - 1e-7;
+
+    const adversePips = isBuy
+      ? (record.lastTriggerPrice - evalPrice) / pipSize
+      : (evalPrice - record.lastTriggerPrice) / pipSize;
+    const priceBreachedTrigger = isBuy
+      ? evalPrice <= record.nextTriggerPrice + 1e-6
+      : evalPrice >= record.nextTriggerPrice - 1e-6;
+
+    const isTriggered = priceBreachedTrigger || (adversePips >= triggerPips - 0.05);
 
     if (!isTriggered) {
       return { triggered: false, reason: 'TRIGGER_PRICE_NOT_REACHED' };
@@ -324,14 +370,12 @@ export class MartingaleRecoveryService {
     }
 
     const durationMin = (Date.now() - record.startedAt) / (60 * 1000);
-    if (durationMin > (config.maximumRecoveryDurationMin || 120)) {
+    const maxDurationMin = (config.maximumRecoveryDurationMin && config.maximumRecoveryDurationMin > 0)
+      ? config.maximumRecoveryDurationMin
+      : 1440;
+    if (durationMin > maxDurationMin) {
       return { triggered: false, reason: 'MAX_DURATION_EXCEEDED' };
     }
-
-    const pipSize = record.pair.includes('JPY') ? 0.01 : 0.0001;
-    const adversePips = isBuy
-      ? (record.lastTriggerPrice - evalPrice) / pipSize
-      : (evalPrice - record.lastTriggerPrice) / pipSize;
 
     // Explicit audit log requirement
     liveRuntimeLog('INFO', 'MARTINGALE_TRIGGER_DETECTED', {
@@ -429,7 +473,7 @@ export class MartingaleRecoveryService {
 
       const quoteTimestamp = Number(quote?.timestamp || 0);
       const quoteAgeMs = quoteTimestamp > 0 ? Date.now() - quoteTimestamp : 0;
-      if (!quote || quote.status !== 'FRESH' || quoteAgeMs > 30_000 || !(quote.bid > 0) || !(quote.ask > 0)) {
+      if (!quote || !(quote.bid > 0) || !(quote.ask > 0) || quoteAgeMs > 120_000) {
         liveRuntimeLog('WARN', 'MARTINGALE_QUOTE_STALE_OR_INVALID', {
           positionId,
           quoteStatus: quote?.status,
@@ -442,7 +486,9 @@ export class MartingaleRecoveryService {
       const executionEntryPrice = record.direction === 'BUY' ? quote.ask : quote.bid;
 
       // 4. Calculate Recovery Volume Plan
-      const pipSize = record.pair.includes('JPY') ? 0.01 : 0.0001;
+      const pairConfig = getForexPairConfig(record.pair);
+      const pipSize = pairConfig.pipSize;
+      const digits = pairConfig.digits || (record.pair.includes('JPY') ? 3 : 5);
       const nextVolume = record.currentVolume * (config.volumeMultiplier || 2.0);
       const addedVolume = nextVolume - record.currentVolume;
 
@@ -485,6 +531,10 @@ export class MartingaleRecoveryService {
       record.updatedAt = Date.now();
       this.persistSequenceToDatabase(record);
 
+      console.log(`[MARTINGALE-DOUBLING] 🚀 Starting recovery doubling for position #${record.positionId} [${record.pair} ${record.direction}]`);
+      console.log(`[MARTINGALE-DOUBLING] 📊 Current Volume: ${record.currentVolume} units, Doubling Multiplier: ${config.volumeMultiplier || 2.0}, New Target Volume: ${nextVolume} units, Adding Order Volume: +${addedVolume} units at ${executionEntryPrice}`);
+      console.log(`[MARTINGALE-DOUBLING] 📤 Submitting MARKET ${record.direction} order to cTrader for +${addedVolume} units on ${record.pair}...`);
+
       liveRuntimeLog('TRADE', 'MARTINGALE_RECOVERY_SUBMITTED', {
         positionId: record.positionId,
         recoveryLevel: record.recoveryLevel + 1,
@@ -495,7 +545,9 @@ export class MartingaleRecoveryService {
       let orderRes;
       try {
         orderRes = await adapter.placeOrder(recoveryOrder);
+        console.log(`[MARTINGALE-DOUBLING] 📥 cTrader order response received: status=${orderRes?.status || 'FILLED'}, brokerOrderId=${orderRes?.brokerOrderId || orderRes?.id}`);
       } catch (err: any) {
+        console.error(`[MARTINGALE-DOUBLING] ❌ cTrader order placement failed for #${record.positionId}:`, err?.message || err);
         liveRuntimeLog('ERROR', 'MARTINGALE_RECOVERY_FAILED', {
           positionId: record.positionId,
           level: record.recoveryLevel + 1,
@@ -511,6 +563,7 @@ export class MartingaleRecoveryService {
       }
 
       if (orderRes.status === 'REJECTED') {
+        console.error(`[MARTINGALE-DOUBLING] ❌ cTrader rejected recovery order for #${record.positionId}:`, orderRes.rejectionReason);
         liveRuntimeLog('ERROR', 'MARTINGALE_RECOVERY_FAILED', {
           positionId: record.positionId,
           level: record.recoveryLevel + 1,
@@ -527,8 +580,9 @@ export class MartingaleRecoveryService {
 
       // 6. Confirm Recovery Execution with Authoritative Broker State
       const postRecoveryPositions = await adapter.getPositions();
-      const updatedPos = postRecoveryPositions.find(p => String(p.id) === positionId);
+      const updatedPos = postRecoveryPositions.find(p => String(p.id) === positionId || String(p.id).replace(/^ctrader-/, '') === String(positionId).replace(/^ctrader-/, ''));
       if (!updatedPos) {
+        console.error(`[MARTINGALE-DOUBLING] ❌ Position #${positionId} not found on broker after order fill.`);
         liveRuntimeLog('ERROR', 'MARTINGALE_POSITION_LOST_AFTER_RECOVERY', { positionId });
         record.status = 'ABORTED';
         record.updatedAt = Date.now();
@@ -539,6 +593,8 @@ export class MartingaleRecoveryService {
       const confirmedEntry = updatedPos.entryPrice;
       const confirmedVolume = updatedPos.quantity;
       const previousVolume = record.currentVolume;
+
+      console.log(`[MARTINGALE-DOUBLING] ✅ cTrader Position #${positionId} doubled successfully: New Total Volume = ${confirmedVolume} units, New Weighted Average Entry = ${confirmedEntry}`);
 
       record.status = 'RECOVERY_CONFIRMED';
       liveRuntimeLog('TRADE', 'MARTINGALE_RECOVERY_CONFIRMED', {
@@ -568,24 +624,41 @@ export class MartingaleRecoveryService {
       });
 
       const shortTpConfig = getSystemConfig().shortTPOptimization;
-      let tpDistancePips = Math.max(5.0, dynamicExit.tpDistancePips || 8.0);
-      if (shortTpConfig?.enabled) {
-        // Phase 44 Hard Maximum: recovery TP distance must not exceed 5.0 pips
-        tpDistancePips = Math.min(5.0, Math.max(1.0, tpDistancePips));
+      let tpDistancePips = 3.0;
+      if (shortTpConfig?.enabled && shortTpConfig?.maxTpPips) {
+        tpDistancePips = Math.min(5.0, Math.max(1.0, shortTpConfig.maxTpPips));
+      } else {
+        tpDistancePips = Math.min(5.0, Math.max(1.0, dynamicExit.tpDistancePips || 3.0));
       }
+      // Hard maximum cap: recovery Take Profit must never exceed 5.0 pips
+      tpDistancePips = Math.min(5.0, Math.max(0.5, tpDistancePips));
+
       const newTP = isBuy
         ? confirmedEntry + (tpDistancePips * pipSize)
         : confirmedEntry - (tpDistancePips * pipSize);
 
-      const normalizedTP = Number(newTP.toFixed(record.pair.includes('JPY') ? 3 : 5));
+      const normalizedTP = Number(newTP.toFixed(digits));
       const oldTP = Number(updatedPos.takeProfit || record.currentDynamicTP || 0);
 
-      // 8. Amend Position TP on cTrader
+      let normalizedSL: number | undefined;
+      if (config.stopLoss) {
+        const slDistancePips = Number(getSystemConfig().forexStopLossPips) || 20.0;
+        const newSL = isBuy
+          ? confirmedEntry - (slDistancePips * pipSize)
+          : confirmedEntry + (slDistancePips * pipSize);
+        normalizedSL = Number(newSL.toFixed(digits));
+      }
+
+      console.log(`[MARTINGALE-DOUBLING] 🎯 Recalculating TP/SL from weighted avg entry ${confirmedEntry}: New TP = ${normalizedTP} (${tpDistancePips} pips), New SL = ${normalizedSL ?? 'None (Martingale recovery active)'}`);
+      console.log(`[MARTINGALE-DOUBLING] 📝 Amending Position #${positionId} TP/SL on cTrader...`);
+
+      // 8. Amend Position TP & SL on cTrader
       record.status = 'TP_MODIFICATION_PENDING';
       liveRuntimeLog('INFO', 'MARTINGALE_TP_SUBMITTED', {
         positionId: record.positionId,
         oldTP,
         requestedTP: normalizedTP,
+        requestedSL: normalizedSL,
         weightedAverageEntry: confirmedEntry,
         tpDistancePips
       });
@@ -593,17 +666,25 @@ export class MartingaleRecoveryService {
       let tpAmended = false;
       try {
         if (typeof adapter.modifyPosition === 'function') {
-          tpAmended = await adapter.modifyPosition(positionId, { takeProfit: normalizedTP });
+          tpAmended = await adapter.modifyPosition(positionId, {
+            takeProfit: normalizedTP,
+            stopLoss: normalizedSL
+          });
         } else {
-          await adapter.modifyOrder(positionId, { takeProfit: normalizedTP });
+          await adapter.modifyOrder(positionId, {
+            takeProfit: normalizedTP,
+            stopLoss: normalizedSL
+          });
           tpAmended = true;
         }
       } catch (tpErr: any) {
         tpAmended = false;
+        console.error(`[MARTINGALE-DOUBLING] ❌ cTrader position SL/TP modification failed:`, tpErr?.message || tpErr);
         liveRuntimeLog('ERROR', 'MARTINGALE_TP_AMEND_FAILED', { positionId, error: tpErr?.message || String(tpErr) });
       }
 
       if (!tpAmended) {
+        console.error(`[MARTINGALE-DOUBLING] ⚠️ TP amendment not confirmed by broker. State saved for retry.`);
         liveRuntimeLog('ERROR', 'MARTINGALE_TP_AMEND_FAILED', {
           positionId: record.positionId,
           requestedTP: normalizedTP,
@@ -628,7 +709,7 @@ export class MartingaleRecoveryService {
       let confirmedTP = normalizedTP;
       try {
         const positionsAfterTP = await adapter.getPositions();
-        const posWithTP = positionsAfterTP.find(p => String(p.id) === positionId);
+        const posWithTP = positionsAfterTP.find(p => String(p.id) === positionId || String(p.id).replace(/^ctrader-/, '') === String(positionId).replace(/^ctrader-/, ''));
         if (posWithTP?.takeProfit) {
           confirmedTP = Number(posWithTP.takeProfit);
         }
@@ -659,13 +740,13 @@ export class MartingaleRecoveryService {
       const nextTrigger = isBuy
         ? currentPrice - (nextTriggerPips * pipSize)
         : currentPrice + (nextTriggerPips * pipSize);
-      record.nextTriggerPrice = Number(nextTrigger.toFixed(record.pair.includes('JPY') ? 3 : 5));
+      record.nextTriggerPrice = Number(nextTrigger.toFixed(digits));
 
       record.status = 'WAITING_NEXT_TRIGGER';
       record.updatedAt = Date.now();
       this.persistSequenceToDatabase(record);
 
-      return true;
+      console.log(`[MARTINGALE-DOUBLING] 🎉 Position #${positionId} recovery level ${record.recoveryLevel} COMPLETED! New TP = ${confirmedTP}, Next Adverse Trigger armed at = ${record.nextTriggerPrice}`);
     } catch (err: any) {
       liveRuntimeLog('ERROR', 'MARTINGALE_RECOVERY_FATAL_ERROR', { positionId, error: err?.message || String(err) });
       return false;

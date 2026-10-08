@@ -93,6 +93,7 @@ export const AlertsPage: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedHour, setSelectedHour] = useState<number | null>(null);
   const [showRawTrades, setShowRawTrades] = useState<boolean>(false);
+  const [heatmapMode, setHeatmapMode] = useState<'ALL' | 'LOSSES' | 'WINS'>('ALL');
 
   const fetchReport = useCallback(async (fromStr: string, toStr: string) => {
     setLoading(true);
@@ -620,12 +621,49 @@ export const AlertsPage: React.FC = () => {
 
       {/* Pair vs Hour Trade Density Heatmap */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
-        <div className="flex items-center gap-2 mb-2">
-          <Flame className="w-4 h-4 text-amber-400" />
-          <h2 className="text-sm font-bold text-white uppercase">Pair vs Hour Trade Density & Profitability Heatmap</h2>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-2">
+          <div className="flex items-center gap-2">
+            <Flame className="w-4 h-4 text-amber-400" />
+            <h2 className="text-sm font-bold text-white uppercase">Pair vs Hour Trade Density & Profitability Heatmap</h2>
+          </div>
+
+          {/* Heatmap View Mode Switcher */}
+          <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800 text-xs font-mono">
+            <button
+              onClick={() => setHeatmapMode('ALL')}
+              className={`px-2.5 py-1 rounded transition text-[11px] font-bold ${
+                heatmapMode === 'ALL'
+                  ? 'bg-cyan-600 text-white shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              ALL TRADES (DENSITY)
+            </button>
+            <button
+              onClick={() => setHeatmapMode('LOSSES')}
+              className={`px-2.5 py-1 rounded transition text-[11px] font-bold ${
+                heatmapMode === 'LOSSES'
+                  ? 'bg-rose-600 text-white shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              LOSS TRADES ONLY ({report?.losingTrades || 0})
+            </button>
+            <button
+              onClick={() => setHeatmapMode('WINS')}
+              className={`px-2.5 py-1 rounded transition text-[11px] font-bold ${
+                heatmapMode === 'WINS'
+                  ? 'bg-emerald-600 text-white shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              WIN TRADES ONLY ({report?.winningTrades || 0})
+            </button>
+          </div>
         </div>
+
         <p className="text-xs text-slate-400 mb-4">
-          Visualize trade concentration and performance density across 24 hours for each traded pair to identify optimal execution windows.
+          Visualize trade concentration and performance density across 24 hours for each traded pair. Toggle modes above to isolate all 31 loss trades or 340 win trades by exact execution hour.
         </p>
 
         <div className="overflow-x-auto">
@@ -648,12 +686,17 @@ export const AlertsPage: React.FC = () => {
               ) : (
                 report.pairBreakdown.map(p => {
                   const pairTrades = (report.rawTrades || []).filter(t => t.symbol === p.pair);
-                  const hourCounts = Array.from({ length: 24 }, () => ({ count: 0, pnl: 0 }));
+                  const hourCounts = Array.from({ length: 24 }, () => ({ count: 0, pnl: 0, wins: 0, losses: 0 }));
                   for (const t of pairTrades) {
                     const hr = new Date(t.timestamp).getHours();
                     if (hr >= 0 && hr < 24) {
                       hourCounts[hr].count += 1;
                       hourCounts[hr].pnl += t.pnl;
+                      if (t.pnl < 0) {
+                        hourCounts[hr].losses += 1;
+                      } else {
+                        hourCounts[hr].wins += 1;
+                      }
                     }
                   }
 
@@ -664,28 +707,56 @@ export const AlertsPage: React.FC = () => {
                         <span>{p.pair}</span>
                       </td>
                       {hourCounts.map((cell, h) => {
-                        const hasActivity = cell.count > 0;
-                        const isProfitable = cell.pnl > 0;
-                        const isLoss = cell.pnl < 0;
-
+                        let displayCount = cell.count;
+                        let hasActivity = cell.count > 0;
                         let bgClass = 'bg-slate-950/60 text-slate-600 border border-slate-800/50';
-                        if (hasActivity) {
-                          if (isProfitable) {
-                            bgClass = cell.count >= 3 ? 'bg-emerald-600 text-white font-bold shadow-sm' : 'bg-emerald-950 text-emerald-300 border border-emerald-800';
-                          } else if (isLoss) {
-                            bgClass = cell.count >= 3 ? 'bg-rose-600 text-white font-bold shadow-sm' : 'bg-rose-950 text-rose-300 border border-rose-800';
-                          } else {
-                            bgClass = 'bg-slate-800 text-slate-200';
+
+                        if (heatmapMode === 'LOSSES') {
+                          displayCount = cell.losses;
+                          hasActivity = cell.losses > 0;
+                          if (hasActivity) {
+                            bgClass = cell.losses >= 3
+                              ? 'bg-rose-600 text-white font-bold shadow-sm'
+                              : 'bg-rose-950 text-rose-300 border border-rose-800 font-semibold';
+                          }
+                        } else if (heatmapMode === 'WINS') {
+                          displayCount = cell.wins;
+                          hasActivity = cell.wins > 0;
+                          if (hasActivity) {
+                            bgClass = cell.wins >= 3
+                              ? 'bg-emerald-600 text-white font-bold shadow-sm'
+                              : 'bg-emerald-950 text-emerald-300 border border-emerald-800 font-semibold';
+                          }
+                        } else {
+                          // ALL TRADES (Density)
+                          const isProfitable = cell.pnl > 0;
+                          const isLoss = cell.pnl < 0;
+
+                          if (hasActivity) {
+                            if (isProfitable) {
+                              bgClass = cell.count >= 3
+                                ? 'bg-emerald-600 text-white font-bold shadow-sm'
+                                : 'bg-emerald-950 text-emerald-300 border border-emerald-800';
+                            } else if (isLoss) {
+                              bgClass = cell.count >= 3
+                                ? 'bg-rose-600 text-white font-bold shadow-sm'
+                                : 'bg-rose-950 text-rose-300 border border-rose-800';
+                            } else {
+                              bgClass = 'bg-slate-800 text-slate-200';
+                            }
                           }
                         }
 
                         return (
                           <td key={h} className="py-1 px-1 text-center">
                             <div
-                              title={`${p.pair} @ ${pad(h)}:00 — Trades: ${cell.count}, Net P&L: $${cell.pnl.toFixed(2)}`}
+                              title={`${p.pair} @ ${pad(h)}:00 — ${cell.count} Trades (${cell.wins} Wins, ${cell.losses} Losses) | Net P&L: ${cell.pnl >= 0 ? '+' : ''}$${cell.pnl.toFixed(2)}`}
                               className={`h-8 rounded flex flex-col items-center justify-center cursor-default transition ${bgClass}`}
                             >
-                              <span className="text-[10px] leading-none">{hasActivity ? cell.count : '·'}</span>
+                              <span className="text-[10px] leading-none">{hasActivity ? displayCount : '·'}</span>
+                              {heatmapMode === 'ALL' && cell.losses > 0 && cell.wins > 0 && (
+                                <span className="text-[8px] text-rose-300/80 leading-none mt-0.5">-{cell.losses}L</span>
+                              )}
                             </div>
                           </td>
                         );
@@ -702,10 +773,10 @@ export const AlertsPage: React.FC = () => {
           <div className="flex items-center gap-4">
             <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-emerald-600" /> High Profitable Density</span>
             <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-emerald-950 border border-emerald-800" /> Mild Profit</span>
-            <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-rose-600" /> High Drawdown Density</span>
+            <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-rose-600" /> Drawdown Hour / Loss Focus</span>
             <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-slate-950 border border-slate-800" /> Zero Activity</span>
           </div>
-          <span>Hover over cells for precise volume and P&L details</span>
+          <span>Hover over cells for precise Win/Loss count and Net P&L</span>
         </div>
       </div>
 

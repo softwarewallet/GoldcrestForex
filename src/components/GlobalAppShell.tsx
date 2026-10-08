@@ -183,7 +183,6 @@ export const GlobalAppShell: React.FC<GlobalAppShellProps> = ({
                 <div className="text-[11px] text-slate-400">Administrator</div>
               </div>
             </div>
-            <button type="button" className="mt-2 ml-1 text-[11px] text-slate-300 hover:text-white">Logout</button>
           </div>
         </div>
       </aside>

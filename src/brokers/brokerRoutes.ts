@@ -864,10 +864,16 @@ brokerRouter.get('/today-trades-summary', async (_req: Request, res: Response) =
       const entry = Number(trade.price ?? trade.entryPrice ?? 0);
       const exit = Number(trade.averageFillPrice ?? trade.closingPrice ?? trade.exitPrice ?? 0);
       const qty = Number(trade.filledQuantity ?? trade.quantity ?? trade.size ?? 0);
-      if (entry > 0 && exit > 0 && qty > 0) {
-        pnl = trade.side === 'SELL' || trade.direction === 'SELL'
-          ? (entry - exit) * qty
-          : (exit - entry) * qty;
+      if (entry > 0 && exit > 0 && qty > 0 && Math.abs(exit - entry) > 0.00001) {
+        const rawDiff = trade.side === 'SELL' || trade.direction === 'SELL'
+          ? (entry - exit)
+          : (exit - entry);
+        const sym = String(trade.symbol || '');
+        if (sym.includes('JPY') && !sym.startsWith('JPY')) {
+          pnl = (rawDiff * qty) / (exit > 50 ? exit : 150.0);
+        } else {
+          pnl = rawDiff * qty;
+        }
       }
     }
 

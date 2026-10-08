@@ -922,13 +922,39 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
               <strong className="text-slate-200">fx_structure_v2a</strong>
             </div>
 
-            <div className={`flex items-center space-x-1.5 px-2.5 py-1 rounded border font-bold ${autoTradingStatus?.autonomousPermission
-              ? 'bg-emerald-950/80 border-emerald-700 text-emerald-300'
-              : 'bg-amber-950/70 border-amber-700 text-amber-300'
+            <div className={`flex items-center space-x-1.5 px-2.5 py-1 rounded border font-bold ${
+              autoTradingStatus?.state === 'PAUSED_SCHEDULE'
+                ? 'bg-amber-950/90 border-amber-500 text-amber-300 animate-pulse'
+                : autoTradingStatus?.autonomousPermission
+                ? 'bg-emerald-950/80 border-emerald-700 text-emerald-300'
+                : 'bg-amber-950/70 border-amber-700 text-amber-300'
             }`}>
               <Zap className="w-3.5 h-3.5" />
-              <span>AUTO LIVE: {autoTradingStatus?.state || 'UNKNOWN'}</span>
+              <span>
+                AUTO LIVE:{' '}
+                {autoTradingStatus?.state === 'PAUSED_SCHEDULE'
+                  ? 'PAUSED (RISK WINDOW)'
+                  : autoTradingStatus?.state || 'UNKNOWN'}
+              </span>
             </div>
+
+            {autoTradingStatus?.scheduler?.enabled && (
+              <div
+                title={autoTradingStatus.scheduler.message}
+                className={`flex items-center space-x-1 px-2.5 py-1 rounded border text-[10px] font-bold ${
+                  autoTradingStatus.scheduler.inRiskWindow
+                    ? 'bg-amber-950/80 border-amber-600 text-amber-300 animate-pulse'
+                    : 'bg-slate-950 border-slate-700 text-slate-300'
+                }`}
+              >
+                <Clock className="w-3 h-3 text-cyan-400" />
+                <span>
+                  {autoTradingStatus.scheduler.inRiskWindow
+                    ? `RISK BLACKOUT ACTIVE (${autoTradingStatus.scheduler.startTime12}–${autoTradingStatus.scheduler.endTime12})`
+                    : `SCHEDULE: ${autoTradingStatus.scheduler.startTime12}–${autoTradingStatus.scheduler.endTime12}`}
+                </span>
+              </div>
+            )}
 
             <button
               type="button"
@@ -937,7 +963,11 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
               className="px-3 py-1 rounded border text-xs font-bold transition disabled:opacity-50 bg-slate-900 border-slate-700 text-slate-200 hover:bg-slate-800"
               title="Explicitly start or stop autonomous live trading"
             >
-              {autoTradingBusy ? 'Working...' : ['RUNNING', 'PREPARING'].includes(autoTradingStatus?.state) ? 'STOP AUTO LIVE' : 'START AUTO LIVE'}
+              {autoTradingBusy
+                ? 'Working...'
+                : ['RUNNING', 'PREPARING', 'PAUSED_LIMIT', 'PAUSED_SCHEDULE'].includes(autoTradingStatus?.state)
+                ? 'STOP AUTO LIVE'
+                : 'START AUTO LIVE'}
             </button>
 
             {autoTradingStatus?.preOpenPreparation?.news && (

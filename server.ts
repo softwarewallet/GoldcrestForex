@@ -13,6 +13,7 @@ import { FOREX_PAIRS, getForexPairConfig } from './src/markets/forex/instruments
 import { INDIAN_UNDERLYINGS } from './src/markets/india_equity/underlyings';
 import { ScannerService } from './src/services/scannerService';
 import { getSystemConfig, updateSystemConfig, applyPersistedSystemConfig } from './src/services/configService';
+import { normalizeSchedulerConfig } from './src/services/schedulerUtils';
 import { calculateStrategyPayoff } from './src/markets/india_options/strategySkeleton';
 
 // Phase 2A Forex Engines
@@ -937,11 +938,16 @@ async function hydratePersistedTradeLimits(): Promise<void> {
   for (const [dbKey, configKey] of [
     ['AUTO_LIVE_FOREX_PAIRS', 'autoLiveForexPairs'],
     ['AUTO_LIVE_INDIAN_UNDERLYINGS', 'autoLiveIndianUnderlyings'],
-    ['MARTINGALE', 'martingale']
+    ['MARTINGALE', 'martingale'],
+    ['AUTO_LIVE_SCHEDULER', 'autoLiveScheduler']
   ] as Array<[string, string]>) {
     try {
       const parsed = JSON.parse(values[dbKey] || 'null');
       if (parsed !== null) {
+        if (configKey === 'martingale' && typeof parsed === 'object' && parsed !== null) {
+          // On application restart or start, Martingale is always disabled by default
+          parsed.enabled = false;
+        }
         persistedUpdates[configKey] = parsed;
       }
     } catch {}
@@ -1181,6 +1187,7 @@ app.post('/api/config', operatorAuthRequired, async (req: Request, res: Response
     const requestedForexTakeProfitPips = req.body?.forexTakeProfitPips;
     const requestedForexPairs = req.body?.autoLiveForexPairs;
     const requestedIndianUnderlyings = req.body?.autoLiveIndianUnderlyings;
+    const requestedAutoLiveScheduler = req.body?.autoLiveScheduler;
     const updates: any = { ...req.body };
 
     if (requestedForex !== undefined) {
@@ -1269,6 +1276,13 @@ app.post('/api/config', operatorAuthRequired, async (req: Request, res: Response
       updates.autoLiveIndianUnderlyings = normalized;
     }
 
+    if (requestedAutoLiveScheduler !== undefined) {
+      if (typeof requestedAutoLiveScheduler !== 'object' || requestedAutoLiveScheduler === null) {
+        return res.status(400).json({ error: 'autoLiveScheduler must be an object.' });
+      }
+      updates.autoLiveScheduler = normalizeSchedulerConfig(requestedAutoLiveScheduler);
+    }
+
     const updated = updateSystemConfig(updates);
     const now = Date.now();
 
@@ -1276,7 +1290,7 @@ app.post('/api/config', operatorAuthRequired, async (req: Request, res: Response
     // cannot reset a different setting. configService has already written the
     // same merged configuration to an atomic JSON file.
     await executeRun(
-      'INSERT OR REPLACE INTO system_settings (key, value, updated_at) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?)',
+      'INSERT OR REPLACE INTO system_settings (key, value, updated_at) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?)',
       [
         'SELECTED_CTRADER_ACCOUNT_ID', String(updated.selectedCtraderAccountId || ''), now,
         'SELECTED_CTRADER_ACCOUNT_CURRENCY', String(updated.selectedCtraderAccountCurrency || ''), now,
@@ -1299,7 +1313,8 @@ app.post('/api/config', operatorAuthRequired, async (req: Request, res: Response
         'AUTO_LIVE_FOREX_PAIRS', JSON.stringify(updated.autoLiveForexPairs || []), now,
         'AUTO_LIVE_INDIAN_UNDERLYINGS', JSON.stringify(updated.autoLiveIndianUnderlyings || []), now,
         'FINANCIAL_DISCLAIMER', String(updated.financialDisclaimer || ''), now,
-        'MARTINGALE', JSON.stringify(updated.martingale || {}), now
+        'MARTINGALE', JSON.stringify(updated.martingale || {}), now,
+        'AUTO_LIVE_SCHEDULER', JSON.stringify(updated.autoLiveScheduler || {}), now
       ]
     );
     res.json({ success: true, config: updated });

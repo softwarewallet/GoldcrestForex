@@ -18,6 +18,7 @@ import { PredictionDecisionGate } from '../ml/prediction/predictionDecisionGate'
 import { CombinedPredictionEngine } from '../ml/prediction/combinedPredictionEngine';
 import { MartingaleRecoveryService } from './martingaleRecoveryService';
 import { ShortTpOptimizationEngine } from '../ml/direction/shortTpOptimizationEngine';
+import { evaluateAutoLiveScheduler, SchedulerEvaluationResult } from './schedulerUtils';
 
 const LIVE_QUOTE_MAX_AGE_MS = 1_800_000; // 30 minutes to prevent clock lag or tick latency issues
 
@@ -192,7 +193,7 @@ class LiveForexSignalProvider implements ForexDataProvider {
   }
 }
 
-export type AutoTradingState = 'STOPPED' | 'PREPARING' | 'RUNNING' | 'PAUSED_LIMIT' | 'BLOCKED';
+export type AutoTradingState = 'STOPPED' | 'PREPARING' | 'RUNNING' | 'PAUSED_LIMIT' | 'PAUSED_SCHEDULE' | 'BLOCKED';
 export type AutoTradingExecutionStage = 'IDLE' | 'SCANNING_MARKET' | 'ANALYZING_SIGNAL' | 'PREPARING_ORDER' | 'SAFETY_GATE' | 'SUBMITTING_ORDER' | 'TRADE_EXECUTED' | 'REJECTED';
 
 export interface AutoTradingExecutionStatus {
@@ -239,6 +240,7 @@ export interface AutoTradingStatus {
     scannedPositions: number;
     modifiedOrders: number;
   };
+  scheduler: SchedulerEvaluationResult;
   requiresClosedMarketConfirmation?: boolean;
 }
 
@@ -364,6 +366,10 @@ class AutoTradingService {
     }
   }
 
+  evaluateRiskWindowSchedule(): SchedulerEvaluationResult {
+    return evaluateAutoLiveScheduler(getSystemConfig().autoLiveScheduler);
+  }
+
   getStatus(): AutoTradingStatus {
     const autonomousPermission = refreshAutonomousExecutionPermission();
     return {
@@ -394,7 +400,8 @@ class AutoTradingService {
       martingaleStats: {
         scannedPositions: this.martingaleScannedCount,
         modifiedOrders: this.martingaleModifiedCount
-      }
+      },
+      scheduler: this.evaluateRiskWindowSchedule()
     };
   }
 
@@ -469,6 +476,26 @@ class AutoTradingService {
 
     if (this.timer) return this.getStatus();
 
+    const scheduler = this.evaluateRiskWindowSchedule();
+    if (scheduler.enabled && scheduler.inRiskWindow) {
+      this.state = 'PAUSED_SCHEDULE';
+      this.lastCycleResult = scheduler.message;
+      liveRuntimeLog('SYSTEM', 'AUTO_TRADING_ARMED_IN_RISK_WINDOW', {
+        intervalMs: AUTO_INTERVAL_MS,
+        pairs: getConfiguredAutoForexPairs(),
+        marketGate,
+        scheduler
+      });
+      tradeAuditLog('AUTO_TRADING_ARMED_IN_RISK_WINDOW', {
+        scheduler
+      });
+      this.timer = setInterval(() => {
+        void this.runScheduledCycle();
+      }, AUTO_INTERVAL_MS);
+      this.timer.unref?.();
+      return this.getStatus();
+    }
+
     if (marketGate.anyMarketOpen) {
       this.state = 'RUNNING';
       this.lastCycleResult = 'Auto-trading loop started.';
@@ -527,6 +554,10 @@ class AutoTradingService {
 
     try {
       const adapter = brokerRegistry.getAdapter('CTRADER', 'LIVE');
+      if (!adapter) {
+        this.martingaleInFlight = false;
+        return;
+      }
       const positions = await adapter.getPositions();
       
       // 1. Reconcile Sequences with Authoritative Broker State
@@ -536,27 +567,53 @@ class AutoTradingService {
 
       // 2. Evaluate and Execute Recovery for each active sequence
       const activeSequences = MartingaleRecoveryService.getAllActiveSequences();
+      if (activeSequences.length > 0) {
+        console.log(`[MARTINGALE-SCAN] 🔎 Scanning ${activeSequences.length} active position(s) on broker for adverse movement...`);
+      }
+
       for (const seq of activeSequences) {
-          // Only process positions for the current adapter
-          if (seq.broker !== 'CTRADER' || seq.environment !== 'LIVE') continue;
+        // Only process positions for the current adapter
+        if (seq.broker !== 'CTRADER' || seq.environment !== 'LIVE') continue;
 
-          try {
-            const quote = await adapter.getQuote(seq.pair);
-            const currentPrice = seq.direction === 'BUY' ? quote.bid : quote.ask;
+        try {
+          const quote = await adapter.getQuote(seq.pair);
+          const currentPrice = seq.direction === 'BUY' ? quote.bid : quote.ask;
+          const pairConfig = getForexPairConfig(seq.pair);
+          const pipSize = pairConfig.pipSize;
+          const digits = pairConfig.digits || (seq.pair.includes('JPY') ? 3 : 5);
+          const triggerThreshold = config.adverseTriggerPips || 5.0;
 
-            const evalRes = MartingaleRecoveryService.evaluatePriceTick(seq.positionId, currentPrice, 'CTRADER', 'LIVE', quote);
-            
-            if (evalRes.triggered) {
-              const success = await MartingaleRecoveryService.executeRecovery(seq.positionId, adapter, currentPrice);
-              if (success) {
-                this.martingaleModifiedCount++;
-              }
+          const isBuy = seq.direction === 'BUY';
+          const adversePips = isBuy
+            ? (seq.lastTriggerPrice - currentPrice) / pipSize
+            : (currentPrice - seq.lastTriggerPrice) / pipSize;
+
+          console.log(
+            `[MARTINGALE-TRACE] 📊 Pos #${seq.positionId} [${seq.pair} ${seq.direction}] ` +
+            `Entry=${seq.currentAverageEntry.toFixed(digits)}, Current=${currentPrice.toFixed(digits)} (Bid=${quote.bid}, Ask=${quote.ask}), ` +
+            `AdverseMove=${adversePips.toFixed(1)} pips / TriggerThreshold=${triggerThreshold} pips, ` +
+            `NextTriggerPrice=${seq.nextTriggerPrice.toFixed(digits)}, Level=${seq.recoveryLevel}, Vol=${seq.currentVolume}, Status=${seq.status}`
+          );
+
+          const evalRes = MartingaleRecoveryService.evaluatePriceTick(seq.positionId, currentPrice, 'CTRADER', 'LIVE', quote);
+          
+          if (evalRes.triggered) {
+            console.log(`[MARTINGALE-TRIGGER] 🔥🔥🔥 5-Pip Adverse Breach on #${seq.positionId} [${seq.pair} ${seq.direction}]! Adverse move is ${adversePips.toFixed(1)} pips >= ${triggerThreshold} pips. Executing position doubling...`);
+            const success = await MartingaleRecoveryService.executeRecovery(seq.positionId, adapter, currentPrice);
+            if (success) {
+              this.martingaleModifiedCount++;
+              console.log(`[MARTINGALE-TRIGGER] ✅ Doubling & TP amendment successfully completed for #${seq.positionId} [${seq.pair}].`);
+            } else {
+              console.warn(`[MARTINGALE-TRIGGER] ⚠️ Doubling execution returned false for #${seq.positionId} [${seq.pair}].`);
             }
-          } catch (err: any) {
-             liveRuntimeLog('ERROR', 'MARTINGALE_POSITION_EVAL_ERROR', { positionId: seq.positionId, error: err?.message || String(err) });
           }
+        } catch (err: any) {
+          console.error(`[MARTINGALE-EVAL-ERROR] ❌ Error evaluating #${seq.positionId} [${seq.pair}]:`, err?.message || err);
+          liveRuntimeLog('ERROR', 'MARTINGALE_POSITION_EVAL_ERROR', { positionId: seq.positionId, error: err?.message || String(err) });
+        }
       }
     } catch (err: any) {
+      console.error('[MARTINGALE-PROCESS-ERROR] ❌ Fatal error in martingale process loop:', err?.message || err);
       liveRuntimeLog('ERROR', 'MARTINGALE_PROCESS_ERROR', { error: err?.message || String(err) });
     } finally {
       this.martingaleInFlight = false;
@@ -634,7 +691,53 @@ class AutoTradingService {
   }
 
   private async runScheduledCycle(): Promise<void> {
-    if (!['PREPARING', 'RUNNING', 'PAUSED_LIMIT'].includes(this.state) || this.cycleInFlight) return;
+    if (!['PREPARING', 'RUNNING', 'PAUSED_LIMIT', 'PAUSED_SCHEDULE'].includes(this.state) || this.cycleInFlight) return;
+
+    // Check Auto Live Risk Blackout Window Scheduler
+    const scheduler = this.evaluateRiskWindowSchedule();
+    if (scheduler.enabled && scheduler.inRiskWindow) {
+      if (this.state !== 'PAUSED_SCHEDULE') {
+        const prevState = this.state;
+        this.state = 'PAUSED_SCHEDULE';
+        liveRuntimeLog('SYSTEM', 'AUTO_TRADING_RISK_WINDOW_PAUSED', {
+          previousState: prevState,
+          scheduler
+        });
+        tradeAuditLog('AUTO_TRADING_RISK_WINDOW_PAUSED', {
+          previousState: prevState,
+          scheduler
+        });
+      }
+      this.lastCycleResult = scheduler.message;
+      this.setExecutionStatus({
+        stage: 'IDLE',
+        pair: null,
+        side: null,
+        signalId: null,
+        message: scheduler.summary
+      });
+      return;
+    }
+
+    if (this.state === 'PAUSED_SCHEDULE') {
+      // Risk window has ended! Automatically resume!
+      const marketGate = getAutoLiveMarketGate();
+      if (marketGate.anyMarketOpen) {
+        this.state = 'RUNNING';
+        this.lastCycleResult = `Auto Live resumed: Risk blackout window expired (${scheduler.startTime12} – ${scheduler.endTime12} ${scheduler.timezone}). Live signal evaluation and trading resumed.`;
+      } else {
+        this.state = 'PREPARING';
+        this.lastCycleResult = `Auto Live resumed: Risk blackout window expired (${scheduler.startTime12} – ${scheduler.endTime12} ${scheduler.timezone}). Markets currently closed; pre-open preparation active.`;
+      }
+      liveRuntimeLog('SYSTEM', 'AUTO_TRADING_RISK_WINDOW_RESUMED', {
+        newState: this.state,
+        scheduler
+      });
+      tradeAuditLog('AUTO_TRADING_RISK_WINDOW_RESUMED', {
+        newState: this.state,
+        scheduler
+      });
+    }
 
     const marketGate = getAutoLiveMarketGate();
 
@@ -820,6 +923,20 @@ class AutoTradingService {
       if (!refreshAutonomousExecutionPermission()) {
         this.state = 'BLOCKED';
         this.lastCycleResult = 'Autonomous permission was withdrawn before cycle execution.';
+        return;
+      }
+
+      const scheduler = this.evaluateRiskWindowSchedule();
+      if (scheduler.enabled && scheduler.inRiskWindow) {
+        this.state = 'PAUSED_SCHEDULE';
+        this.lastCycleResult = scheduler.message;
+        this.setExecutionStatus({
+          stage: 'IDLE',
+          pair: null,
+          side: null,
+          signalId: null,
+          message: scheduler.summary
+        });
         return;
       }
 

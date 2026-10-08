@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { Server, ShieldCheck, RefreshCw, CheckCircle2, XCircle, Lock, Database, DollarSign, IndianRupee, Sliders } from 'lucide-react';
 import { BrokerCredentialStatus, BrokerType, TradingEnvironment, ConnectionTestResult } from '../brokers/types';
+import { AutoLiveSchedulerPanel } from './AutoLiveSchedulerPanel';
+import { AutoLiveSchedulerConfig } from '../services/schedulerUtils';
 
 interface BrokerSettingsPanelProps {
   currentEnvironment: TradingEnvironment;
@@ -83,6 +85,7 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
   const [autoLiveIndianUnderlyings, setAutoLiveIndianUnderlyings] = useState<string[]>([
     'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX'
   ]);
+  const [autoLiveScheduler, setAutoLiveScheduler] = useState<AutoLiveSchedulerConfig | undefined>(undefined);
   const [newForexPair, setNewForexPair] = useState('');
   const [pairMessage, setPairMessage] = useState('');
   const [savingUniverse, setSavingUniverse] = useState(false);
@@ -139,6 +142,9 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
         }
         if (Array.isArray(config.autoLiveIndianUnderlyings)) {
           setAutoLiveIndianUnderlyings(config.autoLiveIndianUnderlyings);
+        }
+        if (config.autoLiveScheduler && typeof config.autoLiveScheduler === 'object') {
+          setAutoLiveScheduler(config.autoLiveScheduler);
         }
       }
     } finally {
@@ -522,6 +528,8 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
           </div>
         </div>
       </div>
+
+      <AutoLiveSchedulerPanel initialConfig={autoLiveScheduler} onSaved={onRefreshGlobal} />
 
       <div className="bg-slate-900 border border-cyan-900/60 rounded-xl p-5">
         <div className="flex items-start gap-3">
