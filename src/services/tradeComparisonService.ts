@@ -71,6 +71,23 @@ export interface TradeComparisonReport {
   pairBreakdown: PairPerformance[];
   hourlyBreakdown: HourlyPerformance[];
   rawTrades: RawTradeRecord[];
+  riskMetrics: {
+    expectancyPerTrade: number;
+    kellyCriterionPct: number;
+    valueAtRisk95: number;
+    maxDrawdown: number;
+    recoveryFactor: number;
+    payoffRatio: number;
+  };
+  sessionAttribution: Array<{
+    sessionName: string;
+    timeRange: string;
+    totalTrades: number;
+    winningTrades: number;
+    losingTrades: number;
+    winRate: number;
+    netPnL: number;
+  }>;
   insights: {
     bestPerformingPair: string | null;
     worstPerformingPair: string | null;
@@ -473,6 +490,64 @@ export async function generateTradeComparisonReport(from: number, to: number): P
     recommendations.push('No trades recorded within the selected date range. Select a broader date range or trade live to view historical edge comparisons.');
   }
 
+  const avgWin = totalWins > 0 ? totalGrossProfit / totalWins : 0;
+  const avgLoss = totalLosses > 0 ? totalGrossLoss / totalLosses : 0;
+  const winRateProb = trades.length > 0 ? totalWins / trades.length : 0;
+  const payoffRatio = avgLoss > 0 ? Math.round((avgWin / avgLoss) * 100) / 100 : avgWin > 0 ? 10 : 0;
+  const expectancyPerTrade = Math.round(((winRateProb * avgWin) - ((1 - winRateProb) * avgLoss)) * 100) / 100;
+  const kellyCriterionPct = payoffRatio > 0 ? Math.round(Math.max(0, Math.min(25, (winRateProb - ((1 - winRateProb) / payoffRatio)) * 100)) * 10) / 10 : 0;
+
+  let peak = 0;
+  let maxDd = 0;
+  let runCum = 0;
+  for (const t of trades.slice().sort((a, b) => a.timestamp - b.timestamp)) {
+    runCum += t.pnl;
+    if (runCum > peak) {
+      peak = runCum;
+    }
+    const dd = peak - runCum;
+    if (dd > maxDd) {
+      maxDd = dd;
+    }
+  }
+
+  const recoveryFactor = maxDd > 0 ? Math.round((totalNetPnL / maxDd) * 100) / 100 : totalNetPnL > 0 ? 99.99 : 0;
+
+  const sortedPnls = trades.map(t => t.pnl).sort((a, b) => a - b);
+  const varIndex = Math.floor(sortedPnls.length * 0.05);
+  const valueAtRisk95 = sortedPnls.length > 0 ? Math.round((sortedPnls[varIndex] || sortedPnls[0]) * 100) / 100 : 0;
+
+  const sessions = [
+    { name: 'Asian Session', start: 0, end: 8 },
+    { name: 'London Session', start: 8, end: 16 },
+    { name: 'New York Session', start: 13, end: 21 }
+  ];
+
+  const sessionAttribution = sessions.map(sess => {
+    const sTrades = trades.filter(t => {
+      const hr = new Date(t.timestamp).getUTCHours();
+      return hr >= sess.start && hr < sess.end;
+    });
+    let sWins = 0;
+    let sLosses = 0;
+    let sNet = 0;
+    for (const t of sTrades) {
+      sNet += t.pnl;
+      if (t.pnl > 0) sWins++;
+      else if (t.pnl < 0) sLosses++;
+    }
+    const sTotal = sTrades.length;
+    return {
+      sessionName: sess.name,
+      timeRange: `${pad(sess.start)}:00 - ${pad(sess.end)}:00 UTC`,
+      totalTrades: sTotal,
+      winningTrades: sWins,
+      losingTrades: sLosses,
+      winRate: sTotal > 0 ? Math.round((sWins / sTotal) * 1000) / 10 : 0,
+      netPnL: Math.round(sNet * 100) / 100
+    };
+  });
+
   const fromDate = new Date(from);
   const toDate = new Date(to);
   const padMonth = (m: number) => String(m).padStart(2, '0');
@@ -494,6 +569,15 @@ export async function generateTradeComparisonReport(from: number, to: number): P
     pairBreakdown,
     hourlyBreakdown,
     rawTrades: trades,
+    riskMetrics: {
+      expectancyPerTrade,
+      kellyCriterionPct,
+      valueAtRisk95,
+      maxDrawdown: Math.round(maxDd * 100) / 100,
+      recoveryFactor,
+      payoffRatio
+    },
+    sessionAttribution,
     insights: {
       bestPerformingPair,
       worstPerformingPair,

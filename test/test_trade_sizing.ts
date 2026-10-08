@@ -151,22 +151,22 @@ assert.equal(normalizePriceToInstrumentDigits(1.123456, 5), 1.12346);
 assert.equal(normalizePriceToInstrumentDigits(1.1239, 5), 1.1239);
 assert.equal(normalizePriceToInstrumentDigits(210.70722, 3), 210.707);
 
-// Configurable Forex pip-margin regression tests.
+// Configurable Forex pip-margin regression tests (capped at Phase 44 5.0 pips max).
 const gbpUsdBuyTargets = calculateForexPipTargets('BUY', 1.234, 0.0001, 20, 40);
 assert.equal(gbpUsdBuyTargets.stopLoss, 1.232);
-assert.equal(gbpUsdBuyTargets.takeProfit, 1.238);
+assert.equal(gbpUsdBuyTargets.takeProfit, 1.2345);
 
 const gbpUsdSellTargets = calculateForexPipTargets('SELL', 1.234, 0.0001, 20, 40);
 assert.equal(gbpUsdSellTargets.stopLoss, 1.236);
-assert.equal(gbpUsdSellTargets.takeProfit, 1.23);
+assert.equal(gbpUsdSellTargets.takeProfit, 1.2335);
 
 const usdJpyBuyTargets = calculateForexPipTargets('BUY', 157.650, 0.01, 20, 40);
 assert.equal(usdJpyBuyTargets.stopLoss, 157.45);
-assert.equal(usdJpyBuyTargets.takeProfit, 158.05);
+assert.equal(usdJpyBuyTargets.takeProfit, 157.7);
 
 const usdJpySellTargets = calculateForexPipTargets('SELL', 157.650, 0.01, 20, 40);
 assert.equal(usdJpySellTargets.stopLoss, 157.85);
-assert.equal(usdJpySellTargets.takeProfit, 157.25);
+assert.equal(usdJpySellTargets.takeProfit, 157.6);
 
 console.log('Trade sizing tests passed.');
 

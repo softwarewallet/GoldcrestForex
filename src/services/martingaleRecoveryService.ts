@@ -473,7 +473,7 @@ export class MartingaleRecoveryService {
 
       const quoteTimestamp = Number(quote?.timestamp || 0);
       const quoteAgeMs = quoteTimestamp > 0 ? Date.now() - quoteTimestamp : 0;
-      if (!quote || !(quote.bid > 0) || !(quote.ask > 0) || quoteAgeMs > 120_000) {
+      if (!quote || !(quote.bid > 0) || !(quote.ask > 0) || quoteAgeMs > 30_000) {
         liveRuntimeLog('WARN', 'MARTINGALE_QUOTE_STALE_OR_INVALID', {
           positionId,
           quoteStatus: quote?.status,
@@ -747,6 +747,7 @@ export class MartingaleRecoveryService {
       this.persistSequenceToDatabase(record);
 
       console.log(`[MARTINGALE-DOUBLING] 🎉 Position #${positionId} recovery level ${record.recoveryLevel} COMPLETED! New TP = ${confirmedTP}, Next Adverse Trigger armed at = ${record.nextTriggerPrice}`);
+      return true;
     } catch (err: any) {
       liveRuntimeLog('ERROR', 'MARTINGALE_RECOVERY_FATAL_ERROR', { positionId, error: err?.message || String(err) });
       return false;

@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import {
   Bell, BookOpen, CandlestickChart,
-  ListChecks, Settings, Sparkles, Activity, History as HistoryIcon, Database, BarChart2, Eye, Compass, Zap, Sliders, Target
+  ListChecks, Settings, Sparkles, Activity, History as HistoryIcon, Database, BarChart2, Eye, Compass, Zap, Sliders, Target,
+  Wrench, ChevronDown, ChevronRight
 } from 'lucide-react';
 import { ForexSessionState, IndianSessionState } from '../markets/common/types';
 
@@ -16,20 +17,42 @@ interface GlobalAppShellProps {
   indianUnderlyings?: any[];
 }
 
-const nav = [
-  { id: 'market_watch', label: 'Market Watch', icon: Activity },
-  { id: 'trading', label: 'Cockpit', icon: CandlestickChart },
+interface NavItem {
+  id: string;
+  label: string;
+  icon: any;
+}
+
+interface NavGroup {
+  id: string;
+  label: string;
+  icon: any;
+  items: NavItem[];
+}
+
+type NavEntry = NavItem | NavGroup;
+
+const toolsSubItems: NavItem[] = [
   { id: 'shadow_mode', label: 'Shadow Mode', icon: Eye },
   { id: 'forensics', label: 'Forensics', icon: Sparkles },
   { id: 'direction_analysis', label: 'Direction', icon: Compass },
   { id: 'native_indicators', label: 'Native Ind', icon: Zap },
   { id: 'dynamic_exits', label: 'Dynamic Exits', icon: Sliders },
-  { id: 'short_tp', label: 'Short TP (1-5p)', icon: Target },
+  { id: 'short_tp', label: 'Short TP (1-5p)', icon: Target }
+];
+
+const nav: NavEntry[] = [
+  { id: 'market_watch', label: 'Market Watch', icon: Activity },
+  { id: 'trading', label: 'Cockpit', icon: CandlestickChart },
   { id: 'control_center', label: 'Control Center', icon: ListChecks },
+  {
+    id: 'tools',
+    label: 'Tools',
+    icon: Wrench,
+    items: toolsSubItems
+  },
   { id: 'history', label: 'History', icon: HistoryIcon },
   { id: 'database', label: 'Database', icon: Database },
-  { id: 'signals', label: 'Strategy', icon: Sparkles },
-  { id: 'pnl', label: 'Reports', icon: BookOpen },
   { id: 'alerts', label: 'Analytics', icon: BarChart2 },
   { id: 'settings', label: 'Settings', icon: Settings }
 ];
@@ -140,6 +163,16 @@ export const GlobalAppShell: React.FC<GlobalAppShellProps> = ({
     year: 'numeric'
   });
 
+  const isToolsActive = toolsSubItems.some(sub => sub.id === activeTab);
+  const [toolsOpen, setToolsOpen] = useState<boolean>(isToolsActive);
+
+  // Automatically expand Tools when an active tool is selected
+  useEffect(() => {
+    if (isToolsActive) {
+      setToolsOpen(true);
+    }
+  }, [isToolsActive]);
+
   return (
     <div className="min-h-screen bg-[#03070d] text-slate-100">
       {header}
@@ -149,8 +182,71 @@ export const GlobalAppShell: React.FC<GlobalAppShellProps> = ({
         className="fixed top-[126px] bottom-9 left-0 z-[60] w-[242px] border-r border-slate-800/80 bg-[#02070d] flex flex-col"
       >
         <nav className="flex-1 overflow-y-auto px-3 pt-2 pb-3">
-          <div className="space-y-[-4px]">
+          <div className="space-y-1">
             {nav.map(item => {
+              // Check if item has a sub-menu
+              if ('items' in item && item.items) {
+                const Icon = item.icon;
+                const isGroupActive = item.items.some(sub => sub.id === activeTab);
+                return (
+                  <div key={item.id} className="space-y-1">
+                    <button
+                      type="button"
+                      onClick={() => setToolsOpen(!toolsOpen)}
+                      className={`w-full h-[40px] flex items-center justify-between px-4 rounded-lg text-sm transition text-left ${
+                        isGroupActive
+                          ? 'bg-slate-900/80 border border-slate-700/80 text-white'
+                          : 'border border-transparent text-slate-300 hover:text-white hover:bg-slate-900/60'
+                      }`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <Icon className={`w-[18px] h-[18px] ${
+                          isGroupActive ? 'text-amber-400' : 'text-slate-400'
+                        }`} />
+                        <span className="font-medium">{item.label}</span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700/60">
+                          {item.items.length}
+                        </span>
+                        {toolsOpen ? (
+                          <ChevronDown className="w-4 h-4 text-slate-400" />
+                        ) : (
+                          <ChevronRight className="w-4 h-4 text-slate-400" />
+                        )}
+                      </div>
+                    </button>
+
+                    {/* Sub-menu items */}
+                    {toolsOpen && (
+                      <div className="ml-3 pl-3 border-l border-slate-800/80 space-y-1 py-0.5">
+                        {item.items.map(subItem => {
+                          const SubIcon = subItem.icon;
+                          const isSubSelected = activeTab === subItem.id;
+                          return (
+                            <button
+                              key={subItem.id}
+                              type="button"
+                              onClick={() => setActiveTab(subItem.id)}
+                              className={`w-full h-[36px] flex items-center gap-2.5 px-3 rounded-lg text-[13px] transition text-left ${
+                                isSubSelected
+                                  ? 'bg-slate-900 border border-slate-700 text-white font-medium shadow-sm'
+                                  : 'border border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-900/50'
+                              }`}
+                            >
+                              <SubIcon className={`w-4 h-4 ${
+                                isSubSelected ? 'text-amber-300' : 'text-slate-500'
+                              }`} />
+                              <span className="truncate">{subItem.label}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              }
+
               const Icon = item.icon;
               const selected = activeTab === item.id;
               return (

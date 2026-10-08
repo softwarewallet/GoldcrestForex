@@ -18,6 +18,7 @@ import { liveRuntimeLog } from '../services/liveRuntimeLog';
 import { autoTradingService } from '../services/autoTradingService';
 console.log('[DEBUG] brokerRoutes imported, autoTradingService imported:', !!autoTradingService);
 import { generateTradeComparisonReport } from '../services/tradeComparisonService';
+import { executionLatencyAuditService } from '../services/executionLatencyAuditService';
 
 export const brokerRouter = Router();
 
@@ -945,6 +946,29 @@ brokerRouter.get('/trade-comparison', async (req: Request, res: Response) => {
   }
 });
 
+brokerRouter.get('/execution-latency', async (req: Request, res: Response) => {
+  try {
+    const from = req.query.from ? Number(req.query.from) : undefined;
+    const to = req.query.to ? Number(req.query.to) : undefined;
+    const pair = req.query.pair ? String(req.query.pair) : undefined;
+    const status = req.query.status ? String(req.query.status) : undefined;
+    const limit = req.query.limit ? Number(req.query.limit) : 100;
+
+    const [stats, audits] = await Promise.all([
+      executionLatencyAuditService.getSummaryStats({ from, to, pair }),
+      executionLatencyAuditService.getAudits({ from, to, pair, status, limit })
+    ]);
+
+    res.json({
+      success: true,
+      stats,
+      audits
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to fetch execution latency report.' });
+  }
+});
+
 brokerRouter.get('/orders', async (_req: Request, res: Response) => {
   const payload = await fetchLiveOrders();
   return res.json(payload);
@@ -994,6 +1018,7 @@ brokerRouter.post('/order', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Missing market or symbol', code: 'INVALID_SYMBOL' });
     }
 
+    const routeReceivedAt = Date.now();
     const rawSide = String(orderReq.side || 'BUY').toUpperCase();
     orderReq.side = (rawSide.includes('SELL') || rawSide.includes('SHORT')) ? 'SELL' : 'BUY';
 
@@ -1267,6 +1292,7 @@ brokerRouter.post('/order', async (req: Request, res: Response) => {
     }
 
     let placedOrder;
+    const orderDispatchStartedAt = Date.now();
     try {
       placedOrder = await adapter.placeOrder(orderReq);
     } catch (err: any) {
@@ -1280,6 +1306,50 @@ brokerRouter.post('/order', async (req: Request, res: Response) => {
         failedAt: Date.now()
       });
       throw err;
+    }
+
+    const brokerConfirmedAt = Date.now();
+    const brokerSubmissionDurationMs = Math.max(0, brokerConfirmedAt - orderDispatchStartedAt);
+    const safetyGateDurationMs = Math.max(0, orderDispatchStartedAt - routeReceivedAt);
+    const totalDurationMs = Math.max(1, brokerConfirmedAt - routeReceivedAt);
+    const audited = orderReq.market === 'FOREX' ? autoTradingService.getAuditedSignal(orderReq.symbol) : null;
+
+    if (orderReq.market === 'FOREX') {
+      const isExecuted = placedOrder.status === 'FILLED' || placedOrder.status === 'ACCEPTED' || placedOrder.status === 'PARTIALLY_FILLED';
+      void executionLatencyAuditService.recordAudit({
+        pair: orderReq.symbol,
+        side: orderReq.side as 'BUY' | 'SELL',
+        status: isExecuted ? 'EXECUTED' : 'BLOCKED',
+        totalDurationMs,
+        scanDurationMs: 0,
+        analysisDurationMs: 0,
+        safetyGateDurationMs,
+        brokerSubmissionDurationMs,
+        brokerOrderId: placedOrder.brokerOrderId || placedOrder.id,
+        quantity: Number(orderReq.quantity),
+        entryPrice: Number(orderReq.price),
+        takeProfit: orderReq.takeProfit ? Number(orderReq.takeProfit) : undefined,
+        stopLoss: orderReq.stopLoss ? Number(orderReq.stopLoss) : undefined,
+        signalId: orderReq.signalId || audited?.signal?.id,
+        strategyId: audited?.signal?.strategyVersion || 'TRIGGER_NOW_FAST_EXECUTION',
+        milestones: {
+          scanStartedAt: routeReceivedAt,
+          scanEndedAt: routeReceivedAt,
+          analysisStartedAt: routeReceivedAt,
+          analysisEndedAt: routeReceivedAt,
+          safetyStartedAt: routeReceivedAt,
+          safetyEndedAt: orderDispatchStartedAt,
+          brokerSubmittedAt: orderDispatchStartedAt,
+          brokerConfirmedAt,
+          quoteFetchMs: 0,
+          signalGenerationMs: 0,
+          safetyGateMs: safetyGateDurationMs,
+          brokerRoundtripMs: brokerSubmissionDurationMs,
+          notes: audited
+            ? 'Confirmed executed via pre-audited Auto Live actionable signal (Zero-scan fast execution)'
+            : 'Order executed with fast pre-flight safety gate'
+        }
+      });
     }
 
     if (placedOrder.status === 'FILLED') {

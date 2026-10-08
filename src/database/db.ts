@@ -707,6 +707,35 @@ function initSchema(db: Database) {
 
     CREATE INDEX IF NOT EXISTS idx_short_tp_pred ON short_tp_evaluations(prediction_id);
     CREATE INDEX IF NOT EXISTS idx_short_tp_pair ON short_tp_evaluations(pair);
+
+    -- 37. Auto Live Order Execution Latency Audits
+    CREATE TABLE IF NOT EXISTS auto_execution_latency_audits (
+      id TEXT PRIMARY KEY,
+      timestamp INTEGER NOT NULL,
+      date TEXT NOT NULL,
+      pair TEXT NOT NULL,
+      side TEXT NOT NULL,
+      status TEXT NOT NULL,
+      total_duration_ms INTEGER NOT NULL,
+      scan_duration_ms INTEGER NOT NULL,
+      analysis_duration_ms INTEGER NOT NULL,
+      safety_gate_duration_ms INTEGER NOT NULL,
+      broker_submission_duration_ms INTEGER NOT NULL,
+      broker_order_id TEXT,
+      quantity REAL,
+      entry_price REAL,
+      take_profit REAL,
+      stop_loss REAL,
+      signal_id TEXT,
+      strategy_id TEXT,
+      breakdown_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_exec_latency_ts ON auto_execution_latency_audits(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_exec_latency_pair ON auto_execution_latency_audits(pair);
+    CREATE INDEX IF NOT EXISTS idx_exec_latency_status ON auto_execution_latency_audits(status);
+    CREATE INDEX IF NOT EXISTS idx_exec_latency_date ON auto_execution_latency_audits(date);
   `;
 
   db.run(schemaSQL);
@@ -845,7 +874,7 @@ export async function getDatabaseStats() {
     'signals', 'trades', 'positions', 'orders', 'economic_events',
     'risk_configs', 'system_settings', 'broker_accounts',
     'broker_reconciliation_snapshots', 'execution_intents', 'execution_fill_observations', 'execution_fill_events',
-    'trade_traces', 'trade_trace_nodes', 'trade_notes', 'ml_storage_records'
+    'trade_traces', 'trade_trace_nodes', 'trade_notes', 'ml_storage_records', 'auto_execution_latency_audits'
   ];
 
   const stats: Record<string, number> = {};

@@ -248,7 +248,19 @@ class AutoExecutionEngine {
     order: OrderRequest,
     gateParams: Omit<LiveGateEvaluationParams, 'order'>,
     onReadyToSubmit?: () => void
-  ): Promise<{ executed: boolean; order?: NormalizedOrder; reason?: string; code?: string }> {
+  ): Promise<{
+    executed: boolean;
+    order?: NormalizedOrder;
+    reason?: string;
+    code?: string;
+    executionTimings?: {
+      safetyGateDurationMs: number;
+      brokerSubmissionDurationMs: number;
+      brokerSubmittedAt: number;
+      brokerConfirmedAt: number;
+    };
+  }> {
+    const safetyStartTime = Date.now();
     const env = brokerRegistry.getEnvironment();
     const adapter = brokerRegistry.getAdapterForMarket(order.market);
     const broker = adapter.broker;
@@ -446,7 +458,11 @@ class AutoExecutionEngine {
       // This is the last guarded application-level point before the live broker API call.
       auditExecution('FINAL_ORDER_PACKET', { request: order });
       onReadyToSubmit?.();
+      const brokerSubmittedAt = Date.now();
       const placedOrder = await autonomousPlacer.call(adapter, order);
+      const brokerConfirmedAt = Date.now();
+      const brokerSubmissionDurationMs = Math.max(0, brokerConfirmedAt - brokerSubmittedAt);
+      const safetyGateDurationMs = Math.max(0, brokerSubmittedAt - safetyStartTime);
 
       if (placedOrder.status === 'FILLED') {
         await completeExecutionIntent(idempotencyKey, placedOrder);
@@ -468,11 +484,19 @@ class AutoExecutionEngine {
       });
       auditExecution(placedOrder.status === 'FILLED' ? 'TRADE_EXECUTED' : 'BROKER_ORDER_RESULT', {
         brokerStatus: placedOrder.status,
-        orderId: placedOrder.brokerOrderId || placedOrder.id
+        orderId: placedOrder.brokerOrderId || placedOrder.id,
+        brokerSubmissionDurationMs,
+        safetyGateDurationMs
       });
       return {
         executed: placedOrder.status === 'FILLED',
-        order: placedOrder
+        order: placedOrder,
+        executionTimings: {
+          safetyGateDurationMs,
+          brokerSubmissionDurationMs,
+          brokerSubmittedAt,
+          brokerConfirmedAt
+        }
       };
     } catch (err: any) {
       logBrokerAction({

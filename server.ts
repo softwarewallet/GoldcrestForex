@@ -45,6 +45,7 @@ import { ForensicsReportGenerator } from './src/ml/forensics/forensicsReportGene
 import { DirectionFusionEngine } from './src/ml/direction/directionFusionEngine';
 import { ShortTpOptimizationEngine } from './src/ml/direction/shortTpOptimizationEngine';
 import { CTraderNativeIndicatorService } from './src/services/cTraderNativeIndicatorService';
+import { executionLatencyAuditService } from './src/services/executionLatencyAuditService';
 import { initializeLiveRuntimeLog, getLiveRuntimeLogStatus, startLiveRuntimeLog, stopLiveRuntimeLog, getLiveRuntimeLogFile, listLiveRuntimeLogFiles, logApplicationAction, liveRuntimeLog } from './src/services/liveRuntimeLog';
 import { fetchLiveForexNews } from './src/services/liveNewsService';
 import { fetchIndianMarketNews } from './src/services/indianMarketNewsService';
@@ -266,6 +267,29 @@ app.use('/api/ml', operatorAuthRequired, (_req: Request, res: Response) => {
   });
 });
 app.use('/api/governance', operatorAuthRequired, governanceRouter);
+
+app.get('/api/analytics/execution-latency', operatorAuthRequired, async (req: Request, res: Response) => {
+  try {
+    const from = req.query.from ? Number(req.query.from) : undefined;
+    const to = req.query.to ? Number(req.query.to) : undefined;
+    const pair = req.query.pair ? String(req.query.pair) : undefined;
+    const status = req.query.status ? String(req.query.status) : undefined;
+    const limit = req.query.limit ? Number(req.query.limit) : 100;
+
+    const [stats, audits] = await Promise.all([
+      executionLatencyAuditService.getSummaryStats({ from, to, pair }),
+      executionLatencyAuditService.getAudits({ from, to, pair, status, limit })
+    ]);
+
+    res.json({
+      success: true,
+      stats,
+      audits
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Failed to fetch execution latency report.' });
+  }
+});
 
 app.get('/api/auto-trading/status', operatorAuthRequired, async (_req: Request, res: Response) => {
   await tradeContinuityService.syncFromHistoricalTrades().catch(() => {});

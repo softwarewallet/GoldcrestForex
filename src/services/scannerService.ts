@@ -7,6 +7,7 @@ import { ForexSignalEngine } from '../markets/forex/signalEngine';
 import { CombinedPredictionEngine } from '../ml/prediction/combinedPredictionEngine';
 import { getSystemConfig } from './configService';
 import { liveRuntimeLog } from './liveRuntimeLog';
+import { autoTradingService } from './autoTradingService';
 
 export interface OptionsOpportunityCandidate {
   id: string;
@@ -177,6 +178,23 @@ export class ScannerService {
       FOREX_SCAN_CONCURRENCY,
       async pair => {
         try {
+          const audited = autoTradingService.getAuditedSignal(pair.symbol);
+          if (audited && Date.now() - audited.auditedAt < 60_000) {
+            return {
+              symbol: pair.symbol,
+              description: pair.description,
+              bid: audited.quote?.bid ?? 0,
+              ask: audited.quote?.ask ?? 0,
+              spreadPips: audited.quote?.spreadPips ?? audited.quote?.spread ?? 0,
+              changePips: audited.quote?.changePips24h ?? 0,
+              changePercent: audited.quote?.changePercent24h ?? 0,
+              digits: pair.digits,
+              signal: mapForexSignal(audited.signal, audited.gateEvaluation?.prediction, audited.quote),
+              dataStatus: 'LIVE',
+              dataSource: 'AUTOLIVE_AUDITED'
+            };
+          }
+
           await this.forexProvider.refreshPair(pair.symbol);
           const signal = await this.forexSignalEngine.generateSignal(pair.symbol);
           const quote = this.forexProvider.getQuote(pair.symbol);

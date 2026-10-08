@@ -90,15 +90,32 @@ export const AutoLiveSchedulerPanel: React.FC<AutoLiveSchedulerPanelProps> = ({
     return () => clearInterval(timer);
   }, []);
 
-  // Sync if initialConfig updates from server poll
+  // Fetch authoritative config on mount and on settings update event to keep multiple instances in sync
   useEffect(() => {
-    if (initialConfig) {
-      const norm = normalizeSchedulerConfig(initialConfig);
-      setEnabled(norm.enabled);
-      setTimezone(norm.timezone);
-      setWindows(norm.windows);
-    }
-  }, [initialConfig]);
+    const fetchConfig = async () => {
+      try {
+        const res = await fetch('/api/config', { cache: 'no-store' });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.autoLiveScheduler) {
+            const norm = normalizeSchedulerConfig(data.autoLiveScheduler);
+            setEnabled(norm.enabled);
+            setTimezone(norm.timezone);
+            setWindows(norm.windows);
+          }
+        }
+      } catch {}
+    };
+
+    void fetchConfig();
+    const handleSettingsUpdated = () => { void fetchConfig(); };
+    window.addEventListener('goldcrest:settings-updated', handleSettingsUpdated);
+    window.addEventListener('focus', handleSettingsUpdated);
+    return () => {
+      window.removeEventListener('goldcrest:settings-updated', handleSettingsUpdated);
+      window.removeEventListener('focus', handleSettingsUpdated);
+    };
+  }, []);
 
   // Client-side live evaluation
   const liveConfig: AutoLiveSchedulerConfig = {
@@ -167,6 +184,53 @@ export const AutoLiveSchedulerPanel: React.FC<AutoLiveSchedulerPanelProps> = ({
       setWindows(prev => prev.filter(w => w.id !== id));
     }
     setSaveMessage({ text: 'Window removed. Click "Save & Apply Schedule" to commit.', type: 'success' });
+  };
+
+  // Instantly toggle and commit master scheduler state
+  const handleToggleEnabled = async () => {
+    const nextEnabled = !enabled;
+    setEnabled(nextEnabled);
+    setIsSaving(true);
+    setSaveMessage(null);
+
+    try {
+      const payloadConfig: AutoLiveSchedulerConfig = {
+        enabled: nextEnabled,
+        timezone,
+        windows,
+        startTime: windows[0]?.startTime || '22:00',
+        endTime: windows[0]?.endTime || '05:00'
+      };
+
+      const res = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          autoLiveScheduler: payloadConfig
+        })
+      });
+
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to toggle scheduler.');
+      }
+
+      setSaveMessage({
+        text: `Scheduler ${nextEnabled ? 'ARMED & ENABLED' : 'DISABLED'}. Synchronized across Cockpit & Settings.`,
+        type: 'success'
+      });
+
+      window.dispatchEvent(new CustomEvent('goldcrest:settings-updated'));
+      onSaved?.();
+    } catch (err: any) {
+      setEnabled(!nextEnabled); // Rollback on failure
+      setSaveMessage({
+        text: err.message || 'Failed to toggle scheduler.',
+        type: 'error'
+      });
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   // Save changes
@@ -281,15 +345,16 @@ export const AutoLiveSchedulerPanel: React.FC<AutoLiveSchedulerPanelProps> = ({
 
           <button
             type="button"
-            onClick={() => setEnabled(!enabled)}
+            onClick={handleToggleEnabled}
+            disabled={isSaving}
             className={`px-4 py-2 rounded-lg font-bold text-xs flex items-center gap-2 border transition ${
               enabled
                 ? 'bg-amber-950/70 hover:bg-amber-900 border-amber-500 text-amber-200'
                 : 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-300'
-            }`}
+            } ${isSaving ? 'opacity-70 cursor-wait' : ''}`}
           >
             <div className={`w-2.5 h-2.5 rounded-full ${enabled ? 'bg-amber-400 animate-pulse' : 'bg-slate-500'}`} />
-            {enabled ? 'SCHEDULER: ENABLED' : 'SCHEDULER: DISABLED'}
+            {isSaving ? 'UPDATING...' : enabled ? 'SCHEDULER: ENABLED' : 'SCHEDULER: DISABLED'}
           </button>
         </div>
       </div>
