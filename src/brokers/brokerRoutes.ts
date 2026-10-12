@@ -811,6 +811,26 @@ brokerRouter.get('/today-trades-summary', async (_req: Request, res: Response) =
         return (o.realizedPnL !== undefined || o.netAmount !== undefined || o.pnl !== undefined) && o.status === 'FILLED';
       });
       closedTrades.push(...todayClosedDeals);
+
+      for (const deal of todayClosedDeals) {
+        const pnl = deal.netAmount ?? deal.realizedPnL ?? deal.pnl ?? null;
+        if (pnl !== null) {
+          reconciliationService.recordBrokerConfirmedTrade({
+            id: String(deal.id),
+            signalId: (deal as any).signalId,
+            instrument: deal.symbol,
+            direction: deal.side,
+            entryPrice: Number(deal.price ?? (deal as any).entryPrice ?? 0),
+            exitPrice: Number(deal.averageFillPrice ?? (deal as any).exitPrice ?? 0),
+            size: Number(deal.filledQuantity ?? deal.quantity ?? 0),
+            pnl: Math.round(pnl * 100) / 100,
+            status: 'CLOSED',
+            entryTime: Number(deal.timestamp || from),
+            exitTime: Number(deal.timestamp || to),
+            tracePayload: deal
+          }).catch(() => {});
+        }
+      }
     } catch {
       // Best-effort
     }

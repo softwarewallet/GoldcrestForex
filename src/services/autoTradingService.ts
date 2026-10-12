@@ -19,6 +19,7 @@ import { CombinedPredictionEngine } from '../ml/prediction/combinedPredictionEng
 import { MartingaleRecoveryService } from './martingaleRecoveryService';
 import { ShortTpOptimizationEngine } from '../ml/direction/shortTpOptimizationEngine';
 import { evaluateAutoLiveScheduler, SchedulerEvaluationResult } from './schedulerUtils';
+import { reconciliationService } from './reconciliationService';
 
 const LIVE_QUOTE_MAX_AGE_MS = 1_800_000; // 30 minutes to prevent clock lag or tick latency issues
 
@@ -1729,6 +1730,9 @@ return;
           side: order.side,
           signalId: signal.id
         });
+
+        // Asynchronously synchronize durable broker trade records
+        reconciliationService.synchronizeBrokerExecutions('CTRADER').catch(() => {});
 
         if (MartingaleRecoveryService.isPairEligible(pair)) {
           try {

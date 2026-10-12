@@ -1,5 +1,6 @@
 import { executeQuery, executeRun } from '../database/db';
 import { brokerRegistry } from '../brokers/registry';
+import { tradeContinuityService } from './tradeContinuityService';
 
 export type ReconciliationStatus =
   | 'MATCHED' | 'RECONCILIATION_MISMATCH' | 'ORPHAN_INTERNAL'
@@ -99,6 +100,191 @@ export class ReconciliationService {
     return record;
   }
 
+  public async recordTradeTrace(tradeTraceId: string, payload: any): Promise<void> {
+    const ts = Date.now();
+    await executeRun(
+      'INSERT OR REPLACE INTO trade_traces (trade_trace_id, payload_json, timestamp, updated_at) VALUES (?, ?, ?, ?)',
+      [tradeTraceId, JSON.stringify(payload), ts, ts]
+    );
+  }
+
+  public async recordBrokerConfirmedTrade(trade: {
+    id: string;
+    signalId?: string;
+    instrument: string;
+    direction: string;
+    entryPrice: number;
+    exitPrice?: number;
+    size: number;
+    pnl?: number;
+    status: string;
+    entryTime: number;
+    exitTime?: number;
+    tracePayload?: any;
+  }): Promise<void> {
+    await executeRun(
+      'INSERT OR REPLACE INTO trades (id, signal_id, instrument, direction, entry_price, exit_price, size, pnl, status, entry_time, exit_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [
+        trade.id,
+        trade.signalId ?? null,
+        trade.instrument,
+        trade.direction,
+        trade.entryPrice,
+        trade.exitPrice ?? null,
+        trade.size,
+        trade.pnl ?? null,
+        trade.status,
+        trade.entryTime,
+        trade.exitTime ?? null
+      ]
+    );
+
+    const traceId = `TRACE-${trade.id}`;
+    const payload = trade.tracePayload || {
+      tradeId: trade.id,
+      signalId: trade.signalId,
+      instrument: trade.instrument,
+      direction: trade.direction,
+      entryPrice: trade.entryPrice,
+      exitPrice: trade.exitPrice,
+      size: trade.size,
+      pnl: trade.pnl,
+      status: trade.status,
+      timestamp: trade.exitTime || trade.entryTime
+    };
+    await this.recordTradeTrace(traceId, payload);
+
+    if (trade.pnl !== undefined && trade.pnl !== null) {
+      tradeContinuityService.recordTradeOutcome({
+        id: trade.id,
+        symbol: trade.instrument,
+        pnl: trade.pnl,
+        timestamp: trade.exitTime || trade.entryTime
+      });
+    }
+  }
+
+  public async synchronizeBrokerExecutions(
+    broker: 'CTRADER' | 'FIVE_PAISA',
+    fromTimestamp?: number,
+    toTimestamp?: number
+  ): Promise<{ syncedTradesCount: number; syncedPositionsCount: number; syncedOrdersCount: number }> {
+    const adapter = brokerRegistry.getAdapter(broker, 'LIVE');
+    if (!adapter) return { syncedTradesCount: 0, syncedPositionsCount: 0, syncedOrdersCount: 0 };
+
+    let syncedTradesCount = 0;
+    let syncedPositionsCount = 0;
+    let syncedOrdersCount = 0;
+
+    const from = fromTimestamp ?? (Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const to = toTimestamp ?? Date.now();
+
+    try {
+      // 1. Synchronize positions
+      const positions = await adapter.getPositions();
+      if (Array.isArray(positions)) {
+        for (const pos of positions) {
+          await executeRun(
+            'INSERT OR REPLACE INTO positions (id, instrument, direction, entry_price, current_price, quantity, unrealized_pnl, stop_loss, take_profit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [
+              String(pos.id),
+              String(pos.symbol),
+              String(pos.side),
+              Number(pos.entryPrice || 0),
+              Number(pos.currentPrice || pos.entryPrice || 0),
+              Number(pos.quantity || 0),
+              Number(pos.unrealizedPnL || 0),
+              pos.stopLoss !== undefined ? Number(pos.stopLoss) : null,
+              pos.takeProfit !== undefined ? Number(pos.takeProfit) : null
+            ]
+          );
+          syncedPositionsCount++;
+        }
+      }
+
+      // 2. Synchronize open orders
+      const orders = await adapter.getOpenOrders();
+      if (Array.isArray(orders)) {
+        for (const ord of orders) {
+          await executeRun(
+            'INSERT OR REPLACE INTO orders (id, instrument, order_type, direction, price, quantity, status, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            [
+              String(ord.brokerOrderId || ord.id),
+              String(ord.symbol),
+              String(ord.orderType || 'MARKET'),
+              String(ord.side || 'BUY'),
+              ord.price !== undefined ? Number(ord.price) : null,
+              Number(ord.quantity || 0),
+              String(ord.status || 'NEW'),
+              Number(ord.timestamp || Date.now())
+            ]
+          );
+          syncedOrdersCount++;
+        }
+      }
+
+      // 3. Synchronize closed deals into trades
+      const history = adapter.getOrderHistoryRange
+        ? await adapter.getOrderHistoryRange(from, to)
+        : await adapter.getOrderHistory();
+
+      if (Array.isArray(history)) {
+        for (const order of history) {
+          if (order.isClosedDeal !== undefined && !order.isClosedDeal) continue;
+          if (order.status && order.status !== 'FILLED') continue;
+
+          let pnl: number | null = null;
+          if (typeof (order as any).netAmount === 'number' && Number.isFinite((order as any).netAmount)) {
+            pnl = (order as any).netAmount;
+          } else if (typeof (order as any).realizedPnL === 'number' && Number.isFinite((order as any).realizedPnL)) {
+            pnl = (order as any).realizedPnL;
+          } else if (typeof (order as any).pnl === 'number' && Number.isFinite((order as any).pnl)) {
+            pnl = (order as any).pnl;
+          }
+
+          const entry = Number(order.price ?? 0);
+          const exit = Number(order.averageFillPrice ?? 0);
+          const qty = Number(order.filledQuantity ?? order.quantity ?? 0);
+          const side = String(order.side || 'BUY').toUpperCase().includes('SELL') ? 'SELL' : 'BUY';
+          const sym = String(order.symbol || 'UNKNOWN');
+
+          if (pnl === null && order.isClosedDeal && entry > 0 && exit > 0 && qty > 0 && Math.abs(exit - entry) > 0.00001) {
+            const rawDiff = side === 'SELL' ? (entry - exit) : (exit - entry);
+            if (sym.includes('JPY') && !sym.startsWith('JPY')) {
+              pnl = (rawDiff * qty) / (exit > 50 ? exit : 150.0);
+            } else {
+              pnl = rawDiff * qty;
+            }
+          }
+
+          if (pnl !== null) {
+            const dealId = String(order.id);
+            const ts = Number(order.timestamp || Date.now());
+            await this.recordBrokerConfirmedTrade({
+              id: dealId,
+              signalId: (order as any).signalId,
+              instrument: sym,
+              direction: side,
+              entryPrice: entry,
+              exitPrice: exit,
+              size: qty,
+              pnl: Math.round(pnl * 100) / 100,
+              status: 'CLOSED',
+              entryTime: ts,
+              exitTime: ts,
+              tracePayload: order
+            });
+            syncedTradesCount++;
+          }
+        }
+      }
+    } catch (err: any) {
+      console.warn(`[Goldcrest] synchronizeBrokerExecutions for ${broker} failed:`, err?.message || err);
+    }
+
+    return { syncedTradesCount, syncedPositionsCount, syncedOrdersCount };
+  }
+
   public async captureBrokerSnapshot(broker: 'CTRADER' | 'FIVE_PAISA'): Promise<any> {
     const adapter = brokerRegistry.getAdapter(broker, 'LIVE');
     if (!adapter) return null;
@@ -112,6 +298,8 @@ export class ReconciliationService {
         'INSERT INTO broker_reconciliation_snapshots (id, broker, environment, timestamp, account_json, positions_json, orders_json, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
         [snapshot.id, broker, 'LIVE', timestamp, JSON.stringify(account), JSON.stringify(positions), JSON.stringify(orders), snapshot.status]
       );
+      // Synchronize durable tables in background without throwing
+      this.synchronizeBrokerExecutions(broker, timestamp - 24 * 60 * 60 * 1000, timestamp).catch(() => {});
       return snapshot;
     } catch (err:any) {
       const isUnconfigured = err?.code === 'AUTHENTICATION_FAILED' ||

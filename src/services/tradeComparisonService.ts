@@ -1,6 +1,7 @@
 import { executeQuery } from '../database/db';
 import { brokerRegistry } from '../brokers/registry';
 import { BrokerType } from '../brokers/types';
+import { reconciliationService } from './reconciliationService';
 
 export interface RawTradeRecord {
   id: string;
@@ -248,6 +249,20 @@ export async function generateTradeComparisonReport(from: number, to: number): P
           commission: comm,
           status: 'CLOSED'
         });
+
+        reconciliationService.recordBrokerConfirmedTrade({
+          id,
+          instrument: symbol,
+          direction: side,
+          entryPrice: entry,
+          exitPrice: exit,
+          size: qty,
+          pnl: Math.round(pnl * 100) / 100,
+          status: 'CLOSED',
+          entryTime: timestamp,
+          exitTime: timestamp,
+          tracePayload: order
+        }).catch(() => {});
       }
     } catch {
       // Best-effort

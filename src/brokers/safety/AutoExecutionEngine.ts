@@ -15,6 +15,7 @@ import { claimExecutionIntent, completeExecutionIntent, failExecutionIntent, mar
 import { getSystemConfig, updateSystemConfig } from '../../services/configService';
 import { liveRuntimeLog, tradeAuditLog } from '../../services/liveRuntimeLog';
 import { normalizePriceToInstrumentDigits } from './TradeSizing';
+import { executeRun } from '../../database/db';
 
 /**
  * Autonomous live execution is an explicit, server-side opt-in.
@@ -448,6 +449,24 @@ class AutoExecutionEngine {
 
       if (placedOrder.status === 'FILLED') {
         await completeExecutionIntent(idempotencyKey, placedOrder);
+        const orderIdStr = String(placedOrder.brokerOrderId || placedOrder.id);
+        await executeRun(
+          'INSERT OR REPLACE INTO orders (id, instrument, order_type, direction, price, quantity, status, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          [
+            orderIdStr,
+            order.symbol,
+            order.orderType || 'MARKET',
+            order.side,
+            placedOrder.averageFillPrice ?? placedOrder.price ?? order.price ?? null,
+            Number(placedOrder.filledQuantity || order.quantity || 0),
+            'FILLED',
+            Date.now()
+          ]
+        ).catch(() => {});
+        await executeRun(
+          'INSERT OR REPLACE INTO trade_traces (trade_trace_id, payload_json, timestamp, updated_at) VALUES (?, ?, ?, ?)',
+          [`TRACE-${idempotencyKey}`, JSON.stringify(placedOrder), Date.now(), Date.now()]
+        ).catch(() => {});
       } else if (placedOrder.status === 'CANCELLED' || placedOrder.status === 'REJECTED' || placedOrder.status === 'EXPIRED') {
         await failExecutionIntent(idempotencyKey, placedOrder);
       } else {

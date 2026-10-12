@@ -185,6 +185,24 @@ export async function reconcileExecutionIntent(idempotencyKey: string): Promise<
         return null;
       }
       await completeExecutionIntent(idempotencyKey, merged);
+      const orderIdStr = String(status.brokerOrderId || brokerOrderId);
+      await executeRun(
+        'INSERT OR REPLACE INTO orders (id, instrument, order_type, direction, price, quantity, status, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [
+          orderIdStr,
+          String(status.symbol || stored?.symbol || stored?.payload?.symbol || 'FOREX'),
+          String(status.orderType || stored?.orderType || 'MARKET'),
+          String(status.side || stored?.side || 'BUY'),
+          status.averageFillPrice ?? status.price ?? null,
+          filledQuantity > 0 ? filledQuantity : requestedQuantity,
+          'FILLED',
+          Date.now()
+        ]
+      );
+      await executeRun(
+        'INSERT OR REPLACE INTO trade_traces (trade_trace_id, payload_json, timestamp, updated_at) VALUES (?, ?, ?, ?)',
+        [`TRACE-${idempotencyKey}`, JSON.stringify(merged), Date.now(), Date.now()]
+      );
     } else if (status.status === 'CANCELLED' || status.status === 'REJECTED' || status.status === 'EXPIRED') {
       await failExecutionIntent(idempotencyKey, merged);
     } else {
