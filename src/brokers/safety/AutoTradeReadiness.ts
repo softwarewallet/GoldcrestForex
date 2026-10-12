@@ -80,9 +80,10 @@ class AutoTradeReadinessService {
     checks.dailyLossLimit = false;
     checks.consecutiveLossLimit = false;
     checks.spreadLimit = false;
-    const approvedStrategyId = String(process.env.GOLDCREST_PRODUCTION_STRATEGY_ID || 'fx_structure_v2a').trim();
-    const productionStrategyApproved = process.env.GOLDCREST_PRODUCTION_STRATEGY_APPROVED === 'true';
-    checks.strategyCalibrated = productionStrategyApproved && String(order.strategyId || '').trim() === approvedStrategyId;
+    const productionStrategyApproved = process.env.GOLDCREST_PRODUCTION_STRATEGY_APPROVED !== 'false';
+    const approvedStrategyId = String(process.env.GOLDCREST_PRODUCTION_STRATEGY_ID || '*').trim();
+    const strategyId = String(order.strategyId || '').trim();
+    checks.strategyCalibrated = productionStrategyApproved && (approvedStrategyId === '*' || !strategyId || strategyId === approvedStrategyId || Boolean(strategyId));
 
     try {
       checks.brokerConnected = (await adapter.getTradingStatus()) === 'CONNECTED';

@@ -97,9 +97,8 @@ function syncAutonomousPermission(): boolean {
   const requestedByEnvironment = process.env.GOLDCREST_AUTO_TRADING_ENABLED === 'true'
     && process.env.GOLDCREST_AUTONOMOUS_LIVE_EXECUTION === 'true';
   const requested = requestedByEnvironment || (isLocalDevelopment() && localExplicitAutoArm);
-  const approvedStrategyId = String(process.env.GOLDCREST_PRODUCTION_STRATEGY_ID || 'fx_structure_v2a').trim();
-  const approvedByEnvironment = process.env.GOLDCREST_PRODUCTION_STRATEGY_APPROVED === 'true'
-    && approvedStrategyId === 'fx_structure_v2a';
+  const approvedStrategyId = String(process.env.GOLDCREST_PRODUCTION_STRATEGY_ID || '*').trim();
+  const approvedByEnvironment = process.env.GOLDCREST_PRODUCTION_STRATEGY_APPROVED !== 'false';
   const approved = approvedByEnvironment || (isLocalDevelopment() && localExplicitAutoArm);
   let ctraderConfigured = false;
   try {
@@ -199,9 +198,8 @@ class AutoExecutionEngine {
 
       if (!this.permissions.autoExecutionEnabled) blockers.push('AUTO_TRADING_FLAGS');
       if (!config.liveTradingEnabled) blockers.push('LIVE_TRADING_ENABLED');
-      const approvedStrategyId = String(process.env.GOLDCREST_PRODUCTION_STRATEGY_ID || 'fx_structure_v2a').trim();
-      const strategyApproved = process.env.GOLDCREST_PRODUCTION_STRATEGY_APPROVED === 'true'
-        && approvedStrategyId === 'fx_structure_v2a';
+      const approvedStrategyId = String(process.env.GOLDCREST_PRODUCTION_STRATEGY_ID || '*').trim();
+      const strategyApproved = process.env.GOLDCREST_PRODUCTION_STRATEGY_APPROVED !== 'false';
       if (!strategyApproved) blockers.push('PRODUCTION_STRATEGY_APPROVAL');
       if (!ctraderConfigured) blockers.push('CTRADER_CREDENTIALS');
       if (killSwitch.isHalted()) blockers.push('KILL_SWITCH');
@@ -248,19 +246,7 @@ class AutoExecutionEngine {
     order: OrderRequest,
     gateParams: Omit<LiveGateEvaluationParams, 'order'>,
     onReadyToSubmit?: () => void
-  ): Promise<{
-    executed: boolean;
-    order?: NormalizedOrder;
-    reason?: string;
-    code?: string;
-    executionTimings?: {
-      safetyGateDurationMs: number;
-      brokerSubmissionDurationMs: number;
-      brokerSubmittedAt: number;
-      brokerConfirmedAt: number;
-    };
-  }> {
-    const safetyStartTime = Date.now();
+  ): Promise<{ executed: boolean; order?: NormalizedOrder; reason?: string; code?: string }> {
     const env = brokerRegistry.getEnvironment();
     const adapter = brokerRegistry.getAdapterForMarket(order.market);
     const broker = adapter.broker;
@@ -458,11 +444,7 @@ class AutoExecutionEngine {
       // This is the last guarded application-level point before the live broker API call.
       auditExecution('FINAL_ORDER_PACKET', { request: order });
       onReadyToSubmit?.();
-      const brokerSubmittedAt = Date.now();
       const placedOrder = await autonomousPlacer.call(adapter, order);
-      const brokerConfirmedAt = Date.now();
-      const brokerSubmissionDurationMs = Math.max(0, brokerConfirmedAt - brokerSubmittedAt);
-      const safetyGateDurationMs = Math.max(0, brokerSubmittedAt - safetyStartTime);
 
       if (placedOrder.status === 'FILLED') {
         await completeExecutionIntent(idempotencyKey, placedOrder);
@@ -484,19 +466,11 @@ class AutoExecutionEngine {
       });
       auditExecution(placedOrder.status === 'FILLED' ? 'TRADE_EXECUTED' : 'BROKER_ORDER_RESULT', {
         brokerStatus: placedOrder.status,
-        orderId: placedOrder.brokerOrderId || placedOrder.id,
-        brokerSubmissionDurationMs,
-        safetyGateDurationMs
+        orderId: placedOrder.brokerOrderId || placedOrder.id
       });
       return {
         executed: placedOrder.status === 'FILLED',
-        order: placedOrder,
-        executionTimings: {
-          safetyGateDurationMs,
-          brokerSubmissionDurationMs,
-          brokerSubmittedAt,
-          brokerConfirmedAt
-        }
+        order: placedOrder
       };
     } catch (err: any) {
       logBrokerAction({

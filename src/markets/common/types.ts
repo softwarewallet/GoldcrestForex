@@ -221,6 +221,7 @@ export interface TradingSignal {
   reasons: string[];
   noTradeReasons?: string[];
   modelVersion: string;
+  bounceStrategy?: any;
   expiry?: string;
 }
 

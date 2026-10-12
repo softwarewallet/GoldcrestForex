@@ -72,6 +72,7 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
   const [limitMessage, setLimitMessage] = useState('');
   const [forexStopLossPips, setForexStopLossPips] = useState(20);
   const [forexTakeProfitPips, setForexTakeProfitPips] = useState(3.0);
+  const [phase44HardMaxEnabled, setPhase44HardMaxEnabled] = useState(true);
   const [savingForexPipTargets, setSavingForexPipTargets] = useState(false);
   const [forexPipTargetsMessage, setForexPipTargetsMessage] = useState('');
   const [autoLiveMinSignalScore, setAutoLiveMinSignalScore] = useState(75);
@@ -133,6 +134,9 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
         }
         if (Number.isFinite(Number(config.forexTakeProfitPips))) {
           setForexTakeProfitPips(Number(config.forexTakeProfitPips));
+        }
+        if (typeof config.phase44HardMaxEnabled === 'boolean') {
+          setPhase44HardMaxEnabled(config.phase44HardMaxEnabled);
         }
         if (Number.isFinite(Number(config.dailyProfitTargetUsd))) {
           setDailyProfitTargetUsd(Number(config.dailyProfitTargetUsd));
@@ -367,15 +371,44 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
                 </div>
               </label>
               <label className="block space-y-1">
-                <span className="text-[10px] uppercase text-slate-500 font-mono">Take Profit (Max 5.0 Pips)</span>
+                <span className="text-[10px] uppercase text-slate-500 font-mono">
+                  Take Profit {phase44HardMaxEnabled ? '(Max 5.0 Pips)' : '(Unconstrained)'}
+                </span>
                 <div className="flex items-center gap-2">
-                  <input type="number" min="0.5" max="5.0" step="0.5" value={forexTakeProfitPips} onChange={e => setForexTakeProfitPips(Number(e.target.value))} className={inputClass} />
+                  <input
+                    type="number"
+                    min="0.5"
+                    max={phase44HardMaxEnabled ? "5.0" : "100.0"}
+                    step="0.5"
+                    value={forexTakeProfitPips}
+                    onChange={e => setForexTakeProfitPips(Number(e.target.value))}
+                    className={inputClass}
+                  />
                   <span className="text-[10px] text-slate-500 font-mono whitespace-nowrap">PIPS</span>
                 </div>
               </label>
             </div>
+
+            <div className="mt-4 pt-4 border-t border-slate-800/80 flex items-center justify-between">
+              <div>
+                <div className="text-xs font-bold text-white">Phase 44 Hard Maximum (Cap TP at 5.0 Pips)</div>
+                <div className="text-[10px] text-slate-400">When enabled, Forex Take Profit is strictly capped at 5.0 pips. When disabled, higher take profit targets are permitted.</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPhase44HardMaxEnabled(!phase44HardMaxEnabled)}
+                className={`px-3 py-1.5 rounded text-xs font-bold border transition ${
+                  phase44HardMaxEnabled
+                    ? 'bg-emerald-600 border-emerald-500 text-white'
+                    : 'bg-slate-800 border-slate-700 text-slate-400'
+                }`}
+              >
+                {phase44HardMaxEnabled ? 'ENABLED (MAX 5.0 PIPS)' : 'DISABLED (UNCONSTRAINED)'}
+              </button>
+            </div>
+
             <div className="mt-3 text-[10px] text-slate-600 font-mono">
-              BUY: SL below entry / TP above entry · SELL: SL above entry / TP below entry (Hard Maximum TP: 5.0 Pips).
+              BUY: SL below entry / TP above entry · SELL: SL above entry / TP below entry {phase44HardMaxEnabled ? '(Hard Maximum TP: 5.0 Pips).' : '(Phase 44 Hard Maximum Disabled).'}.
             </div>
             <div className="flex items-center gap-3 mt-4">
               <button
@@ -388,8 +421,9 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
                     setForexPipTargetsMessage('Stop Loss must be greater than 0 and no greater than 10000 pips.');
                     return;
                   }
-                  if (!Number.isFinite(takeProfit) || takeProfit <= 0 || takeProfit > 5.0) {
-                    setForexPipTargetsMessage('Take Profit must be between 0.5 and 5.0 pips (Phase 44 hard maximum).');
+                  const maxTp = phase44HardMaxEnabled ? 5.0 : 100.0;
+                  if (!Number.isFinite(takeProfit) || takeProfit <= 0 || takeProfit > maxTp) {
+                    setForexPipTargetsMessage(phase44HardMaxEnabled ? 'Take Profit must be between 0.5 and 5.0 pips (Phase 44 hard maximum).' : 'Take Profit must be between 0.5 and 100.0 pips.');
                     return;
                   }
                   setSavingForexPipTargets(true);
@@ -398,7 +432,11 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
                     const res = await fetch('/api/config', {
                       method: 'POST',
                       headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ forexStopLossPips: stopLoss, forexTakeProfitPips: takeProfit })
+                      body: JSON.stringify({
+                        forexStopLossPips: stopLoss,
+                        forexTakeProfitPips: takeProfit,
+                        phase44HardMaxEnabled
+                      })
                     });
                     const data = await res.json();
                     if (!res.ok) throw new Error(data.error || 'Failed to save Forex pip settings.');

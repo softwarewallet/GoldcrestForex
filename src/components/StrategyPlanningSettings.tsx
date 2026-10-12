@@ -83,6 +83,45 @@ export const StrategyPlanningSettings: React.FC = () => {
     return DEFAULT_STRATEGIES;
   });
 
+  const [threeStepRisk, setThreeStepRisk] = useState<{
+    stopLossEnabled: boolean;
+    stopLossPips: number;
+    takeProfitEnabled: boolean;
+    takeProfitPips: number;
+    freeTradeEnabled: boolean;
+    freeTradeLockPips: number;
+    confidenceThresholdEnabled: boolean;
+    confidenceThreshold: number;
+    macroAlignmentFilterEnabled: boolean;
+    volatilityScalingEnabled: boolean;
+    sessionRiskFilterEnabled: boolean;
+  }>(() => {
+    try {
+      const saved = localStorage.getItem('goldcrest_3step_risk_settings');
+      if (saved) {
+        return {
+          macroAlignmentFilterEnabled: true,
+          volatilityScalingEnabled: true,
+          sessionRiskFilterEnabled: true,
+          ...JSON.parse(saved)
+        };
+      }
+    } catch {}
+    return {
+      stopLossEnabled: true,
+      stopLossPips: 7,
+      takeProfitEnabled: true,
+      takeProfitPips: 11,
+      freeTradeEnabled: true,
+      freeTradeLockPips: 6,
+      confidenceThresholdEnabled: true,
+      confidenceThreshold: 75,
+      macroAlignmentFilterEnabled: true,
+      volatilityScalingEnabled: true,
+      sessionRiskFilterEnabled: true
+    };
+  });
+
   const [message, setMessage] = useState<string | null>(null);
 
   useEffect(() => {
@@ -90,6 +129,12 @@ export const StrategyPlanningSettings: React.FC = () => {
       localStorage.setItem('goldcrest_strategy_planning_configs', JSON.stringify(strategies));
     } catch {}
   }, [strategies]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('goldcrest_3step_risk_settings', JSON.stringify(threeStepRisk));
+    } catch {}
+  }, [threeStepRisk]);
 
   const handleToggle = (id: string) => {
     setStrategies(prev =>
@@ -112,7 +157,252 @@ export const StrategyPlanningSettings: React.FC = () => {
   };
 
   return (
-    <div className="space-y-4 font-mono text-slate-100">
+    <div className="space-y-6 font-mono text-slate-100">
+      {/* 3-Step Strategy Risk Management Rules Settings Card */}
+      <div className="bg-slate-900 border border-cyan-900/80 rounded-xl p-5 shadow-lg">
+        <div className="flex items-center justify-between gap-4 mb-2">
+          <div className="flex items-center gap-2.5">
+            <ShieldAlert className="w-5 h-5 text-cyan-400" />
+            <h3 className="text-sm font-bold text-white uppercase tracking-wider">
+              3-Step 5M 50 EMA Strategy Risk Management Rules (cTrader Auto)
+            </h3>
+          </div>
+          <span className="px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800 text-[10px] font-bold">
+            FOREX G10 FX
+          </span>
+        </div>
+        <p className="text-xs text-slate-400 mb-4">
+          Configure precise risk management parameters for the 3-step pullback bounce strategy. Changes take effect instantly in real-time trade generation and cTrader automated execution.
+        </p>
+
+        <div className="grid md:grid-cols-2 gap-4">
+          {/* Stop Loss Rule */}
+          <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 flex flex-col justify-between">
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-bold text-white">Stop Loss (Risk)</span>
+                <button
+                  type="button"
+                  onClick={() => setThreeStepRisk(prev => ({ ...prev, stopLossEnabled: !prev.stopLossEnabled }))}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-bold border ${
+                    threeStepRisk.stopLossEnabled
+                      ? 'bg-emerald-600 border-emerald-500 text-white'
+                      : 'bg-slate-900 border-slate-700 text-slate-400'
+                  }`}
+                >
+                  {threeStepRisk.stopLossEnabled ? <ToggleRight className="w-3.5 h-3.5" /> : <ToggleLeft className="w-3.5 h-3.5" />}
+                  {threeStepRisk.stopLossEnabled ? 'ENABLED' : 'DISABLED'}
+                </button>
+              </div>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                Set exactly 6 to 8 pips away, just past the structural candle wick. If broken, thesis is invalidated and cTrader cuts trade automatically.
+              </p>
+            </div>
+            <div className="mt-3 pt-3 border-t border-slate-800/80 flex items-center justify-between">
+              <span className="text-[10px] uppercase text-slate-500 font-bold">SL Distance (Pips)</span>
+              <input
+                type="number"
+                min="6"
+                max="8"
+                disabled={!threeStepRisk.stopLossEnabled}
+                value={threeStepRisk.stopLossPips}
+                onChange={e => setThreeStepRisk(prev => ({ ...prev, stopLossPips: Number(e.target.value) }))}
+                className="w-20 bg-slate-900 border border-slate-800 rounded px-2.5 py-1 text-white font-mono text-xs text-right outline-none focus:border-cyan-500 disabled:opacity-50"
+              />
+            </div>
+          </div>
+
+          {/* Take Profit Rule */}
+          <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 flex flex-col justify-between">
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-bold text-white">Take Profit (Profit)</span>
+                <button
+                  type="button"
+                  onClick={() => setThreeStepRisk(prev => ({ ...prev, takeProfitEnabled: !prev.takeProfitEnabled }))}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-bold border ${
+                    threeStepRisk.takeProfitEnabled
+                      ? 'bg-emerald-600 border-emerald-500 text-white'
+                      : 'bg-slate-900 border-slate-700 text-slate-400'
+                  }`}
+                >
+                  {threeStepRisk.takeProfitEnabled ? <ToggleRight className="w-3.5 h-3.5" /> : <ToggleLeft className="w-3.5 h-3.5" />}
+                  {threeStepRisk.takeProfitEnabled ? 'ENABLED' : 'DISABLED'}
+                </button>
+              </div>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                Set to 10 to 12 pips for a positive Risk-to-Reward ratio (roughly 1:1.5), ensuring wins comfortably outsize losses.
+              </p>
+            </div>
+            <div className="mt-3 pt-3 border-t border-slate-800/80 flex items-center justify-between">
+              <span className="text-[10px] uppercase text-slate-500 font-bold">TP Target (Pips)</span>
+              <input
+                type="number"
+                min="10"
+                max="15"
+                disabled={!threeStepRisk.takeProfitEnabled}
+                value={threeStepRisk.takeProfitPips}
+                onChange={e => setThreeStepRisk(prev => ({ ...prev, takeProfitPips: Number(e.target.value) }))}
+                className="w-20 bg-slate-900 border border-slate-800 rounded px-2.5 py-1 text-white font-mono text-xs text-right outline-none focus:border-cyan-500 disabled:opacity-50"
+              />
+            </div>
+          </div>
+
+          {/* Free Trade Trigger Rule */}
+          <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 flex flex-col justify-between">
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-bold text-white">Free Trade Trigger</span>
+                <button
+                  type="button"
+                  onClick={() => setThreeStepRisk(prev => ({ ...prev, freeTradeEnabled: !prev.freeTradeEnabled }))}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-bold border ${
+                    threeStepRisk.freeTradeEnabled
+                      ? 'bg-emerald-600 border-emerald-500 text-white'
+                      : 'bg-slate-900 border-slate-700 text-slate-400'
+                  }`}
+                >
+                  {threeStepRisk.freeTradeEnabled ? <ToggleRight className="w-3.5 h-3.5" /> : <ToggleLeft className="w-3.5 h-3.5" />}
+                  {threeStepRisk.freeTradeEnabled ? 'ENABLED' : 'DISABLED'}
+                </button>
+              </div>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                Locks in 50% profit at +6 pips and moves stop loss to breakeven, eliminating risk for the remainder of the trade.
+              </p>
+            </div>
+            <div className="mt-3 pt-3 border-t border-slate-800/80 flex items-center justify-between">
+              <span className="text-[10px] uppercase text-slate-500 font-bold">Lock Profit (Pips)</span>
+              <input
+                type="number"
+                min="4"
+                max="10"
+                disabled={!threeStepRisk.freeTradeEnabled}
+                value={threeStepRisk.freeTradeLockPips}
+                onChange={e => setThreeStepRisk(prev => ({ ...prev, freeTradeLockPips: Number(e.target.value) }))}
+                className="w-20 bg-slate-900 border border-slate-800 rounded px-2.5 py-1 text-white font-mono text-xs text-right outline-none focus:border-cyan-500 disabled:opacity-50"
+              />
+            </div>
+          </div>
+
+          {/* Confidence Threshold Rule */}
+          <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 flex flex-col justify-between">
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-bold text-white">Confidence Threshold</span>
+                <button
+                  type="button"
+                  onClick={() => setThreeStepRisk(prev => ({ ...prev, confidenceThresholdEnabled: !prev.confidenceThresholdEnabled }))}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-bold border ${
+                    threeStepRisk.confidenceThresholdEnabled
+                      ? 'bg-emerald-600 border-emerald-500 text-white'
+                      : 'bg-slate-900 border-slate-700 text-slate-400'
+                  }`}
+                >
+                  {threeStepRisk.confidenceThresholdEnabled ? <ToggleRight className="w-3.5 h-3.5" /> : <ToggleLeft className="w-3.5 h-3.5" />}
+                  {threeStepRisk.confidenceThresholdEnabled ? 'ENABLED' : 'DISABLED'}
+                </button>
+              </div>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                Enforces a strict confidence score floor to prevent over-trading during choppy, low-volume sideways markets.
+              </p>
+            </div>
+            <div className="mt-3 pt-3 border-t border-slate-800/80 flex items-center justify-between">
+              <span className="text-[10px] uppercase text-slate-500 font-bold">Min Score Floor</span>
+              <input
+                type="number"
+                min="50"
+                max="95"
+                disabled={!threeStepRisk.confidenceThresholdEnabled}
+                value={threeStepRisk.confidenceThreshold}
+                onChange={e => setThreeStepRisk(prev => ({ ...prev, confidenceThreshold: Number(e.target.value) }))}
+                className="w-20 bg-slate-900 border border-slate-800 rounded px-2.5 py-1 text-white font-mono text-xs text-right outline-none focus:border-cyan-500 disabled:opacity-50"
+              />
+            </div>
+          </div>
+
+          {/* Mandate 1: Macro Alignment Filter */}
+          <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 flex flex-col justify-between">
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-bold text-white">1H Macro Alignment Filter</span>
+                <button
+                  type="button"
+                  onClick={() => setThreeStepRisk(prev => ({ ...prev, macroAlignmentFilterEnabled: !prev.macroAlignmentFilterEnabled }))}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-bold border ${
+                    threeStepRisk.macroAlignmentFilterEnabled
+                      ? 'bg-blue-600 border-blue-500 text-white'
+                      : 'bg-slate-900 border-slate-700 text-slate-400'
+                  }`}
+                >
+                  {threeStepRisk.macroAlignmentFilterEnabled ? <ToggleRight className="w-3.5 h-3.5" /> : <ToggleLeft className="w-3.5 h-3.5" />}
+                  {threeStepRisk.macroAlignmentFilterEnabled ? 'ENABLED' : 'DISABLED'}
+                </button>
+              </div>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                Strictly FORBIDS BUY orders when 1H macro trend is Bearish, and FORBIDS SELL orders when 1H macro trend is Bullish.
+              </p>
+            </div>
+            <div className="mt-3 pt-3 border-t border-slate-800/80 text-[10px] text-cyan-400 font-sans">
+              Rule 1: Mandates 1H higher-timeframe alignment before lower-timeframe entry.
+            </div>
+          </div>
+
+          {/* Mandate 2: Volatility-Based Target Scaling */}
+          <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 flex flex-col justify-between">
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-bold text-white">Volatility-Based Target Scaling</span>
+                <button
+                  type="button"
+                  onClick={() => setThreeStepRisk(prev => ({ ...prev, volatilityScalingEnabled: !prev.volatilityScalingEnabled }))}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-bold border ${
+                    threeStepRisk.volatilityScalingEnabled
+                      ? 'bg-blue-600 border-blue-500 text-white'
+                      : 'bg-slate-900 border-slate-700 text-slate-400'
+                  }`}
+                >
+                  {threeStepRisk.volatilityScalingEnabled ? <ToggleRight className="w-3.5 h-3.5" /> : <ToggleLeft className="w-3.5 h-3.5" />}
+                  {threeStepRisk.volatilityScalingEnabled ? 'ENABLED' : 'DISABLED'}
+                </button>
+              </div>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                Dynamically sets SL to 1.2x 5M ATR and TP to 2.0x SL for mathematically superior 1:2.0 Risk-to-Reward.
+              </p>
+            </div>
+            <div className="mt-3 pt-3 border-t border-slate-800/80 text-[10px] text-emerald-400 font-sans">
+              Rule 2: Scales trade size and pip bounds to incoming market volatility.
+            </div>
+          </div>
+
+          {/* Mandate 3: Session Risk Filter */}
+          <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 flex flex-col justify-between">
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-bold text-white">Session Risk Filter & 0.88 Gate</span>
+                <button
+                  type="button"
+                  onClick={() => setThreeStepRisk(prev => ({ ...prev, sessionRiskFilterEnabled: !prev.sessionRiskFilterEnabled }))}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-bold border ${
+                    threeStepRisk.sessionRiskFilterEnabled
+                      ? 'bg-blue-600 border-blue-500 text-white'
+                      : 'bg-slate-900 border-slate-700 text-slate-400'
+                  }`}
+                >
+                  {threeStepRisk.sessionRiskFilterEnabled ? <ToggleRight className="w-3.5 h-3.5" /> : <ToggleLeft className="w-3.5 h-3.5" />}
+                  {threeStepRisk.sessionRiskFilterEnabled ? 'ENABLED' : 'DISABLED'}
+                </button>
+              </div>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                Applies safety penalty capping confidence below 0.88 in Tokyo or Gap session unless news delta &gt; 0.95.
+              </p>
+            </div>
+            <div className="mt-3 pt-3 border-t border-slate-800/80 text-[10px] text-amber-400 font-sans">
+              Rule 3: Enforces defensive capital preservation during low-liquidity sessions.
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-lg">
         <div className="flex items-center justify-between gap-4 mb-2">
           <div className="flex items-center gap-2.5">

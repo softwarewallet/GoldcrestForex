@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import {
-  Bell, BookOpen, CandlestickChart,
+  Bell, BookOpen, CandlestickChart, LayoutDashboard, Clock,
   ListChecks, Settings, Sparkles, Activity, History as HistoryIcon, Database, BarChart2, Eye, Compass, Zap, Sliders, Target,
-  Wrench, ChevronDown, ChevronRight
+  Wrench, ChevronDown, ChevronRight, DollarSign
 } from 'lucide-react';
 import { ForexSessionState, IndianSessionState } from '../markets/common/types';
 
@@ -42,7 +42,8 @@ const toolsSubItems: NavItem[] = [
 ];
 
 const nav: NavEntry[] = [
-  { id: 'market_watch', label: 'Market Watch', icon: Activity },
+  { id: 'market_watch', label: 'Dashboard', icon: LayoutDashboard },
+  { id: 'market_sessions', label: 'Sessions', icon: Clock },
   { id: 'trading', label: 'Cockpit', icon: CandlestickChart },
   { id: 'control_center', label: 'Control Center', icon: ListChecks },
   {
@@ -52,8 +53,9 @@ const nav: NavEntry[] = [
     items: toolsSubItems
   },
   { id: 'history', label: 'History', icon: HistoryIcon },
+  { id: 'pnl', label: 'PnL / Accounting', icon: DollarSign },
   { id: 'database', label: 'Database', icon: Database },
-  { id: 'alerts', label: 'Analytics', icon: BarChart2 },
+  { id: 'alerts', label: 'Analytics & Charts', icon: BarChart2 },
   { id: 'settings', label: 'Settings', icon: Settings }
 ];
 
@@ -273,9 +275,9 @@ export const GlobalAppShell: React.FC<GlobalAppShellProps> = ({
         <div className="px-3 pb-3 shrink-0">
           <div className="rounded-xl bg-[#07101b] border border-slate-800/80 px-3 py-[5px]">
             <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-full bg-[#12366d] border border-blue-500/40 flex items-center justify-center text-white font-semibold">R</div>
+              <div className="w-9 h-9 rounded-full bg-[#12366d] border border-blue-500/40 flex items-center justify-center text-white font-semibold">P</div>
               <div className="min-w-0">
-                <div className="text-sm font-semibold truncate text-slate-100">Raajan P Sharrma</div>
+                <div className="text-sm font-semibold truncate text-slate-100">Prernaa Sharmaa</div>
                 <div className="text-[11px] text-slate-400">Administrator</div>
               </div>
             </div>
@@ -314,12 +316,17 @@ export const GlobalAppShell: React.FC<GlobalAppShellProps> = ({
           <span className="text-amber-400 font-bold">{todayTrades.pendingTrades}</span>
         </div>
 
-        <div className="flex items-center gap-2 whitespace-nowrap">
+        <button
+          type="button"
+          onClick={() => setActiveTab('pnl')}
+          title="Open Trade Performance & PnL Accounting"
+          className="flex items-center gap-2 whitespace-nowrap hover:bg-slate-800/60 px-2 py-0.5 rounded transition cursor-pointer"
+        >
           <span className="text-slate-400 uppercase text-[11px] tracking-wide">Today's Net P&L:</span>
           <span className={`font-bold ${todayTrades.netPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
             {todayTrades.formattedNetPnL}
           </span>
-        </div>
+        </button>
 
         <div className="flex items-center gap-2 whitespace-nowrap">
           <span className="text-slate-400 uppercase text-[11px] tracking-wide">Remaining Target:</span>

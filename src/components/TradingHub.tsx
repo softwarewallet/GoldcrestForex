@@ -1384,6 +1384,34 @@ export const TradingHub: React.FC<TradingHubProps> = ({
                   </div>
                 </div>
 
+                {/* Advanced Quantitative Predictive Engine Mandates & Order Flow */}
+                {predictionResult.evidence?.macroStructure && (
+                  <div className="bg-gradient-to-r from-blue-950/30 to-slate-950 p-3 rounded-lg border border-blue-900/50 space-y-1.5 text-[11px] font-mono">
+                    <div className="flex items-center justify-between text-blue-300 font-bold">
+                      <span>PREDICTIVE ENGINE ORDER FLOW & MANDATES</span>
+                      <span className={`px-2 py-0.5 rounded text-[10px] ${
+                        predictionResult.evidence.macroStructure.timeframe_1H_trend === 'BULLISH'
+                          ? 'bg-emerald-500/20 text-emerald-300'
+                          : predictionResult.evidence.macroStructure.timeframe_1H_trend === 'BEARISH'
+                          ? 'bg-rose-500/20 text-rose-300'
+                          : 'bg-amber-500/20 text-amber-300'
+                      }`}>
+                        1H {predictionResult.evidence.macroStructure.timeframe_1H_trend}
+                      </span>
+                    </div>
+                    <div className="text-slate-300 text-[10px] font-sans">
+                      {predictionResult.evidence.macroStructure.trendReason}
+                    </div>
+                    {predictionResult.evidence.marketVelocity && (
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-1 border-t border-slate-900 text-[10px]">
+                        <div>Session: <b className="text-white">{predictionResult.evidence.marketVelocity.current_session}</b></div>
+                        <div>5M ATR: <b className="text-cyan-300">{predictionResult.evidence.marketVelocity.atr_5M_pips}p</b></div>
+                        <div>Dynamic SL: <b className="text-rose-300">{(predictionResult.evidence.marketVelocity.atr_5M_pips * 1.2).toFixed(1)}p</b> (1.2x ATR)</div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* Reasons and Veto Explanations */}
                 <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 text-[11px]">
                   {predictionResult.vetoReasons?.length > 0 && (

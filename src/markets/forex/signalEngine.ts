@@ -25,6 +25,7 @@ import { calculateSupportResistance } from './supportResistance';
 import { analyzeMultiTimeframe } from './multiTimeframe';
 import { LiveForexProvider, validateCandleDataQuality } from './provider';
 import { getForexSessionState } from '../common/session';
+import { evaluate5mBounceStrategy, BounceStrategyEvaluation } from './bounceStrategy';
 
 interface SyncForexDataProvider {
   readonly providerName: string;
@@ -62,6 +63,7 @@ export class ForexSignalEngine {
 
   /**
    * Evaluates directional bias and signal category
+   * Strictly enforces Rule 1: 5M 50 EMA Trend (Price > 50 EMA: Buy Only; Price < 50 EMA: Sell Only)
    */
   calculateDirection(
     mtf: MultiTimeframeSummary,
@@ -69,7 +71,8 @@ export class ForexSignalEngine {
     regime: MarketRegimeType,
     indicators: StructuredIndicators,
     score: number,
-    noTradeReasons: string[]
+    noTradeReasons: string[],
+    bounceEval?: BounceStrategyEvaluation
   ): {
     direction: 'STRONG_BUY' | 'BUY' | 'WATCH_BUY' | 'NEUTRAL' | 'WATCH_SELL' | 'SELL' | 'STRONG_SELL' | 'NO_TRADE';
     category: SignalCategory;
@@ -86,6 +89,54 @@ export class ForexSignalEngine {
       };
     }
 
+    // Step 1: 5M 50 EMA Trend Filter is authoritative
+    if (bounceEval) {
+      if (bounceEval.trendDirection === 'NEUTRAL') {
+        return {
+          direction: 'NEUTRAL',
+          category: 'NEUTRAL',
+          reasons: [bounceEval.trendReason]
+        };
+      }
+
+      if (bounceEval.trendDirection === 'BUY') {
+        // Only Buy opportunities allowed when price > 5M 50 EMA
+        reasons.push(bounceEval.trendReason);
+        if (bounceEval.zoneReason) reasons.push(bounceEval.zoneReason);
+        if (bounceEval.triggerReason) reasons.push(bounceEval.triggerReason);
+
+        if (bounceEval.setupState === 'READY_TO_ENTER') {
+          const dir = score >= this.config.thresholds.strongSignal ? 'STRONG_BUY' : 'BUY';
+          return { direction: dir, category: dir, reasons };
+        } else if (bounceEval.setupState === 'TESTING_ZONE') {
+          return { direction: 'WATCH_BUY', category: 'WATCH_BUY', reasons };
+        } else if (bounceEval.setupState === 'WAITING_FOR_PULLBACK') {
+          return { direction: 'WATCH_BUY', category: 'WATCH_BUY', reasons };
+        } else {
+          return { direction: 'NEUTRAL', category: 'NEUTRAL', reasons };
+        }
+      }
+
+      if (bounceEval.trendDirection === 'SELL') {
+        // Only Sell opportunities allowed when price < 5M 50 EMA
+        reasons.push(bounceEval.trendReason);
+        if (bounceEval.zoneReason) reasons.push(bounceEval.zoneReason);
+        if (bounceEval.triggerReason) reasons.push(bounceEval.triggerReason);
+
+        if (bounceEval.setupState === 'READY_TO_ENTER') {
+          const dir = score >= this.config.thresholds.strongSignal ? 'STRONG_SELL' : 'SELL';
+          return { direction: dir, category: dir, reasons };
+        } else if (bounceEval.setupState === 'TESTING_ZONE') {
+          return { direction: 'WATCH_SELL', category: 'WATCH_SELL', reasons };
+        } else if (bounceEval.setupState === 'WAITING_FOR_PULLBACK') {
+          return { direction: 'WATCH_SELL', category: 'WATCH_SELL', reasons };
+        } else {
+          return { direction: 'NEUTRAL', category: 'NEUTRAL', reasons };
+        }
+      }
+    }
+
+    // Fallback if bounceEval not provided
     const isBullishBias =
       (mtf.alignment === 'STRONG_BULLISH_ALIGNMENT' || mtf.alignment === 'BULLISH_ALIGNMENT_PULLBACK' || structure.trend === 'bullish') &&
       !mtf.isConflicting;
@@ -96,39 +147,21 @@ export class ForexSignalEngine {
 
     if (isBullishBias && !isBearishBias) {
       reasons.push(`Bullish structure (${structure.structure}) with ${mtf.alignmentSummary}`);
-      if (indicators.rsi !== null && indicators.rsi >= 50 && indicators.rsi <= 68) {
-        reasons.push(`RSI at ${indicators.rsi} indicates healthy upside momentum without overextension.`);
-      }
-      if (indicators.ema9 !== null && indicators.ema21 !== null && indicators.ema9 > indicators.ema21) {
-        reasons.push(`EMA 9 (${indicators.ema9}) trending cleanly above EMA 21 (${indicators.ema21}).`);
-      }
-
       if (score >= this.config.thresholds.strongSignal) {
         return { direction: 'STRONG_BUY', category: 'STRONG_BUY', reasons };
       } else if (score >= this.config.thresholds.actionableSignal) {
         return { direction: 'BUY', category: 'BUY', reasons };
-      } else if (score >= this.config.thresholds.watchSignal) {
-        return { direction: 'WATCH_BUY', category: 'WATCH_BUY', reasons };
       } else {
-        return { direction: 'NEUTRAL', category: 'NEUTRAL', reasons: ['Bullish bias present but score insufficiently high for active trade plan.'] };
+        return { direction: 'WATCH_BUY', category: 'WATCH_BUY', reasons };
       }
     } else if (isBearishBias && !isBullishBias) {
       reasons.push(`Bearish structure (${structure.structure}) with ${mtf.alignmentSummary}`);
-      if (indicators.rsi !== null && indicators.rsi <= 50 && indicators.rsi >= 32) {
-        reasons.push(`RSI at ${indicators.rsi} indicates established downward momentum.`);
-      }
-      if (indicators.ema9 !== null && indicators.ema21 !== null && indicators.ema9 < indicators.ema21) {
-        reasons.push(`EMA 9 (${indicators.ema9}) trailing below EMA 21 (${indicators.ema21}).`);
-      }
-
       if (score >= this.config.thresholds.strongSignal) {
         return { direction: 'STRONG_SELL', category: 'STRONG_SELL', reasons };
       } else if (score >= this.config.thresholds.actionableSignal) {
         return { direction: 'SELL', category: 'SELL', reasons };
-      } else if (score >= this.config.thresholds.watchSignal) {
-        return { direction: 'WATCH_SELL', category: 'WATCH_SELL', reasons };
       } else {
-        return { direction: 'NEUTRAL', category: 'NEUTRAL', reasons: ['Bearish bias present but score insufficiently high for active trade plan.'] };
+        return { direction: 'WATCH_SELL', category: 'WATCH_SELL', reasons };
       }
     } else {
       return {
@@ -470,75 +503,104 @@ export class ForexSignalEngine {
       totalScore: 0
     });
 
+    // ---------------------------------------------------------------------------
+    // THE 3-STEP PULLBACK BOUNCE ENGINE (5M 50 EMA + ZONE BOUNCE + REJECTION WICK)
+    // ---------------------------------------------------------------------------
+    const bounceEval = evaluate5mBounceStrategy({
+      candles5m,
+      candles15m,
+      candles1h,
+      pipSize: config.pipSize,
+      currentPrice
+    });
+
     const directionEvaluation = this.calculateDirection(
       mtf,
       structure,
       structure.regime,
       indicators,
       tentativeScore,
-      noTradeReasons
+      noTradeReasons,
+      bounceEval
     );
 
     // Build Entry & Trade Plan if not NO_TRADE
     let tradePlan: TradePlan | null = null;
-    let finalScore = tentativeScore;
+    let finalScore = Math.max(tentativeScore, bounceEval.strategyScore);
 
     if (directionEvaluation.direction !== 'NO_TRADE') {
-      const entryZone = this.calculateEntryZone(
-        directionEvaluation.direction,
-        currentPrice,
-        structure,
-        atr,
-        config.pipSize,
-        indicators
-      );
+      const isReadyToEnter = bounceEval.setupState === 'READY_TO_ENTER';
 
-      if (entryZone.isExtended) {
-        noTradeReasons.push('Price is excessively extended (> 2.5x ATR from 21 EMA); waiting for retracement');
+      let entryZone: EntryZone;
+      let slObj: { stopLoss: number; reason: string; pips: number };
+      let targets: { tp1: TargetLevel; tp2: TargetLevel; tp3: TargetLevel };
+
+      if (isReadyToEnter) {
+        entryZone = {
+          entryMin: bounceEval.entryMin,
+          entryMax: bounceEval.entryMax,
+          entryPreferred: bounceEval.entryPreferred,
+          entryType: 'BOUNCE_REJECTION_ENTRY',
+          entryCondition: bounceEval.triggerReason,
+          isExtended: false
+        };
+        slObj = {
+          stopLoss: bounceEval.stopLoss,
+          reason: bounceEval.stopLossReason,
+          pips: bounceEval.riskPips
+        };
+        targets = {
+          tp1: { targetPrice: bounceEval.takeProfit1, targetReason: 'TP1 (1.8R liquidity target)', expectedR: 1.8 },
+          tp2: { targetPrice: bounceEval.takeProfit2, targetReason: 'TP2 (2.8R expansion target)', expectedR: 2.8 },
+          tp3: { targetPrice: bounceEval.takeProfit3, targetReason: 'TP3 (4.0R extended runner)', expectedR: 4.0 }
+        };
+      } else if (bounceEval.setupState === 'TESTING_ZONE') {
+        entryZone = {
+          entryMin: bounceEval.entryMin,
+          entryMax: bounceEval.entryMax,
+          entryPreferred: bounceEval.entryPreferred,
+          entryType: bounceEval.keyLevelType === 'SUPPORT' ? 'SUPPORT_ENTRY' : 'RESISTANCE_REJECTION',
+          entryCondition: bounceEval.triggerReason,
+          isExtended: false
+        };
+        slObj = {
+          stopLoss: bounceEval.stopLoss,
+          reason: bounceEval.stopLossReason,
+          pips: bounceEval.riskPips
+        };
+        targets = {
+          tp1: { targetPrice: bounceEval.takeProfit1, targetReason: 'TP1 (1.8R planned target)', expectedR: 1.8 },
+          tp2: { targetPrice: bounceEval.takeProfit2, targetReason: 'TP2 (2.8R planned target)', expectedR: 2.8 },
+          tp3: { targetPrice: bounceEval.takeProfit3, targetReason: 'TP3 (4.0R planned target)', expectedR: 4.0 }
+        };
+      } else {
+        // WAITING_FOR_PULLBACK
+        const plannedEntry = bounceEval.keyLevelPrice > 0 ? bounceEval.keyLevelPrice : currentPrice;
+        entryZone = {
+          entryMin: Number((plannedEntry - 2 * config.pipSize).toFixed(5)),
+          entryMax: Number((plannedEntry + 2 * config.pipSize).toFixed(5)),
+          entryPreferred: plannedEntry,
+          entryType: 'PULLBACK_ENTRY',
+          entryCondition: bounceEval.triggerReason,
+          isExtended: false
+        };
+        slObj = {
+          stopLoss: bounceEval.stopLoss,
+          reason: bounceEval.stopLossReason,
+          pips: bounceEval.riskPips
+        };
+        targets = {
+          tp1: { targetPrice: bounceEval.takeProfit1, targetReason: 'TP1 (1.8R planned target)', expectedR: 1.8 },
+          tp2: { targetPrice: bounceEval.takeProfit2, targetReason: 'TP2 (2.8R planned target)', expectedR: 2.8 },
+          tp3: { targetPrice: bounceEval.takeProfit3, targetReason: 'TP3 (4.0R planned target)', expectedR: 4.0 }
+        };
       }
-
-      const slObj = this.calculateStopLoss(
-        directionEvaluation.direction,
-        entryZone.entryPreferred,
-        structure,
-        atr,
-        config.pipSize,
-        sr
-      );
-
-      const targets = this.calculateTargets(
-        directionEvaluation.direction,
-        entryZone.entryPreferred,
-        slObj.stopLoss,
-        structure,
-        atr,
-        config.pipSize,
-        sr
-      );
 
       const rr = this.calculateRiskReward(entryZone.entryPreferred, slObj.stopLoss, targets.tp1.targetPrice, config.pipSize);
 
-      if (rr.ratio < this.config.riskReward.minimumRatio) {
-        noTradeReasons.push(`Risk/Reward (${rr.ratio}:1) is below strict ${this.config.riskReward.minimumRatio}:1 minimum threshold`);
-        rrScore = 1;
-      } else if (rr.ratio >= this.config.riskReward.preferredRatio) {
-        rrScore = 5;
-      } else {
-        rrScore = 3;
+      if (isReadyToEnter && rr.ratio < 1.3) {
+        noTradeReasons.push(`Risk/Reward (${rr.ratio}:1) below minimum threshold`);
       }
-
-      finalScore = this.calculateSignalScore({
-        trend: trendScore,
-        multiTimeframe: mtfScore,
-        momentum: momentumScore,
-        marketStructure: msScore,
-        supportResistance: srScore,
-        volatility: volScore,
-        riskReward: rrScore,
-        totalScore: 0
-      });
-
-      const isPlanValid = noTradeReasons.length === 0;
 
       tradePlan = {
         entryMin: entryZone.entryMin,
@@ -553,8 +615,8 @@ export class ForexSignalEngine {
         takeProfit3: targets.tp3,
         riskDistancePips: rr.riskPips,
         rewardDistancePips: rr.rewardPips,
-        riskReward: rr.ratio,
-        isValid: isPlanValid
+        riskReward: rr.ratio > 0 ? rr.ratio : 1.8,
+        isValid: isReadyToEnter && noTradeReasons.length === 0
       };
     }
 
@@ -569,22 +631,22 @@ export class ForexSignalEngine {
       session: sessionName,
       regime: structure.regime,
       trend: {
-        direction: structure.trend,
-        strength: structure.trendStrength
+        direction: bounceEval.trendDirection === 'BUY' ? 'bullish' : bounceEval.trendDirection === 'SELL' ? 'bearish' : 'neutral',
+        strength: bounceEval.stepsPassed.step1Trend ? 80 : 30
       },
       marketStructure: {
         type: structure.structure,
-        phase: structure.phase,
+        phase: bounceEval.setupState === 'WAITING_FOR_PULLBACK' ? 'pullback' : structure.phase,
         breakoutStatus: structure.breakoutStatus
       },
       multiTimeframe: {
-        '5m': mtf['5m'].trend,
+        '5m': bounceEval.trendDirection === 'BUY' ? 'bullish' : bounceEval.trendDirection === 'SELL' ? 'bearish' : 'neutral',
         '15m': mtf['15m'].trend,
         '1h': mtf['1h'].trend,
         '4h': mtf['4h'].trend,
         'daily': mtf['daily'].trend,
         alignment: mtf.alignment,
-        summary: mtf.alignmentSummary
+        summary: `${bounceEval.trendReason} • ${mtf.alignmentSummary}`
       },
       indicators,
       supportResistance: {
@@ -594,13 +656,17 @@ export class ForexSignalEngine {
         previousDayLow: sr.previousDayLow,
         previousWeekHigh: sr.previousWeekHigh,
         previousWeekLow: sr.previousWeekLow,
-        nearestSupport: sr.nearestSupport?.price ?? null,
-        nearestResistance: sr.nearestResistance?.price ?? null
+        nearestSupport: bounceEval.keyLevelType === 'SUPPORT' ? bounceEval.keyLevelPrice : (sr.nearestSupport?.price ?? null),
+        nearestResistance: bounceEval.keyLevelType === 'RESISTANCE' ? bounceEval.keyLevelPrice : (sr.nearestResistance?.price ?? null)
       },
       signal: {
         direction: directionEvaluation.direction,
         score: finalScore,
-        status: directionEvaluation.direction === 'NO_TRADE' ? 'NO_TRADE' : 'WAITING_FOR_ENTRY',
+        status: bounceEval.setupState === 'READY_TO_ENTER'
+          ? 'ACTIVE'
+          : directionEvaluation.direction === 'NO_TRADE'
+            ? 'NO_TRADE'
+            : 'WAITING_FOR_ENTRY',
         category: directionEvaluation.category
       },
       tradePlan: tradePlan ? {
@@ -614,7 +680,8 @@ export class ForexSignalEngine {
         stopLossReason: tradePlan.stopLossReason,
         tp1Reason: tradePlan.takeProfit1.targetReason
       } : null,
-      warnings
+      warnings,
+      bounceStrategy: bounceEval
     };
   }
 
@@ -628,6 +695,7 @@ export class ForexSignalEngine {
     const id = `FX_${pairSymbol.replace('/', '')}_${timestamp}`;
 
     const isActionable = analysis.signal.direction !== 'NO_TRADE' && analysis.tradePlan !== null;
+    const isReadyToEnter = analysis.bounceStrategy?.setupState === 'READY_TO_ENTER';
 
     let tradePlanObj: TradePlan | null = null;
     if (isActionable && analysis.tradePlan) {
@@ -637,60 +705,75 @@ export class ForexSignalEngine {
         entryMin: analysis.tradePlan.entryMin,
         entryMax: analysis.tradePlan.entryMax,
         entryPreferred: (analysis.tradePlan.entryMin + analysis.tradePlan.entryMax) / 2,
-        entryType: 'PULLBACK_ENTRY',
-        entryCondition: 'Enter upon 15M confirmation close in defined boundary',
+        entryType: isReadyToEnter ? 'BOUNCE_REJECTION_ENTRY' : 'PULLBACK_ENTRY',
+        entryCondition: analysis.bounceStrategy?.triggerReason || 'Enter on 5M rejection wick bounce confirmation',
         stopLoss: analysis.tradePlan.stopLoss,
         stopLossReason: analysis.tradePlan.stopLossReason,
         takeProfit1: { targetPrice: analysis.tradePlan.takeProfit1, targetReason: analysis.tradePlan.tp1Reason, expectedR: 1.8 },
-        takeProfit2: { targetPrice: analysis.tradePlan.takeProfit2, targetReason: 'Key expansion target', expectedR: 2.6 },
-        takeProfit3: { targetPrice: analysis.tradePlan.takeProfit3 ?? analysis.tradePlan.takeProfit2, targetReason: 'Extended macro runner', expectedR: 3.5 },
+        takeProfit2: { targetPrice: analysis.tradePlan.takeProfit2, targetReason: 'Key expansion target', expectedR: 2.8 },
+        takeProfit3: { targetPrice: analysis.tradePlan.takeProfit3 ?? analysis.tradePlan.takeProfit2, targetReason: 'Extended macro runner', expectedR: 4.0 },
         riskDistancePips: Number(riskPips.toFixed(1)),
         rewardDistancePips: Number(rewardPips.toFixed(1)),
         riskReward: analysis.tradePlan.riskReward,
-        isValid: true
+        isValid: isReadyToEnter
       };
     }
 
     const invalidationConditions: string[] = [];
     if (analysis.signal.direction.includes('BUY')) {
-      invalidationConditions.push(`Close below swing support ${analysis.supportResistance.majorSupport ?? analysis.tradePlan?.stopLoss}`);
-      invalidationConditions.push(`EMA 9 crosses below EMA 21 on 15M chart`);
-      invalidationConditions.push(`High impact news release inside 20 minutes`);
+      invalidationConditions.push(`5M candle close below rejection wick low at ${analysis.tradePlan?.stopLoss}`);
+      if (analysis.bounceStrategy?.ema50) {
+        invalidationConditions.push(`Price breaks below 5M 50 EMA (${analysis.bounceStrategy.ema50})`);
+      }
+      invalidationConditions.push(`Spread exceeds maximum allowable limit during market volatility`);
     } else if (analysis.signal.direction.includes('SELL')) {
-      invalidationConditions.push(`Close above swing resistance ${analysis.supportResistance.majorResistance ?? analysis.tradePlan?.stopLoss}`);
-      invalidationConditions.push(`EMA 9 crosses above EMA 21 on 15M chart`);
-      invalidationConditions.push(`High impact news release inside 20 minutes`);
+      invalidationConditions.push(`5M candle close above rejection wick high at ${analysis.tradePlan?.stopLoss}`);
+      if (analysis.bounceStrategy?.ema50) {
+        invalidationConditions.push(`Price rises above 5M 50 EMA (${analysis.bounceStrategy.ema50})`);
+      }
+      invalidationConditions.push(`Spread exceeds maximum allowable limit during market volatility`);
+    }
+
+    const signalReasons: string[] = [];
+    if (analysis.bounceStrategy) {
+      signalReasons.push(analysis.bounceStrategy.trendReason);
+      signalReasons.push(analysis.bounceStrategy.zoneReason);
+      signalReasons.push(analysis.bounceStrategy.triggerReason);
+    } else {
+      signalReasons.push(analysis.multiTimeframe.summary);
+      signalReasons.push(`Market regime: ${analysis.regime}`);
     }
 
     const signal: ForexSignal = {
       id,
       timestamp,
       pair: config.symbol,
-      timeframe: '15M',
+      timeframe: '5M',
       direction: analysis.signal.direction as ForexSignal['direction'],
       signalCategory: analysis.signal.category,
       score: analysis.signal.score,
       scoreBreakdown: {
-        trend: Math.round((analysis.signal.score * 0.2)),
-        multiTimeframe: Math.round((analysis.signal.score * 0.2)),
+        trend: Math.round((analysis.signal.score * 0.35)),
+        multiTimeframe: Math.round((analysis.signal.score * 0.15)),
         momentum: Math.round((analysis.signal.score * 0.15)),
         marketStructure: Math.round((analysis.signal.score * 0.15)),
-        supportResistance: Math.round((analysis.signal.score * 0.1)),
+        supportResistance: Math.round((analysis.signal.score * 0.20)),
         volatility: 4,
-        riskReward: 4,
+        riskReward: 5,
         totalScore: analysis.signal.score
       },
-      status: analysis.signal.direction === 'NO_TRADE' ? 'NO_TRADE' : 'WAITING_FOR_ENTRY',
+      status: isReadyToEnter ? 'ACTIVE' : analysis.signal.direction === 'NO_TRADE' ? 'NO_TRADE' : 'WAITING_FOR_ENTRY',
       tradePlan: tradePlanObj,
       marketRegime: analysis.regime,
       session: analysis.session,
       dataStatus: analysis.status,
-      strategyVersion: 'fx_structure_v2a',
-      modelVersion: 'uncalibrated_phase2a',
-      mlProbability: null, // Strictly null in Phase 2A
-      reasons: [analysis.multiTimeframe.summary, `Market regime: ${analysis.regime}`],
+      strategyVersion: 'fx_5m_ema50_bounce_v1',
+      modelVersion: 'calibrated_rejection_v1',
+      mlProbability: null,
+      reasons: signalReasons,
       noTradeReasons: analysis.warnings.length > 0 && analysis.signal.direction === 'NO_TRADE' ? analysis.warnings : [],
-      invalidationConditions
+      invalidationConditions,
+      bounceStrategy: analysis.bounceStrategy
     };
 
     // Store in database (Section 24)

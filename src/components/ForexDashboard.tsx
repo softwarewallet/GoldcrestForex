@@ -22,6 +22,7 @@ import {
   Compass,
   RefreshCw,
   TrendingUp,
+  CheckCircle2,
 } from 'lucide-react';
 
 interface ForexDashboardProps {
@@ -54,6 +55,29 @@ export const ForexDashboard: React.FC<ForexDashboardProps> = ({
   const [explanation, setExplanation] = useState<any | null>(null);
   const [loadingExplanation, setLoadingExplanation] = useState<boolean>(false);
   const [explanationOpen, setExplanationOpen] = useState<boolean>(false);
+
+  // Advanced Quantitative Predictive Engine Policy State
+  const [predictivePolicy, setPredictivePolicy] = useState<any | null>(null);
+  const [loadingPolicy, setLoadingPolicy] = useState<boolean>(false);
+
+  const handlePredictPolicy = useCallback(async (pairSymbol: string = selectedPairSymbol) => {
+    setLoadingPolicy(true);
+    try {
+      const res = await fetch(`/api/forex/predict-policy/${encodeURIComponent(pairSymbol)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPredictivePolicy(data);
+      }
+    } catch (err) {
+      console.error('Failed to run predictive policy:', err);
+    } finally {
+      setLoadingPolicy(false);
+    }
+  }, [selectedPairSymbol]);
 
   // Fetch Full Quantitative Analysis for selected pair
   const fetchAnalysis = useCallback(async (pair: string, tf: ForexTimeframe = '15M', silent = false) => {
@@ -111,11 +135,12 @@ export const ForexDashboard: React.FC<ForexDashboardProps> = ({
 
   useEffect(() => {
     fetchAnalysis(selectedPairSymbol, selectedTimeframe);
+    handlePredictPolicy(selectedPairSymbol);
     const timer = setInterval(() => {
       fetchAnalysis(selectedPairSymbol, selectedTimeframe, true);
     }, 15000);
     return () => clearInterval(timer);
-  }, [selectedPairSymbol, selectedTimeframe, fetchAnalysis]);
+  }, [selectedPairSymbol, selectedTimeframe, fetchAnalysis, handlePredictPolicy]);
 
   const selectedPair = useMemo(() => {
     return pairs.find(p => p.symbol === selectedPairSymbol) || pairs[0];
@@ -169,7 +194,7 @@ export const ForexDashboard: React.FC<ForexDashboardProps> = ({
     <div id="forex_dashboard_view" className="space-y-4">
       {/* Top Banner & Live Stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3" style={{ marginBottom: '5px' }}>
-        <div className="bg-slate-900 border border-slate-800 rounded-lg p-3 relative overflow-hidden">
+        <div className="bg-slate-900 border border-slate-800 rounded-lg relative overflow-hidden" style={{ paddingTop: '5px', paddingBottom: '5px', paddingLeft: '12px', paddingRight: '12px' }}>
           <div className="flex items-center justify-between">
             <span className="text-slate-400 text-xs font-mono uppercase">Forex Instruments</span>
 
@@ -178,7 +203,7 @@ export const ForexDashboard: React.FC<ForexDashboardProps> = ({
           <div className="text-[11px] text-slate-500 mt-1">Instituational Majors & Crosses</div>
         </div>
 
-        <div className="bg-slate-900 border border-slate-800 rounded-lg p-3">
+        <div className="bg-slate-900 border border-slate-800 rounded-lg" style={{ paddingTop: '5px', paddingBottom: '5px', paddingLeft: '12px', paddingRight: '12px' }}>
           <div className="text-slate-400 text-xs font-mono uppercase">Active Session</div>
           <div className="text-base font-bold text-cyan-300 mt-1 truncate">
             {analysis?.session || 'Interbank Overlap'}
@@ -186,7 +211,7 @@ export const ForexDashboard: React.FC<ForexDashboardProps> = ({
           <div className="text-[11px] text-slate-500 mt-1">UTC Session Engine Active</div>
         </div>
 
-        <div className="bg-slate-900 border border-slate-800 rounded-lg p-3">
+        <div className="bg-slate-900 border border-slate-800 rounded-lg" style={{ paddingTop: '5px', paddingBottom: '5px', paddingLeft: '12px', paddingRight: '12px' }}>
           <div className="text-slate-400 text-xs font-mono uppercase">Market Regime</div>
           <div className="text-base font-bold text-purple-300 mt-1">
             {analysis?.regime || 'EVALUATING'}
@@ -194,7 +219,7 @@ export const ForexDashboard: React.FC<ForexDashboardProps> = ({
           <div className="text-[11px] text-slate-500 mt-1">Structure & Volatility Model — LIVE</div>
         </div>
 
-        <div className="bg-slate-900 border border-slate-800 rounded-lg p-3">
+        <div className="bg-slate-900 border border-slate-800 rounded-lg" style={{ paddingTop: '5px', paddingBottom: '5px', paddingLeft: '12px', paddingRight: '12px' }}>
           <div className="text-slate-400 text-xs font-mono uppercase">Signal Protocol</div>
           <div className="text-base font-bold text-emerald-400 mt-1">Phase 2A Engine</div>
           <div className="text-[11px] text-slate-500 mt-1">Strict Rules • Live Execution Gates</div>
@@ -207,28 +232,38 @@ export const ForexDashboard: React.FC<ForexDashboardProps> = ({
         {/* Left: Pairs Scanner Table (5 Cols) */}
         <div className="lg:col-span-5 bg-slate-900 border border-slate-800 rounded-lg overflow-hidden flex flex-col">
           {/* Controls Header */}
-          <div className="p-3 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2 bg-slate-950/50">
-            <input
-              type="text"
-              placeholder="Search pair (EUR, JPY)..."
-              value={searchQuery}
-              onChange={e => setSearchQuery(e.target.value)}
-              className="bg-slate-900 border border-slate-700 rounded px-2.5 py-1 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-emerald-500 font-mono w-40"
-            />
-            <div className="flex items-center space-x-1 text-xs font-mono">
-              {(['ALL', 'BUY', 'SELL', 'NO_TRADE'] as const).map(dir => (
-                <button
-                  key={dir}
-                  onClick={() => setFilterDirection(dir)}
-                  className={`px-2 py-0.5 rounded text-[11px] transition ${
-                    filterDirection === dir
-                      ? 'bg-slate-800 text-white font-bold border border-slate-700'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  {dir}
-                </button>
-              ))}
+          <div className="p-3 border-b border-slate-800 flex flex-col gap-2 bg-slate-950/50">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <input
+                type="text"
+                placeholder="Search pair (EUR, JPY)..."
+                value={searchQuery}
+                onChange={e => setSearchQuery(e.target.value)}
+                className="bg-slate-900 border border-slate-700 rounded px-2.5 py-1 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-emerald-500 font-mono w-36"
+              />
+              <div className="flex items-center space-x-1 text-xs font-mono">
+                {(['ALL', 'BUY', 'SELL', 'NO_TRADE'] as const).map(dir => (
+                  <button
+                    key={dir}
+                    onClick={() => setFilterDirection(dir)}
+                    className={`px-2 py-0.5 rounded text-[11px] transition ${
+                      filterDirection === dir
+                        ? 'bg-slate-800 text-white font-bold border border-slate-700'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {dir}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {/* Market Watch ATR Meter Indicator Banner */}
+            <div className="flex items-center justify-between text-[10px] text-slate-400 bg-slate-900/80 px-2 py-1 rounded border border-slate-800 font-mono">
+              <span className="flex items-center gap-1.5 text-cyan-300 font-semibold">
+                <Activity className="w-3 h-3 text-cyan-400 shrink-0" />
+                <span>5M ATR METER</span>
+              </span>
+              <span className="text-slate-400">Dynamic SL = 1.2x 5M ATR • TP = 2.0x SL</span>
             </div>
           </div>
 
@@ -238,14 +273,37 @@ export const ForexDashboard: React.FC<ForexDashboardProps> = ({
               <thead className="bg-slate-950 text-slate-400 font-mono text-[11px] uppercase sticky top-0 border-b border-slate-800">
                 <tr>
                   <th className="py-2.5 px-3">Pair</th>
-                  <th className="py-2.5 px-3">Bid / Ask</th>
-                  <th className="py-2.5 px-3">Spread</th>
+                  <th className="py-2.5 px-2">Bid / Ask</th>
+                  <th className="py-2.5 px-2 min-w-[130px]">5M ATR Meter</th>
+                  <th className="py-2.5 px-2">Spread</th>
                   <th className="py-2.5 px-3 text-right">Status</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60 font-mono">
                 {filteredPairs.map(p => {
                   const isSelected = p.symbol === selectedPairSymbol;
+                  const isJPY = p.symbol?.includes('JPY');
+                  const pipFactor = isJPY ? 0.01 : 0.0001;
+                  const currentSelectedAtr = selectedPairSymbol === p.symbol && analysis?.bounceStrategy?.marketVelocity?.atr_5M_pips;
+                  const atrPips = Number(p.atr5mPips ?? currentSelectedAtr ?? (isJPY ? 8.4 : p.symbol?.includes('GBP') ? 7.6 : 5.8));
+                  const dynSl = p.dynamicSlPips ? Number(p.dynamicSlPips) : Number((1.2 * atrPips).toFixed(1));
+                  const dynTp = p.dynamicTpPips ? Number(p.dynamicTpPips) : Number((2.0 * dynSl).toFixed(1));
+                  const meterPct = Math.min(100, Math.max(12, (atrPips / 16) * 100));
+                  const meterColor = atrPips < 5
+                    ? 'bg-sky-400'
+                    : atrPips < 9
+                    ? 'bg-emerald-400'
+                    : atrPips < 15
+                    ? 'bg-amber-400'
+                    : 'bg-rose-400';
+                  const volLabel = atrPips < 5
+                    ? 'LOW'
+                    : atrPips < 9
+                    ? 'NORMAL'
+                    : atrPips < 15
+                    ? 'ELEVATED'
+                    : 'HIGH';
+
                   return (
                     <tr
                       key={p.symbol}
@@ -258,11 +316,35 @@ export const ForexDashboard: React.FC<ForexDashboardProps> = ({
                         <div className="font-bold text-white">{p.symbol}</div>
                         <div className="text-[10px] text-slate-400 truncate">{p.name || p.description}</div>
                       </td>
-                      <td className="py-2.5 px-3 text-slate-200">
+                      <td className="py-2.5 px-2 text-slate-200">
                         <div>{p.bid ?? p.currentPrice ?? '--'}</div>
                         <div className="text-[10px] text-slate-500">{p.ask ?? '--'}</div>
                       </td>
-                      <td className="py-2.5 px-3 text-slate-400">
+                      {/* 5M ATR Meter */}
+                      <td className="py-2 px-2" title={`5M ATR: ${atrPips} pips (${(atrPips * pipFactor).toFixed(5)})\nDynamic SL (1.2x): ${dynSl} pips\nDynamic TP (2.0x SL): ${dynTp} pips (1:2 R:R)`}>
+                        <div className="flex items-center justify-between gap-1 text-[11px]">
+                          <span className="font-bold text-slate-100">{atrPips} p</span>
+                          <span className="text-[9px] px-1 py-0.2 rounded font-semibold bg-slate-800 text-cyan-300 border border-slate-700/60">
+                            SL:{dynSl}p
+                          </span>
+                        </div>
+                        {/* Visual ATR Meter Bar */}
+                        <div className="w-full bg-slate-950 rounded-full h-1.5 mt-1 border border-slate-800/80 overflow-hidden">
+                          <div
+                            className={`h-full rounded-full transition-all duration-300 ${meterColor}`}
+                            style={{ width: `${meterPct}%` }}
+                          />
+                        </div>
+                        <div className="flex items-center justify-between text-[9px] text-slate-400 mt-0.5 font-mono">
+                          <span className="text-slate-500">TP:{dynTp}p</span>
+                          <span className={`text-[8.5px] font-bold ${
+                            atrPips < 5 ? 'text-sky-400' : atrPips < 9 ? 'text-emerald-400' : atrPips < 15 ? 'text-amber-400' : 'text-rose-400'
+                          }`}>
+                            {volLabel}
+                          </span>
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-2 text-slate-400">
                         {p.spreadPips ?? p.typicalSpreadPips ?? 1.2} p
                       </td>
                       <td className="py-2.5 px-3 text-right">
@@ -451,6 +533,286 @@ export const ForexDashboard: React.FC<ForexDashboardProps> = ({
                     <span className="text-emerald-400 font-bold">{analysis.supportResistance.majorSupport ?? 'N/A'}</span>
                   </div>
                 </div>
+              </div>
+            </div>
+          )}
+
+          {/* Advanced Quantitative Predictive Engine Card */}
+          <div className="bg-gradient-to-br from-slate-900 via-[#071322] to-slate-900 border border-blue-500/30 rounded-xl p-4 space-y-3.5 shadow-lg shadow-blue-950/20 font-mono text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800/80 pb-3">
+              <div className="flex items-center space-x-2.5">
+                <div className="w-7 h-7 rounded-lg bg-blue-500/20 border border-blue-400/40 flex items-center justify-center">
+                  <Sparkles className="w-4 h-4 text-blue-400 animate-pulse" />
+                </div>
+                <div>
+                  <div className="font-bold text-slate-100 text-sm flex items-center gap-2">
+                    Advanced Quantitative Predictive Engine
+                    <span className="text-[10px] px-2 py-0.5 rounded bg-blue-950/80 text-blue-300 border border-blue-700/60 uppercase font-mono">
+                      Order Flow & Liquidity
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-slate-400 font-sans">
+                    Multi-Timeframe 1H Macro Alignment • 5M ATR Volatility Scaling • 0.88 Session Gate
+                  </div>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => handlePredictPolicy(selectedPairSymbol)}
+                disabled={loadingPolicy}
+                className="flex items-center space-x-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 text-white rounded-lg font-semibold text-xs transition shadow-sm"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${loadingPolicy ? 'animate-spin' : ''}`} />
+                <span>{loadingPolicy ? 'Calculating Policy...' : 'Run Predictive Policy'}</span>
+              </button>
+            </div>
+
+            {/* 3 Mandates Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2.5 text-[11px]">
+              {/* Mandate 1: Macro Alignment Filter */}
+              <div className="p-3 rounded-lg bg-slate-950/80 border border-slate-800/80 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-sans uppercase font-semibold text-slate-400">1. Macro Alignment Filter</span>
+                  {analysis?.bounceStrategy?.macroStructure?.timeframe_1H_trend ? (
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                      analysis.bounceStrategy.macroStructure.timeframe_1H_trend === 'BULLISH'
+                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                        : analysis.bounceStrategy.macroStructure.timeframe_1H_trend === 'BEARISH'
+                        ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                        : 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                    }`}>
+                      1H {analysis.bounceStrategy.macroStructure.timeframe_1H_trend}
+                    </span>
+                  ) : (
+                    <span className="text-[10px] text-slate-500">1H TREND EVAL</span>
+                  )}
+                </div>
+                <div className="text-[11px] text-slate-200">
+                  {analysis?.bounceStrategy?.macroStructure?.timeframe_1H_trend === 'BEARISH'
+                    ? '• BUY orders strictly FORBIDDEN by 1H trend'
+                    : analysis?.bounceStrategy?.macroStructure?.timeframe_1H_trend === 'BULLISH'
+                    ? '• SELL orders strictly FORBIDDEN by 1H trend'
+                    : '• 1H Choppy: Instant confidence scale-down applied'}
+                </div>
+                {/* 1H Liquidity Pools */}
+                {analysis?.bounceStrategy?.macroStructure?.key_1H_liquidity_pools && analysis.bounceStrategy.macroStructure.key_1H_liquidity_pools.length > 0 && (
+                  <div className="mt-1 pt-1 border-t border-slate-900 text-[10px] text-slate-400 space-y-0.5">
+                    <div className="text-slate-500 font-sans font-semibold">1H Liquidity Pools:</div>
+                    {analysis.bounceStrategy.macroStructure.key_1H_liquidity_pools.slice(0, 2).map((pool: any, pIdx: number) => (
+                      <div key={pIdx} className="flex justify-between text-slate-300">
+                        <span className="truncate">{pool.label}</span>
+                        <span className="text-blue-300 font-mono shrink-0 ml-1">{pool.price} ({pool.distancePips}p)</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Mandate 2: Volatility-Based Target Scaling */}
+              <div className="p-3 rounded-lg bg-slate-950/80 border border-slate-800/80 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-sans uppercase font-semibold text-slate-400">2. Volatility Target Scaling</span>
+                  <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-cyan-950/60 text-cyan-300 border border-cyan-700/50">
+                    1:2.0 R:R Ratio
+                  </span>
+                </div>
+                <div className="text-[11px] text-slate-200">
+                  5M ATR: <span className="font-bold text-cyan-300">{analysis?.bounceStrategy?.marketVelocity?.atr_5M_pips ?? '--'} pips</span>
+                </div>
+                <div className="text-[10px] text-slate-300 space-y-0.5">
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">Dynamic SL (1.2x ATR):</span>
+                    <span className="text-rose-300 font-bold">
+                      {analysis?.bounceStrategy?.mandates?.volatilityScaling?.dynamic_stop_loss_pips ?? (analysis?.bounceStrategy?.marketVelocity ? (analysis.bounceStrategy.marketVelocity.atr_5M_pips * 1.2).toFixed(1) : '--')} pips
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-400">Dynamic TP (2.0x SL):</span>
+                    <span className="text-emerald-300 font-bold">
+                      {analysis?.bounceStrategy?.mandates?.volatilityScaling?.dynamic_take_profit_pips ?? (analysis?.bounceStrategy?.marketVelocity ? (analysis.bounceStrategy.marketVelocity.atr_5M_pips * 2.4).toFixed(1) : '--')} pips
+                    </span>
+                  </div>
+                </div>
+                <div className="text-[9px] text-slate-500 font-sans">
+                  Mathematically superior 1:2 R:R targets scaled to market velocity.
+                </div>
+              </div>
+
+              {/* Mandate 3: Session Risk Filter */}
+              <div className="p-3 rounded-lg bg-slate-950/80 border border-slate-800/80 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-sans uppercase font-semibold text-slate-400">3. Session Risk Gate</span>
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                    analysis?.bounceStrategy?.marketVelocity?.current_session === 'GAP' || analysis?.bounceStrategy?.marketVelocity?.current_session === 'TOKYO'
+                      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                      : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                  }`}>
+                    {analysis?.bounceStrategy?.marketVelocity?.current_session ?? 'SESSION'}
+                  </span>
+                </div>
+                <div className="text-[11px] text-slate-200">
+                  Execution Gate: <span className="font-bold text-white">0.88 (88%)</span>
+                </div>
+                <div className="text-[10px] text-slate-400">
+                  {analysis?.bounceStrategy?.marketVelocity?.current_session === 'GAP' || analysis?.bounceStrategy?.marketVelocity?.current_session === 'TOKYO' ? (
+                    <span className="text-amber-300">
+                      Safety penalty active: Capping score below 0.88 unless news sentiment delta &gt; 0.95.
+                    </span>
+                  ) : (
+                    <span className="text-emerald-400">
+                      Liquid trading window. Normal 0.88 execution gate criteria active.
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Hyper-Optimized Trading Policy Output */}
+            {predictivePolicy && (
+              <div className="p-3 rounded-lg bg-blue-950/30 border border-blue-500/40 space-y-2 font-sans">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-blue-900/50 pb-1.5 font-mono">
+                  <div className="flex items-center space-x-2">
+                    <span className={`px-2.5 py-1 rounded text-xs font-bold ${
+                      predictivePolicy.orderAction === 'BUY'
+                        ? 'bg-emerald-500 text-slate-950 font-black'
+                        : predictivePolicy.orderAction === 'SELL'
+                        ? 'bg-rose-500 text-white font-black'
+                        : 'bg-slate-800 text-slate-300'
+                    }`}>
+                      {predictivePolicy.orderAction} POLICY
+                    </span>
+                    <span className="text-xs text-slate-300">
+                      Confidence: <strong className="text-white">{(predictivePolicy.confidenceScore * 100).toFixed(1)}%</strong>
+                    </span>
+                    <span className={`text-[10px] px-2 py-0.5 rounded font-bold ${
+                      predictivePolicy.executionGatePassed
+                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                        : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                    }`}>
+                      {predictivePolicy.executionGatePassed ? 'PASSED 0.88 GATE' : 'DEFENSIVELY GATED (<0.88)'}
+                    </span>
+                  </div>
+                  <span className="text-[10px] text-slate-400">
+                    {predictivePolicy.aiGenerated ? 'AI Grounded (Gemini 3.8 Flash)' : 'Quantitative Engine Mathematical Policy'}
+                  </span>
+                </div>
+
+                <div className="text-xs text-slate-200 leading-relaxed font-mono">
+                  {predictivePolicy.policySummary}
+                </div>
+
+                {/* Free Trade Trigger Notification */}
+                <div className="text-[11px] text-emerald-300 bg-emerald-950/40 p-2 rounded border border-emerald-800/50 flex items-center gap-2">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <span>
+                    <strong>Free Trade Trigger:</strong> Lock 50% profit at +{predictivePolicy.executionPlan.freeTradeTriggerPips} pips and automatically shift Stop Loss to breakeven for risk-free execution.
+                  </span>
+                </div>
+
+                {predictivePolicy.aiExplanation && (
+                  <div className="text-[11px] text-slate-300 bg-slate-950/80 p-2.5 rounded border border-slate-800 space-y-1">
+                    <div className="text-slate-400 font-semibold font-mono text-[10px]">PREDICTIVE ENGINE RATIONALE:</div>
+                    <div className="leading-relaxed">{predictivePolicy.aiExplanation}</div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* 3-Step 5M 50 EMA Pullback Bounce Protocol Card */}
+          {analysis?.bounceStrategy && (
+            <div className="bg-slate-900 border border-slate-800 rounded-lg p-3.5 space-y-2.5 font-mono text-xs">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+                <div className="flex items-center space-x-2">
+                  <Target className="w-4 h-4 text-emerald-400" />
+                  <span className="font-bold text-slate-100 text-xs">3-Step 5M 50 EMA Pullback Bounce Protocol</span>
+                </div>
+                <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                  analysis.bounceStrategy.setupState === 'READY_TO_ENTER'
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/50 animate-pulse'
+                    : analysis.bounceStrategy.setupState === 'TESTING_ZONE'
+                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/50'
+                    : analysis.bounceStrategy.setupState === 'WAITING_FOR_PULLBACK'
+                    ? 'bg-sky-500/20 text-sky-300 border border-sky-500/50'
+                    : 'bg-slate-800 text-slate-400 border border-slate-700'
+                }`}>
+                  {analysis.bounceStrategy.setupState.replace(/_/g, ' ')}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-[11px]">
+                {/* Step 1: Trend Filter */}
+                <div className={`p-2.5 rounded border ${
+                  analysis.bounceStrategy.stepsPassed.step1Trend
+                    ? 'bg-slate-950/80 border-slate-800'
+                    : 'bg-rose-950/20 border-rose-900/40'
+                }`}>
+                  <div className="flex items-center justify-between text-[10px] text-slate-400 font-sans">
+                    <span>1. IDENTIFY TREND</span>
+                    <span className={analysis.bounceStrategy.stepsPassed.step1Trend ? 'text-emerald-400 font-bold' : 'text-slate-500'}>
+                      {analysis.bounceStrategy.stepsPassed.step1Trend ? 'CONFIRMED' : 'NEUTRAL'}
+                    </span>
+                  </div>
+                  <div className="mt-1 font-bold text-slate-200">
+                    5M 50 EMA: {analysis.bounceStrategy.ema50}
+                  </div>
+                  <div className="text-[10px] text-slate-400 mt-0.5">
+                    {analysis.bounceStrategy.priceVsEma50Pips >= 0 ? '+' : ''}{analysis.bounceStrategy.priceVsEma50Pips} pips vs EMA • {analysis.bounceStrategy.trendDirection === 'BUY' ? 'BUY ONLY' : analysis.bounceStrategy.trendDirection === 'SELL' ? 'SELL ONLY' : 'NO BIAS'}
+                  </div>
+                </div>
+
+                {/* Step 2: Spot the Zone (The Bounce) */}
+                <div className={`p-2.5 rounded border ${
+                  analysis.bounceStrategy.stepsPassed.step2Zone
+                    ? 'bg-slate-950/80 border-slate-800'
+                    : 'bg-slate-950/40 border-slate-800/60'
+                }`}>
+                  <div className="flex items-center justify-between text-[10px] text-slate-400 font-sans">
+                    <span>2. SPOT THE ZONE</span>
+                    <span className={analysis.bounceStrategy.stepsPassed.step2Zone ? 'text-emerald-400 font-bold' : 'text-sky-400'}>
+                      {analysis.bounceStrategy.stepsPassed.step2Zone ? 'IN ZONE' : 'PULLBACK PENDING'}
+                    </span>
+                  </div>
+                  <div className="mt-1 font-bold text-slate-200">
+                    {analysis.bounceStrategy.keyLevelType}: {analysis.bounceStrategy.keyLevelPrice > 0 ? analysis.bounceStrategy.keyLevelPrice : '--'}
+                  </div>
+                  <div className="text-[10px] text-slate-400 mt-0.5">
+                    Distance: {analysis.bounceStrategy.distanceToLevelPips} pips
+                  </div>
+                </div>
+
+                {/* Step 3: Entry Trigger (5M Rejection Wick) */}
+                <div className={`p-2.5 rounded border ${
+                  analysis.bounceStrategy.stepsPassed.step3Trigger
+                    ? 'bg-emerald-950/40 border-emerald-700/60'
+                    : 'bg-slate-950/40 border-slate-800/60'
+                }`}>
+                  <div className="flex items-center justify-between text-[10px] text-slate-400 font-sans">
+                    <span>3. ENTRY TRIGGER</span>
+                    <span className={analysis.bounceStrategy.stepsPassed.step3Trigger ? 'text-emerald-300 font-bold' : 'text-amber-400'}>
+                      {analysis.bounceStrategy.stepsPassed.step3Trigger ? 'TRIGGER ARMED' : 'WAITING CANDLE'}
+                    </span>
+                  </div>
+                  <div className="mt-1 font-bold text-slate-200 truncate">
+                    {analysis.bounceStrategy.rejection.hasRejection
+                      ? `Wick: ${analysis.bounceStrategy.rejection.wickPips}p (${analysis.bounceStrategy.rejection.wickRatio}x)`
+                      : analysis.bounceStrategy.rejection.touchedZone
+                      ? 'Testing level (awaiting wick)'
+                      : 'Pending candle close'}
+                  </div>
+                  <div className="text-[10px] text-slate-400 mt-0.5">
+                    {analysis.bounceStrategy.stepsPassed.step3Trigger
+                      ? 'Enter on open of next candle'
+                      : 'Wait for 5M candle rejection'}
+                  </div>
+                </div>
+              </div>
+
+              {/* Protocol Details Summary */}
+              <div className="text-[11px] text-slate-300 bg-slate-950 p-2 rounded border border-slate-800/80 flex items-start space-x-2 font-sans">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                <span>{analysis.bounceStrategy.triggerReason}</span>
               </div>
             </div>
           )}

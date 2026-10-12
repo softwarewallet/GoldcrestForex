@@ -193,6 +193,7 @@ export type EntryType =
   | 'PULLBACK_ENTRY'
   | 'SUPPORT_ENTRY'
   | 'RESISTANCE_REJECTION'
+  | 'BOUNCE_REJECTION_ENTRY'
   | 'EMA_RETRACEMENT'
   | 'MARKET_STRUCTURE_CONFIRMATION';
 
@@ -248,6 +249,7 @@ export interface ForexSignal {
   reasons: string[];
   noTradeReasons: string[];
   invalidationConditions: string[];
+  bounceStrategy?: any;
 }
 
 export interface CompletePairAnalysisResponse {
@@ -305,5 +307,6 @@ export interface CompletePairAnalysisResponse {
     tp1Reason: string;
   } | null;
   warnings: string[];
+  bounceStrategy?: any;
 }
 

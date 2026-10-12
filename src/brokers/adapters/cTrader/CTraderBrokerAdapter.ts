@@ -36,7 +36,6 @@ import {
   amendLiveCTraderPositionSLTP,
   cancelLiveCTraderOrder,
   closeLiveCTraderPosition,
-  closeAllCTraderSessions,
   CTraderRawAccount
 } from './cTraderApiClient';
 
@@ -58,6 +57,7 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
   protected accountData: BrokerAccountInfo | null = null;
   protected openPositions: Map<string, NormalizedPosition> = new Map();
   protected openOrders: Map<string, NormalizedOrder> = new Map();
+  private quoteConnection: WebSocket | null = null;
   // Conversion metadata changes far less frequently than live prices. Cache the
   // broker-provided asset map and conversion topology, while still fetching fresh
   // quotes for every risk decision.
@@ -69,13 +69,9 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
   // authenticated WebSocket sessions during Auto Live preparation.
   private rawAccountCache: { expiresAt: number; account: CTraderRawAccount } | null = null;
   private symbolCache: { expiresAt: number; accountKey: string; symbols: Awaited<ReturnType<typeof fetchCTraderSymbols>> } | null = null;
-  private positionsCache: { expiresAt: number; positions: NormalizedPosition[] } | null = null;
-  private quoteCache = new Map<string, { expiresAt: number; quote: NormalizedQuote }>();
   private static readonly RAW_ACCOUNT_CACHE_TTL_MS = 60 * 1000;
   private static readonly SYMBOL_CACHE_TTL_MS = 5 * 60 * 1000;
   private static readonly ACCOUNT_DATA_CACHE_TTL_MS = 10 * 1000;
-  private static readonly POSITIONS_CACHE_TTL_MS = 2500;
-  private static readonly QUOTE_CACHE_TTL_MS = 1500;
   private accountFetchInFlight: Promise<BrokerAccountInfo> | null = null;
   private lastKnownApiMode: string | null = null;
 
@@ -106,9 +102,6 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
     this.symbolCache = null;
     this.conversionAssetCache = null;
     this.conversionChainCache.clear();
-    this.positionsCache = null;
-    this.quoteCache.clear();
-    closeAllCTraderSessions();
   }
 
   /**
@@ -650,11 +643,7 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
     return symbols;
   }
 
-  async getPositions(forceRefresh?: boolean): Promise<NormalizedPosition[]> {
-    if (!forceRefresh && this.positionsCache && this.positionsCache.expiresAt > Date.now()) {
-      return this.positionsCache.positions;
-    }
-
+  async getPositions(): Promise<NormalizedPosition[]> {
     const raw = await this.resolveRawAccount();
     const state = await fetchCTraderReconcileState(
       raw.ctidTraderAccountId,
@@ -739,7 +728,7 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
       }
     }));
 
-    const finalPositions = enriched.map(({ position, currentPrice }) => {
+    return enriched.map(({ position, currentPrice }) => {
       const p = position.raw;
       const pnl = pnlByPositionId.get(Number(p.positionId));
 
@@ -762,13 +751,6 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
         brokerPositionId: String(p.positionId)
       } as NormalizedPosition;
     });
-
-    this.positionsCache = {
-      positions: finalPositions,
-      expiresAt: Date.now() + CTraderBrokerAdapter.POSITIONS_CACHE_TTL_MS
-    };
-
-    return finalPositions;
   }
   async getOpenOrders(): Promise<NormalizedOrder[]> {
     const raw = await this.resolveRawAccount();
@@ -982,15 +964,7 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
     }
   }
 
-  async getQuote(symbol: string, forceRefresh?: boolean): Promise<NormalizedQuote> {
-    const cacheKey = symbol.replace('/', '').toUpperCase();
-    if (!forceRefresh) {
-      const cached = this.quoteCache.get(cacheKey);
-      if (cached && cached.expiresAt > Date.now()) {
-        return cached.quote;
-      }
-    }
-
+  async getQuote(symbol: string): Promise<NormalizedQuote> {
     try {
       const raw = await this.resolveRawAccount();
       const symbols = await this.getCachedCTraderSymbols(raw);
@@ -1052,7 +1026,7 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
         throw new BrokerError('STALE_DATA', `cTrader did not provide a valid bid/ask for ${symbol}.`, 'CTRADER', this.environment);
       }
 
-      const quoteObj: NormalizedQuote = {
+      return {
         symbol,
         bid: Number(bid.toFixed(match.digits)),
         ask: Number(ask.toFixed(match.digits)),
@@ -1062,13 +1036,6 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
         environment: this.environment,
         status: quoteStatus
       };
-
-      this.quoteCache.set(cacheKey, {
-        quote: quoteObj,
-        expiresAt: Date.now() + CTraderBrokerAdapter.QUOTE_CACHE_TTL_MS
-      });
-
-      return quoteObj;
     } catch (err: any) {
       throw normalizeBrokerError(err, 'CTRADER', this.environment);
     }
@@ -1166,7 +1133,13 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
     }
 
     const raw = await this.resolveRawAccount();
-    const symbols = await this.getCachedCTraderSymbols(raw);
+    const symbols = await fetchCTraderSymbols(
+      raw.ctidTraderAccountId,
+      this.config.clientId!,
+      this.config.clientSecret!,
+      this.config.accessToken!,
+      raw.isLive
+    );
     const normalizedSymbol = order.symbol.replace('/', '').toUpperCase();
     const symbol = symbols.find(s => s.symbolName.replace('/', '').toUpperCase() === normalizedSymbol);
     if (!symbol) {
@@ -1191,9 +1164,6 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
       raw.isLive,
       order.positionId
     );
-
-    // Invalidate cached positions on new order submission
-    this.positionsCache = null;
 
     if (submitted.status === 'REJECTED') {
       throw new BrokerError('ORDER_REJECTED', 'cTrader rejected the live order.', 'CTRADER', this.environment);
@@ -1293,7 +1263,6 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
     if (![2, 3, 4].includes(result.executionType)) {
       throw new BrokerError('ORDER_REJECTED', 'cTrader did not confirm the position SL/TP amendment.', 'CTRADER', this.environment);
     }
-    this.positionsCache = null;
     return true;
   }
 
@@ -1310,7 +1279,6 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
 
     const result = await cancelLiveCTraderOrder(raw.ctidTraderAccountId, brokerId, this.config.clientId!, this.config.clientSecret!, this.config.accessToken!, raw.isLive);
     if (result.executionType !== 5) throw new BrokerError('ORDER_REJECTED', 'cTrader did not confirm order cancellation.', 'CTRADER', this.environment);
-    this.positionsCache = null;
     return true;
   }
 
@@ -1332,7 +1300,6 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
 
     const result = await closeLiveCTraderPosition(raw.ctidTraderAccountId, brokerId, closeQty, this.config.clientId!, this.config.clientSecret!, this.config.accessToken!, raw.isLive);
     if (![2,3,11].includes(result.executionType)) throw new BrokerError('ORDER_REJECTED', 'cTrader did not confirm the position close request.', 'CTRADER', this.environment);
-    this.positionsCache = null;
     return true;
   }
 

@@ -45,6 +45,7 @@ export interface SystemConfig {
   autoLiveMaxTradesPerPair: number;
   forexStopLossPips: number;
   forexTakeProfitPips: number;
+  phase44HardMaxEnabled: boolean;
   autoLiveForexPairs: string[];
   autoLiveIndianUnderlyings: string[];
   financialDisclaimer: string;
@@ -109,6 +110,7 @@ const PERSISTED_KEYS: readonly (keyof SystemConfig)[] = [
   'autoLiveMaxTradesPerPair',
   'forexStopLossPips',
   'forexTakeProfitPips',
+  'phase44HardMaxEnabled',
   'autoLiveForexPairs',
   'autoLiveIndianUnderlyings',
   'financialDisclaimer',
@@ -140,6 +142,7 @@ export const DEFAULT_SYSTEM_CONFIG: SystemConfig = {
   autoLiveMaxTradesPerPair: 4,
   forexStopLossPips: 20,
   forexTakeProfitPips: 3.0,
+  phase44HardMaxEnabled: true,
   dailyProfitTargetUsd: 500,
   // If the operator has not persisted a working-universe selection yet,
   // Auto Live evaluates the complete supported Forex universe rather than
@@ -204,10 +207,16 @@ function sanitizePersistedConfig(input: unknown): Partial<SystemConfig> {
   for (const key of PERSISTED_KEYS) {
     const value = input[key];
 
+    if (typeof value === 'boolean') {
+      (output as any)[key] = value;
+      continue;
+    }
+
     if (typeof value === 'number') {
       if (Number.isFinite(value)) {
         if (key === 'forexTakeProfitPips') {
-          (output as any)[key] = Math.min(5.0, Math.max(0.5, value));
+          const maxCap = (input as any).phase44HardMaxEnabled !== false ? 5.0 : 100.0;
+          (output as any)[key] = Math.min(maxCap, Math.max(0.5, value));
         } else {
           (output as any)[key] = value;
         }

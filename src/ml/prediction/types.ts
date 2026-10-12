@@ -112,6 +112,9 @@ export interface MultiFactorPredictionResult {
     rollingPerformance: RollingStrategyPerformance;
     quantDirection?: any;
     nativeIndicators?: any;
+    macroStructure?: any;
+    marketVelocity?: any;
+    mandates?: any;
   };
   targetPrice?: number;
   stopPrice?: number;

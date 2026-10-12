@@ -70,7 +70,8 @@ export function calculateForexPipTargets(
   entryPrice: number,
   pipSize: number,
   stopLossPips: number,
-  takeProfitPips: number
+  takeProfitPips: number,
+  phase44HardMaxEnabled: boolean = true
 ): ForexPipTargets {
   if (side !== 'BUY' && side !== 'SELL') {
     throw new Error('INVALID_SIDE: Forex side must be BUY or SELL.');
@@ -88,8 +89,8 @@ export function calculateForexPipTargets(
     throw new Error('INVALID_TAKE_PROFIT_PIPS: Take Profit in pips must be greater than zero.');
   }
 
-  // Phase 44 Hard Maximum: Forex Take Profit must never exceed 5.0 pips
-  const effectiveTakeProfitPips = Math.min(5.0, takeProfitPips);
+  // Phase 44 Hard Maximum: Forex Take Profit must never exceed 5.0 pips unless disabled
+  const effectiveTakeProfitPips = phase44HardMaxEnabled ? Math.min(5.0, takeProfitPips) : takeProfitPips;
 
   const stopDistance = stopLossPips * pipSize;
   const takeProfitDistance = effectiveTakeProfitPips * pipSize;

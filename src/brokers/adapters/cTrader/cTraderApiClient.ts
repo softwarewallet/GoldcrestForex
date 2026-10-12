@@ -1,7 +1,9 @@
 import WebSocket from 'ws';
+import https from 'node:https';
 import { BrokerAccountInfo, TradingEnvironment } from '../../types';
 import { getCTraderApiMode } from '../../../services/configService';
 import { recordTradeRequest, recordTradeResult } from '../../../services/tradeAuditLog';
+import { webSocketManager } from '../../../services/webSocketManager';
 
 export interface CTraderRawAccount {
   ctidTraderAccountId: number;
@@ -126,12 +128,20 @@ export async function fetchLiveCTraderAccounts(
   let lastError: Error | null = null;
 
   for (const host of hosts) {
+    const wsId = `ct_acc_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
         const accounts = await new Promise<CTraderRawAccount[]>((resolve, reject) => {
-          const ws = new WebSocket(host);
+          const ws = new WebSocket(host, {
+            headers: {
+              'User-Agent': 'Goldcrest-Trading-Bot/1.3.0'
+            },
+            agent: new https.Agent({ rejectUnauthorized: false })
+          });
+          webSocketManager.register(wsId, ws, attempt - 1);
+          
           const timer = setTimeout(() => {
-            try { ws.close(); } catch {}
+            webSocketManager.close(wsId);
             reject(new Error(`Timeout connecting to cTrader host: ${host}`));
           }, TIMEOUT_MS);
 
@@ -155,7 +165,7 @@ export async function fetchLiveCTraderAccounts(
                 }));
               } else if (msg.payloadType === MSG_GET_ACCOUNTS_RES) {
                 clearTimeout(timer);
-                try { ws.close(); } catch {}
+                webSocketManager.close(wsId);
                 const permissionScope = msg.payload?.permissionScope !== undefined
                   ? Number(msg.payload.permissionScope)
                   : undefined;
@@ -174,18 +184,19 @@ export async function fetchLiveCTraderAccounts(
                 resolve(accountsToReturn);
               } else if (msg.payloadType === MSG_ERROR_RES) {
                 clearTimeout(timer);
-                try { ws.close(); } catch {}
+                webSocketManager.close(wsId);
                 reject(new Error(`cTrader API Error: ${JSON.stringify(msg.payload)}`));
               }
             } catch (e: any) {
               clearTimeout(timer);
-              try { ws.close(); } catch {}
+              webSocketManager.close(wsId);
               reject(e);
             }
           });
 
           ws.on('error', (err: any) => {
             clearTimeout(timer);
+            webSocketManager.close(wsId);
             reject(err);
           });
         });
@@ -235,9 +246,17 @@ export async function fetchLiveCTraderAccountDetails(
   }
 
   return new Promise<CTraderRealTraderDetails>((resolve, reject) => {
-    const ws = new WebSocket(host);
+    const ws = new WebSocket(host, {
+      headers: {
+        'User-Agent': 'Goldcrest-Trading-Bot/1.3.0'
+      },
+      agent: new https.Agent({ rejectUnauthorized: false })
+    });
+    const wsId = `ct_det_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    webSocketManager.register(wsId, ws);
+
     const timer = setTimeout(() => {
-      try { ws.close(); } catch {}
+      webSocketManager.close(wsId);
       reject(new Error(`Timeout fetching account details from ${host}`));
     }, 15000);
 
@@ -315,7 +334,7 @@ export async function fetchLiveCTraderAccountDetails(
         } else if (msg.payloadType === MSG_RECONCILE_RES) {
           if (!traderData) {
             clearTimeout(timer);
-            try { ws.close(); } catch {}
+            webSocketManager.close(wsId);
             return reject(new Error('Trader data missing from cTrader Open API response'));
           }
 
@@ -323,7 +342,7 @@ export async function fetchLiveCTraderAccountDetails(
           const rawBalance = Number(traderData.balance);
           if (!Number.isFinite(rawBalance)) {
             clearTimeout(timer);
-            try { ws.close(); } catch {}
+            webSocketManager.close(wsId);
             return reject(new Error('cTrader trader details did not include a valid account balance.'));
           }
           const realBalance = rawBalance / Math.pow(10, moneyDigits);
@@ -357,7 +376,7 @@ export async function fetchLiveCTraderAccountDetails(
           }));
         } else if (msg.payloadType === MSG_GET_POSITION_UNREALIZED_PNL_RES) {
           clearTimeout(timer);
-          try { ws.close(); } catch {}
+          webSocketManager.close(wsId);
 
           if (!traderData) {
             return reject(new Error('cTrader trader details missing while calculating account equity.'));
@@ -413,7 +432,7 @@ export async function fetchLiveCTraderAccountDetails(
           });
         } else if (msg.payloadType === MSG_ERROR_RES) {
           clearTimeout(timer);
-          try { ws.close(); } catch {}
+          webSocketManager.close(wsId);
           const code = String(msg.payload?.errorCode || '').toUpperCase();
           const description = String(msg.payload?.description || '').trim();
           if (code === 'CANT_ROUTE_REQUEST' || description.toLowerCase().includes('cannot route request') || description.toLowerCase().includes('no environment connection')) {
@@ -424,13 +443,14 @@ export async function fetchLiveCTraderAccountDetails(
         }
       } catch (err: any) {
         clearTimeout(timer);
-        try { ws.close(); } catch {}
+        webSocketManager.close(wsId);
         reject(err);
       }
     });
 
     ws.on('error', (err: any) => {
       clearTimeout(timer);
+      webSocketManager.close(wsId);
       reject(err);
     });
   });
@@ -541,11 +561,8 @@ function priceFromRelative(value: number, digits = 5): number {
   return value / Math.pow(10, digits);
 }
 
-const MSG_HEARTBEAT_EVENT = 51;
-
 function getPayloadTypeName(payloadType: number): string {
   const names: Record<number, string> = {
-    [MSG_HEARTBEAT_EVENT]: 'Heartbeat (51)',
     [MSG_APP_AUTH_REQ]: 'AppAuthReq (2100)',
     [MSG_APP_AUTH_RES]: 'AppAuthRes (2101 - Application Authentication)',
     [MSG_ACC_AUTH_REQ]: 'AccountAuthReq (2102)',
@@ -583,7 +600,11 @@ function sendAndAwait(
   return new Promise((resolve, reject) => {
     const clientMsgId = `gc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const timer = setTimeout(
-      () => reject(new Error(`cTrader request timeout: ${expectedPayloadType} (${getPayloadTypeName(expectedPayloadType)})`)),
+      () => {
+        ws.removeEventListener('message', handler);
+        ws.removeEventListener('error', errorHandler);
+        reject(new Error(`cTrader request timeout: ${expectedPayloadType} (${getPayloadTypeName(expectedPayloadType)})`));
+      },
       timeoutMs
     );
     const handler = (event: any) => {
@@ -593,44 +614,29 @@ function sendAndAwait(
         if (msg.clientMsgId === clientMsgId && msg.payloadType === expectedPayloadType) {
           clearTimeout(timer);
           ws.removeEventListener('message', handler);
+          ws.removeEventListener('error', errorHandler);
           resolve(msg.payload || {});
-        } else if (msg.payloadType === MSG_ERROR_RES && msg.clientMsgId === clientMsgId) {
+        } else if (msg.payloadType === MSG_ERROR_RES && (!msg.clientMsgId || msg.clientMsgId === clientMsgId)) {
           clearTimeout(timer);
           ws.removeEventListener('message', handler);
+          ws.removeEventListener('error', errorHandler);
           reject(new Error(`cTrader API error: ${JSON.stringify(msg.payload)}`));
         }
       } catch {}
     };
+    const errorHandler = (err: any) => {
+        clearTimeout(timer);
+        ws.removeEventListener('message', handler);
+        ws.removeEventListener('error', errorHandler);
+        reject(err);
+    };
     ws.addEventListener('message', handler);
+    ws.addEventListener('error', errorHandler);
     ws.send(JSON.stringify({ clientMsgId, payloadType, payload }));
   });
 }
 
-interface CTraderPooledSession {
-  ws: WebSocket;
-  host: string;
-  key: string;
-  accountId: number;
-  clientId: string;
-  isLive: boolean;
-  authenticatedAt: number;
-  lastUsedAt: number;
-  idleTimer?: NodeJS.Timeout;
-}
-
-const cTraderSessionPool = new Map<string, CTraderPooledSession>();
-
-export function closeAllCTraderSessions(): void {
-  for (const [key, session] of cTraderSessionPool.entries()) {
-    try {
-      if (session.idleTimer) clearTimeout(session.idleTimer);
-      if (session.ws.readyState === WebSocket.OPEN || session.ws.readyState === WebSocket.CONNECTING) {
-        session.ws.close();
-      }
-    } catch {}
-    cTraderSessionPool.delete(key);
-  }
-}
+const persistentConnections = new Map<number, { ws: WebSocket, wsId: string, lastUsed: number }>();
 
 async function withAuthenticatedAccount<T>(
   accountId: number,
@@ -638,53 +644,43 @@ async function withAuthenticatedAccount<T>(
   clientSecret: string,
   accessToken: string,
   isLive: boolean,
-  fn: (ws: WebSocket) => Promise<T>
+  fn: (ws: WebSocket) => Promise<T>,
+  persistent: boolean = false,
+  stableWsId?: string
 ): Promise<T> {
-  const sessionKey = `${accountId}:${clientId}:${isLive ? 'live' : 'demo'}`;
-
-  // 1. Reuse existing warm authenticated session if active
-  const existing = cTraderSessionPool.get(sessionKey);
-  if (existing && existing.ws.readyState === WebSocket.OPEN) {
-    if (existing.idleTimer) clearTimeout(existing.idleTimer);
-    existing.lastUsedAt = Date.now();
-    existing.idleTimer = setTimeout(() => {
-      try {
-        if (existing.ws.readyState === WebSocket.OPEN) existing.ws.close();
-      } catch {}
-      cTraderSessionPool.delete(sessionKey);
-    }, 45000);
-
-    try {
-      return await fn(existing.ws);
-    } catch (err: any) {
-      const msg = String(err?.message || '');
-      const isSocketDead =
-        msg.includes('WebSocket') ||
-        msg.includes('ECONNRESET') ||
-        msg.includes('closed') ||
-        msg.includes('not open') ||
-        msg.includes('timeout');
-      if (isSocketDead) {
-        try { existing.ws.close(); } catch {}
-        cTraderSessionPool.delete(sessionKey);
-      } else {
-        throw err;
-      }
-    }
-  }
-
-  // 2. Establish fresh authenticated session with failover across cTrader hosts
+  // Route account-scoped reads through the same cTrader environment that
+  // authenticated the selected account.
   const hosts = getCTraderRequestHosts(isLive);
   const MAX_RETRIES = 3;
   const TIMEOUT_MS = 20000;
 
   let lastError: any = null;
 
+  if (persistent && persistentConnections.has(accountId)) {
+    const cached = persistentConnections.get(accountId)!;
+    try {
+      if (cached.ws.readyState === WebSocket.OPEN) {
+        return await fn(cached.ws);
+      } else {
+        persistentConnections.delete(accountId);
+      }
+    } catch (e) {
+      persistentConnections.delete(accountId);
+    }
+  }
+
   for (const host of hosts) {
+    const wsId = stableWsId || `ctrader_${accountId}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       let ws: WebSocket | null = null;
       try {
-        ws = new WebSocket(host);
+        ws = new WebSocket(host, {
+          headers: {
+            'User-Agent': 'Goldcrest-Trading-Bot/1.3.0'
+          },
+          agent: new https.Agent({ rejectUnauthorized: false })
+        });
+        webSocketManager.register(wsId, ws, attempt - 1);
         const currentWs = ws;
         const connected = new Promise<void>((resolve, reject) => {
           const timer = setTimeout(() => {
@@ -702,51 +698,8 @@ async function withAuthenticatedAccount<T>(
         });
 
         await connected;
-
-        // Keep-alive heartbeat responder
-        currentWs.on('message', (eventData: any) => {
-          try {
-            const raw = typeof eventData === 'string' ? eventData : (eventData?.data || eventData).toString();
-            const parsed = JSON.parse(raw);
-            if (parsed.payloadType === MSG_HEARTBEAT_EVENT) {
-              if (currentWs.readyState === WebSocket.OPEN) {
-                currentWs.send(JSON.stringify({ clientMsgId: 'hb', payloadType: MSG_HEARTBEAT_EVENT, payload: {} }));
-              }
-            }
-          } catch {}
-        });
-
         await sendAndAwait(currentWs, MSG_APP_AUTH_REQ, { clientId, clientSecret }, MSG_APP_AUTH_RES);
         await sendAndAwait(currentWs, MSG_ACC_AUTH_REQ, { ctidTraderAccountId: accountId, accessToken }, MSG_ACC_AUTH_RES);
-
-        const session: CTraderPooledSession = {
-          ws: currentWs,
-          host,
-          key: sessionKey,
-          accountId,
-          clientId,
-          isLive,
-          authenticatedAt: Date.now(),
-          lastUsedAt: Date.now(),
-          idleTimer: setTimeout(() => {
-            try {
-              if (currentWs.readyState === WebSocket.OPEN) currentWs.close();
-            } catch {}
-            cTraderSessionPool.delete(sessionKey);
-          }, 45000)
-        };
-
-        currentWs.on('close', () => {
-          if (session.idleTimer) clearTimeout(session.idleTimer);
-          cTraderSessionPool.delete(sessionKey);
-        });
-        currentWs.on('error', () => {
-          if (session.idleTimer) clearTimeout(session.idleTimer);
-          cTraderSessionPool.delete(sessionKey);
-        });
-
-        cTraderSessionPool.set(sessionKey, session);
-
         return await fn(currentWs);
       } catch (err: any) {
         lastError = err;
@@ -761,7 +714,7 @@ async function withAuthenticatedAccount<T>(
           msg.includes('socket');
 
         if (isTransient && attempt < MAX_RETRIES) {
-          const backoff = Math.min(1000 * Math.pow(1.8, attempt - 1), 4000);
+          const backoff = Math.min(2000 * Math.pow(2, attempt - 1), 10000);
           console.warn(`[cTrader] Market-data WebSocket connection to ${host} failed (${msg}). Automatically retrying and re-establishing connection (attempt ${attempt + 1}/${MAX_RETRIES}) in ${Math.round(backoff)}ms...`);
           await new Promise(r => setTimeout(r, backoff));
           continue;
@@ -773,6 +726,15 @@ async function withAuthenticatedAccount<T>(
 
         if (!isTransient) {
           break; // Stop on non-transient fatal errors
+        }
+      } finally {
+        if (!persistent) {
+          webSocketManager.close(wsId);
+        } else {
+          // If persistent, add/update the cache
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            persistentConnections.set(accountId, { ws, wsId, lastUsed: Date.now() });
+          }
         }
       }
     }
@@ -1288,6 +1250,7 @@ export async function fetchLiveCTraderQuote(
   isLive: boolean,
   digits: number
 ): Promise<CTraderMarketQuote> {
+  const wsId = `quote_conn_${ctidTraderAccountId}`;
   return withAuthenticatedAccount(ctidTraderAccountId, clientId, clientSecret, accessToken, isLive, async ws => {
     const clientMsgId = `quote_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     return new Promise<CTraderMarketQuote>((resolve, reject) => {
@@ -1328,7 +1291,7 @@ export async function fetchLiveCTraderQuote(
         }
       }));
     });
-  });
+  }, true, wsId);
 }
 
 export async function fetchCTraderTrendbars(

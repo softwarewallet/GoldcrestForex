@@ -26,19 +26,13 @@ import {
   Compass,
   FileSpreadsheet,
   ShieldAlert,
-  Timer,
-  Copy,
-  Check,
-  Info,
-  Server,
-  Cpu,
-  ShieldCheck
+  CalendarDays
 } from 'lucide-react';
 import { PairPerformance, HourlyPerformance, TradeComparisonReport, RawTradeRecord } from '../services/tradeComparisonService';
-import { ExecutionLatencyRecord, ExecutionLatencySummaryStats } from '../services/executionLatencyAuditService';
 import { ResponsiveContainer, BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, Legend, CartesianGrid, Cell } from 'recharts';
+import { DayOfWeekPairPerformanceReport } from './DayOfWeekPairPerformanceReport';
 
-type DatePreset = 'YESTERDAY' | 'TODAY' | 'LAST_7_DAYS' | 'LAST_30_DAYS' | 'CURRENT_MONTH' | 'PREVIOUS_MONTH';
+type DatePreset = 'YESTERDAY' | 'TODAY' | 'LAST_7_DAYS' | 'LAST_30_DAYS' | 'LAST_90_DAYS' | 'CURRENT_MONTH' | 'PREVIOUS_MONTH' | 'ALL_TIME';
 type PairSortField = 'totalPnL' | 'totalTrades' | 'winRate' | 'profitFactor' | 'pair';
 
 const pad = (n: number) => String(n).padStart(2, '0');
@@ -74,6 +68,10 @@ function getPresetBounds(preset: DatePreset): { from: string; to: string } {
       const past = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 30);
       return { from: formatDateInput(past), to: formatDateInput(now) };
     }
+    case 'LAST_90_DAYS': {
+      const past = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 90);
+      return { from: formatDateInput(past), to: formatDateInput(now) };
+    }
     case 'CURRENT_MONTH': {
       const first = new Date(now.getFullYear(), now.getMonth(), 1);
       const last = new Date(now.getFullYear(), now.getMonth() + 1, 0);
@@ -84,10 +82,12 @@ function getPresetBounds(preset: DatePreset): { from: string; to: string } {
       const last = new Date(now.getFullYear(), now.getMonth(), 0);
       return { from: formatDateInput(first), to: formatDateInput(last) };
     }
+    case 'ALL_TIME': {
+      const past = new Date(now.getFullYear() - 2, 0, 1);
+      return { from: formatDateInput(past), to: formatDateInput(now) };
+    }
   }
 }
-
-type ReportViewMode = 'ANALYTICS' | 'LEDGER' | 'EXECUTION_LATENCY';
 
 export const AlertsPage: React.FC = () => {
   const initial = getYesterdayBounds();
@@ -105,17 +105,8 @@ export const AlertsPage: React.FC = () => {
   const [selectedHour, setSelectedHour] = useState<number | null>(null);
   const [showRawTrades, setShowRawTrades] = useState<boolean>(false);
   const [heatmapMode, setHeatmapMode] = useState<'ALL' | 'LOSSES' | 'WINS'>('ALL');
-  const [reportViewMode, setReportViewMode] = useState<ReportViewMode>('ANALYTICS');
+  const [reportViewMode, setReportViewMode] = useState<'ANALYTICS' | 'DAY_OF_WEEK' | 'LEDGER'>('ANALYTICS');
   const [liveAccountBalance, setLiveAccountBalance] = useState<number | null>(null);
-
-  // Auto Live Execution Latency & Audit State
-  const [latencyStats, setLatencyStats] = useState<ExecutionLatencySummaryStats | null>(null);
-  const [latencyAudits, setLatencyAudits] = useState<ExecutionLatencyRecord[]>([]);
-  const [latencyLoading, setLatencyLoading] = useState<boolean>(false);
-  const [latencyPairFilter, setLatencyPairFilter] = useState<string>('ALL');
-  const [latencyStatusFilter, setLatencyStatusFilter] = useState<string>('ALL');
-  const [copiedJsonNotification, setCopiedJsonNotification] = useState<boolean>(false);
-  const [selectedAuditRecord, setSelectedAuditRecord] = useState<ExecutionLatencyRecord | null>(null);
 
   // Fetch live account balance from broker API / database
   useEffect(() => {
@@ -340,68 +331,6 @@ export const AlertsPage: React.FC = () => {
     document.body.removeChild(link);
   };
 
-  const fetchLatencyReport = useCallback(async () => {
-    setLatencyLoading(true);
-    try {
-      const fromMs = new Date(fromDate + 'T00:00:00').getTime();
-      const toMs = new Date(toDate + 'T23:59:59.999').getTime();
-      const pairParam = latencyPairFilter !== 'ALL' ? `&pair=${encodeURIComponent(latencyPairFilter)}` : '';
-      const statusParam = latencyStatusFilter !== 'ALL' ? `&status=${encodeURIComponent(latencyStatusFilter)}` : '';
-      const res = await fetch(`/api/brokers/execution-latency?from=${fromMs}&to=${toMs}${pairParam}${statusParam}&limit=100`, { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.stats) setLatencyStats(data.stats);
-        if (Array.isArray(data.audits)) setLatencyAudits(data.audits);
-      }
-    } catch (e) {
-      console.error('Failed to fetch latency report:', e);
-    } finally {
-      setLatencyLoading(false);
-    }
-  }, [fromDate, toDate, latencyPairFilter, latencyStatusFilter]);
-
-  useEffect(() => {
-    if (reportViewMode === 'EXECUTION_LATENCY') {
-      void fetchLatencyReport();
-    }
-  }, [reportViewMode, fetchLatencyReport]);
-
-  const handleCopyLatencyJson = () => {
-    if (!latencyAudits || latencyAudits.length === 0) return;
-    const payload = JSON.stringify({
-      reportTitle: 'Auto Live Order Execution Latency Audit',
-      dateRange: `${fromDate} to ${toDate}`,
-      summary: latencyStats,
-      auditRecords: latencyAudits
-    }, null, 2);
-    void navigator.clipboard.writeText(payload);
-    setCopiedJsonNotification(true);
-    setTimeout(() => setCopiedJsonNotification(false), 3000);
-  };
-
-  const handleExportLatencyCsv = () => {
-    if (!latencyAudits || latencyAudits.length === 0) return;
-    const lines: string[] = [];
-    lines.push('AUTO LIVE ORDER EXECUTION LATENCY AUDIT REPORT');
-    lines.push(`Date Range: ${fromDate} to ${toDate}`);
-    if (latencyStats) {
-      lines.push(`Total Transactions: ${latencyStats.totalTransactions}, Executed: ${latencyStats.executedCount}, Avg Total Latency: ${latencyStats.avgTotalDurationMs}ms (${(latencyStats.avgTotalDurationMs / 1000).toFixed(2)}s), Slowest Stage: ${latencyStats.slowestStage}`);
-    }
-    lines.push('');
-    lines.push('Timestamp,Date,Pair,Side,Status,Total_Latency_ms,Total_Latency_sec,Scan_Duration_ms,Analysis_Duration_ms,Safety_Gate_ms,Broker_Submission_ms,Broker_Order_Id,Quantity,Entry_Price,Take_Profit,Stop_Loss,Signal_Id');
-    for (const a of latencyAudits) {
-      lines.push(`"${new Date(a.timestamp).toISOString()}","${a.date}","${a.pair}","${a.side}","${a.status}",${a.totalDurationMs},${(a.totalDurationMs / 1000).toFixed(3)},${a.scanDurationMs},${a.analysisDurationMs},${a.safetyGateDurationMs},${a.brokerSubmissionDurationMs},"${a.brokerOrderId || ''}",${a.quantity || ''},${a.entryPrice || ''},${a.takeProfit || ''},${a.stopLoss || ''},"${a.signalId || ''}"`);
-    }
-    const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.setAttribute('href', url);
-    link.setAttribute('download', `auto-execution-latency-${fromDate}-to-${toDate}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
   const totalTrades = report?.totalTrades || 0;
   const winningTrades = report?.winningTrades || 0;
   const losingTrades = report?.losingTrades || 0;
@@ -482,8 +411,10 @@ export const AlertsPage: React.FC = () => {
               { id: 'TODAY', label: 'Today' },
               { id: 'LAST_7_DAYS', label: 'Last 7 Days' },
               { id: 'LAST_30_DAYS', label: 'Last 30 Days' },
+              { id: 'LAST_90_DAYS', label: 'Last 90 Days' },
               { id: 'CURRENT_MONTH', label: 'This Month' },
-              { id: 'PREVIOUS_MONTH', label: 'Previous Month' }
+              { id: 'PREVIOUS_MONTH', label: 'Previous Month' },
+              { id: 'ALL_TIME', label: 'All History' }
             ].map(p => (
               <button
                 key={p.id}
@@ -526,8 +457,8 @@ export const AlertsPage: React.FC = () => {
           </div>
         </div>
 
-        {/* View Mode Switcher: Analytics vs Ledger */}
-        <div style={{ paddingTop: '5px', marginTop: '5px' }} className="mt-4 pt-3 border-t border-slate-800/80 flex items-center gap-2">
+        {/* View Mode Switcher: Analytics vs Day-of-Week Pair Schedule vs Ledger */}
+        <div style={{ paddingTop: '5px', marginTop: '5px' }} className="mt-4 pt-3 border-t border-slate-800/80 flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={() => setReportViewMode('ANALYTICS')}
@@ -542,6 +473,18 @@ export const AlertsPage: React.FC = () => {
           </button>
           <button
             type="button"
+            onClick={() => setReportViewMode('DAY_OF_WEEK')}
+            className={`px-4 py-2 rounded-lg text-xs font-bold transition flex items-center gap-2 ${
+              reportViewMode === 'DAY_OF_WEEK'
+                ? 'bg-emerald-600 text-white shadow'
+                : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'
+            }`}
+          >
+            <CalendarDays className="w-4 h-4 text-emerald-400" />
+            <span>DAY-OF-WEEK PAIR PROFITABILITY (ACTIVATION SCHEDULE)</span>
+          </button>
+          <button
+            type="button"
             onClick={() => setReportViewMode('LEDGER')}
             className={`px-4 py-2 rounded-lg text-xs font-bold transition flex items-center gap-2 ${
               reportViewMode === 'LEDGER'
@@ -551,23 +494,6 @@ export const AlertsPage: React.FC = () => {
           >
             <FileSpreadsheet className="w-4 h-4" />
             <span>DAILY ACCOUNT LEDGER (WEEKENDS EXCLUDED)</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setReportViewMode('EXECUTION_LATENCY')}
-            className={`px-4 py-2 rounded-lg text-xs font-bold transition flex items-center gap-2 ${
-              reportViewMode === 'EXECUTION_LATENCY'
-                ? 'bg-amber-600 text-white shadow'
-                : 'bg-slate-950 text-slate-400 hover:text-slate-200 border border-slate-800'
-            }`}
-          >
-            <Timer className="w-4 h-4 text-amber-300" />
-            <span>ORDER EXECUTION LATENCY & AUDIT</span>
-            {latencyAudits.length > 0 && (
-              <span className="px-1.5 py-0.2 text-[10px] bg-amber-950 text-amber-300 border border-amber-800 rounded-full font-mono">
-                {latencyAudits.length}
-              </span>
-            )}
           </button>
         </div>
       </div>
@@ -713,459 +639,13 @@ export const AlertsPage: React.FC = () => {
             </table>
           </div>
         </div>
-      ) : reportViewMode === 'EXECUTION_LATENCY' ? (
-        <div className="space-y-5">
-          {/* Top Header Card */}
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-sm space-y-4">
-            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-4 border-b border-slate-800">
-              <div>
-                <div className="flex items-center gap-2">
-                  <Timer className="w-5 h-5 text-amber-400" />
-                  <h2 className="text-base font-bold text-white uppercase tracking-wider">
-                    AUTO LIVE ORDER EXECUTION LATENCY & AUDIT
-                  </h2>
-                </div>
-                <p className="text-xs text-slate-400 mt-1">
-                  Full cycle telemetry and milestone timestamps from <strong className="text-cyan-300">SCANNING MARKET</strong> to <strong className="text-emerald-300">TRADE EXECUTED</strong> for bottleneck identification and system latency optimization.
-                </p>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2">
-                {/* Status Filter */}
-                <select
-                  value={latencyStatusFilter}
-                  onChange={e => setLatencyStatusFilter(e.target.value)}
-                  className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 outline-none"
-                >
-                  <option value="ALL">All Statuses</option>
-                  <option value="EXECUTED">Executed Only</option>
-                  <option value="BLOCKED">Blocked Only</option>
-                </select>
-
-                {/* Pair Filter */}
-                <select
-                  value={latencyPairFilter}
-                  onChange={e => setLatencyPairFilter(e.target.value)}
-                  className="bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-slate-200 outline-none"
-                >
-                  <option value="ALL">All Currency Pairs</option>
-                  <option value="EUR/USD">EUR/USD</option>
-                  <option value="GBP/USD">GBP/USD</option>
-                  <option value="USD/JPY">USD/JPY</option>
-                  <option value="AUD/USD">AUD/USD</option>
-                  <option value="USD/CAD">USD/CAD</option>
-                  <option value="USD/CHF">USD/CHF</option>
-                  <option value="NZD/USD">NZD/USD</option>
-                </select>
-
-                {/* Copy JSON Button */}
-                <button
-                  type="button"
-                  onClick={handleCopyLatencyJson}
-                  className="px-3.5 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 bg-amber-600 hover:bg-amber-500 text-white shadow"
-                  title="Copy formatted JSON data of all recorded transactions to provide for system improvement"
-                >
-                  {copiedJsonNotification ? <Check className="w-3.5 h-3.5 text-white" /> : <Copy className="w-3.5 h-3.5" />}
-                  <span>{copiedJsonNotification ? 'COPIED TO CLIPBOARD!' : 'COPY AUDIT JSON'}</span>
-                </button>
-
-                {/* Export CSV Button */}
-                <button
-                  type="button"
-                  onClick={handleExportLatencyCsv}
-                  className="px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 bg-slate-950 hover:bg-slate-800 text-slate-300 border border-slate-800"
-                >
-                  <Download className="w-3.5 h-3.5" />
-                  <span>EXPORT CSV</span>
-                </button>
-
-                {/* Refresh Button */}
-                <button
-                  type="button"
-                  onClick={() => void fetchLatencyReport()}
-                  disabled={latencyLoading}
-                  className="px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 bg-slate-950 hover:bg-slate-800 text-slate-300 border border-slate-800"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${latencyLoading ? 'animate-spin text-cyan-400' : ''}`} />
-                  <span>REFRESH</span>
-                </button>
-              </div>
-            </div>
-
-            {/* KPI Metric Cards */}
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-              {/* Avg Total Latency */}
-              <div className="p-3 bg-slate-950 border border-slate-800 rounded-lg">
-                <div className="text-[10px] uppercase text-amber-400 font-bold flex items-center justify-between">
-                  <span>TOTAL CYCLE (AVG)</span>
-                  <Timer className="w-3 h-3 text-amber-400" />
-                </div>
-                <div className="text-xl font-bold text-white mt-1">
-                  {latencyStats ? `${latencyStats.avgTotalDurationMs.toLocaleString()} ms` : '—'}
-                </div>
-                <div className="text-[10px] text-amber-400/90 mt-0.5">
-                  {latencyStats ? `${(latencyStats.avgTotalDurationMs / 1000).toFixed(2)}s · Min ${latencyStats.minTotalDurationMs}ms` : '—'}
-                </div>
-              </div>
-
-              {/* Market Scanning */}
-              <div className="p-3 bg-slate-950 border border-slate-800 rounded-lg">
-                <div className="text-[10px] uppercase text-cyan-400 font-bold flex items-center justify-between">
-                  <span>1. MARKET SCAN</span>
-                  <Search className="w-3 h-3 text-cyan-400" />
-                </div>
-                <div className="text-xl font-bold text-cyan-300 mt-1">
-                  {latencyStats ? `${latencyStats.avgScanDurationMs} ms` : '—'}
-                </div>
-                <div className="text-[10px] text-slate-500 mt-0.5">Quotes & cycle inputs</div>
-              </div>
-
-              {/* Signal & ML Analysis */}
-              <div className="p-3 bg-slate-950 border border-slate-800 rounded-lg">
-                <div className="text-[10px] uppercase text-blue-400 font-bold flex items-center justify-between">
-                  <span>2. ML ANALYSIS</span>
-                  <Cpu className="w-3 h-3 text-blue-400" />
-                </div>
-                <div className="text-xl font-bold text-blue-300 mt-1">
-                  {latencyStats ? `${latencyStats.avgAnalysisDurationMs} ms` : '—'}
-                </div>
-                <div className="text-[10px] text-slate-500 mt-0.5">Signals & short-TP</div>
-              </div>
-
-              {/* Safety & Readiness */}
-              <div className="p-3 bg-slate-950 border border-slate-800 rounded-lg">
-                <div className="text-[10px] uppercase text-purple-400 font-bold flex items-center justify-between">
-                  <span>3. SAFETY GATES</span>
-                  <ShieldCheck className="w-3 h-3 text-purple-400" />
-                </div>
-                <div className="text-xl font-bold text-purple-300 mt-1">
-                  {latencyStats ? `${latencyStats.avgSafetyGateDurationMs} ms` : '—'}
-                </div>
-                <div className="text-[10px] text-slate-500 mt-0.5">Exposure & limits</div>
-              </div>
-
-              {/* Broker Roundtrip */}
-              <div className="p-3 bg-slate-950 border border-slate-800 rounded-lg">
-                <div className="text-[10px] uppercase text-rose-400 font-bold flex items-center justify-between">
-                  <span>4. BROKER ROUNDTRIP</span>
-                  <Server className="w-3 h-3 text-rose-400" />
-                </div>
-                <div className="text-xl font-bold text-rose-300 mt-1">
-                  {latencyStats ? `${latencyStats.avgBrokerSubmissionDurationMs} ms` : '—'}
-                </div>
-                <div className="text-[10px] text-slate-500 mt-0.5">cTrader WebSocket API</div>
-              </div>
-
-              {/* Bottleneck Callout */}
-              <div className="p-3 bg-slate-950 border border-slate-800 rounded-lg">
-                <div className="text-[10px] uppercase text-slate-400 font-bold flex items-center justify-between">
-                  <span>BOTTLENECK STAGE</span>
-                  <AlertTriangle className="w-3 h-3 text-amber-400" />
-                </div>
-                <div className="text-xs font-bold text-amber-300 mt-1.5 truncate">
-                  {latencyStats?.slowestStage || 'N/A'}
-                </div>
-                <div className="text-[10px] text-slate-500 mt-0.5">Consumes majority of latency</div>
-              </div>
-            </div>
-
-            {/* Stage Latency Distribution Visual Stack */}
-            {latencyStats && latencyStats.avgTotalDurationMs > 0 && (
-              <div className="p-4 bg-slate-950 rounded-xl border border-slate-800 space-y-2.5">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="font-bold text-slate-300 uppercase tracking-wider text-[11px]">
-                    Average Stage Timing Breakdown (% of total cycle):
-                  </span>
-                  <span className="font-mono text-slate-400 text-[11px]">
-                    Total: {latencyStats.avgTotalDurationMs} ms (100%)
-                  </span>
-                </div>
-                <div className="w-full h-4 bg-slate-900 rounded-full flex overflow-hidden border border-slate-800">
-                  <div
-                    style={{ width: `${Math.max(4, (latencyStats.avgScanDurationMs / latencyStats.avgTotalDurationMs) * 100)}%` }}
-                    className="bg-cyan-500 hover:bg-cyan-400 transition"
-                    title={`Market Scan: ${latencyStats.avgScanDurationMs}ms (${Math.round((latencyStats.avgScanDurationMs / latencyStats.avgTotalDurationMs) * 100)}%)`}
-                  />
-                  <div
-                    style={{ width: `${Math.max(4, (latencyStats.avgAnalysisDurationMs / latencyStats.avgTotalDurationMs) * 100)}%` }}
-                    className="bg-blue-500 hover:bg-blue-400 transition"
-                    title={`ML Analysis: ${latencyStats.avgAnalysisDurationMs}ms (${Math.round((latencyStats.avgAnalysisDurationMs / latencyStats.avgTotalDurationMs) * 100)}%)`}
-                  />
-                  <div
-                    style={{ width: `${Math.max(4, (latencyStats.avgSafetyGateDurationMs / latencyStats.avgTotalDurationMs) * 100)}%` }}
-                    className="bg-purple-500 hover:bg-purple-400 transition"
-                    title={`Safety Gates: ${latencyStats.avgSafetyGateDurationMs}ms (${Math.round((latencyStats.avgSafetyGateDurationMs / latencyStats.avgTotalDurationMs) * 100)}%)`}
-                  />
-                  <div
-                    style={{ width: `${Math.max(4, (latencyStats.avgBrokerSubmissionDurationMs / latencyStats.avgTotalDurationMs) * 100)}%` }}
-                    className="bg-rose-500 hover:bg-rose-400 transition"
-                    title={`Broker Roundtrip: ${latencyStats.avgBrokerSubmissionDurationMs}ms (${Math.round((latencyStats.avgBrokerSubmissionDurationMs / latencyStats.avgTotalDurationMs) * 100)}%)`}
-                  />
-                </div>
-                <div className="flex flex-wrap items-center gap-4 text-[11px] text-slate-400 pt-1">
-                  <div className="flex items-center gap-1.5">
-                    <span className="w-2.5 h-2.5 rounded-sm bg-cyan-500" />
-                    <span>Market Scan ({Math.round((latencyStats.avgScanDurationMs / latencyStats.avgTotalDurationMs) * 100)}%)</span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="w-2.5 h-2.5 rounded-sm bg-blue-500" />
-                    <span>ML Analysis ({Math.round((latencyStats.avgAnalysisDurationMs / latencyStats.avgTotalDurationMs) * 100)}%)</span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="w-2.5 h-2.5 rounded-sm bg-purple-500" />
-                    <span>Safety Gates ({Math.round((latencyStats.avgSafetyGateDurationMs / latencyStats.avgTotalDurationMs) * 100)}%)</span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="w-2.5 h-2.5 rounded-sm bg-rose-500" />
-                    <span>Broker API Roundtrip ({Math.round((latencyStats.avgBrokerSubmissionDurationMs / latencyStats.avgTotalDurationMs) * 100)}%)</span>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Comparative Transaction Stage Chart */}
-          {latencyAudits.length > 0 && (
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4">
-              <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-                <div className="flex items-center gap-2">
-                  <BarChart2 className="w-4 h-4 text-cyan-400" />
-                  <h3 className="text-sm font-bold text-white uppercase tracking-wider">
-                    Recent Orders Latency Breakdown (Stage Stacked MS)
-                  </h3>
-                </div>
-                <span className="text-xs text-slate-400">
-                  Showing last {Math.min(latencyAudits.length, 12)} transactions
-                </span>
-              </div>
-
-              <div className="h-64 w-full">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart
-                    data={latencyAudits.slice(0, 12).reverse().map((a, i) => ({
-                      label: `#${i + 1} ${a.pair} (${a.side})`,
-                      scan: a.scanDurationMs,
-                      analysis: a.analysisDurationMs,
-                      safety: a.safetyGateDurationMs,
-                      broker: a.brokerSubmissionDurationMs,
-                      total: a.totalDurationMs
-                    }))}
-                    margin={{ top: 10, right: 10, left: -10, bottom: 20 }}
-                  >
-                    <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-                    <XAxis dataKey="label" stroke="#64748b" tick={{ fontSize: 10 }} interval={0} angle={-20} textAnchor="end" />
-                    <YAxis stroke="#64748b" tick={{ fontSize: 10 }} unit="ms" />
-                    <Tooltip
-                      contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', borderRadius: '0.5rem', fontSize: '11px' }}
-                      formatter={(val: any, name: string) => [`${val} ms`, name]}
-                    />
-                    <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }} />
-                    <Bar dataKey="scan" name="1. Market Scan" stackId="a" fill="#06b6d4" />
-                    <Bar dataKey="analysis" name="2. ML Analysis" stackId="a" fill="#3b82f6" />
-                    <Bar dataKey="safety" name="3. Safety Gates" stackId="a" fill="#a855f7" />
-                    <Bar dataKey="broker" name="4. Broker API" stackId="a" fill="#f43f5e" />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-          )}
-
-          {/* Audit Records Table */}
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <div className="flex items-center gap-2">
-                <Layers className="w-4 h-4 text-amber-400" />
-                <h3 className="text-sm font-bold text-white uppercase tracking-wider">
-                  Order Telemetry Audit Records ({latencyAudits.length} Records)
-                </h3>
-              </div>
-              <span className="text-xs text-slate-400">
-                Sorted by most recent execution first
-              </span>
-            </div>
-
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="border-b border-slate-800 text-[10px] text-slate-400 uppercase tracking-wider bg-slate-950/60 font-semibold">
-                    <th className="py-2.5 px-3 text-left">Time</th>
-                    <th className="py-2.5 px-3 text-left">Pair</th>
-                    <th className="py-2.5 px-3 text-center">Side</th>
-                    <th className="py-2.5 px-3 text-center">Status</th>
-                    <th className="py-2.5 px-3 text-right">Total Latency</th>
-                    <th className="py-2.5 px-3 text-right">Scan</th>
-                    <th className="py-2.5 px-3 text-right">ML Analysis</th>
-                    <th className="py-2.5 px-3 text-right">Safety Gates</th>
-                    <th className="py-2.5 px-3 text-right">Broker Roundtrip</th>
-                    <th className="py-2.5 px-3 text-right">Fill Price</th>
-                    <th className="py-2.5 px-3 text-center">Broker Order ID</th>
-                    <th className="py-2.5 px-3 text-center">Action</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/60 font-mono">
-                  {latencyAudits.length === 0 ? (
-                    <tr>
-                      <td colSpan={12} className="py-8 text-center text-slate-500">
-                        No execution latency audits found for the selected filter and date range.
-                      </td>
-                    </tr>
-                  ) : (
-                    latencyAudits.map((a) => {
-                      const d = new Date(a.timestamp);
-                      const timeStr = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-                      const isExecuted = a.status === 'EXECUTED';
-                      const latencyColor = a.totalDurationMs < 1500
-                        ? 'text-emerald-400'
-                        : a.totalDurationMs < 3000
-                          ? 'text-amber-400'
-                          : 'text-rose-400';
-
-                      return (
-                        <tr key={a.id} className="hover:bg-slate-800/40 transition">
-                          <td className="py-2.5 px-3 text-slate-300">
-                            {timeStr} <span className="text-[10px] text-slate-500 font-sans">{a.date}</span>
-                          </td>
-                          <td className="py-2.5 px-3 font-bold text-white font-sans">
-                            {a.pair}
-                          </td>
-                          <td className="py-2.5 px-3 text-center">
-                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${a.side === 'BUY' ? 'bg-cyan-950 text-cyan-300 border border-cyan-800' : 'bg-rose-950 text-rose-300 border border-rose-800'}`}>
-                              {a.side}
-                            </span>
-                          </td>
-                          <td className="py-2.5 px-3 text-center">
-                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${isExecuted ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-slate-950 text-amber-300 border border-amber-800'}`}>
-                              {a.status}
-                            </span>
-                          </td>
-                          <td className={`py-2.5 px-3 text-right font-bold ${latencyColor}`}>
-                            {(a.totalDurationMs / 1000).toFixed(2)}s <span className="text-[10px] text-slate-500">({a.totalDurationMs}ms)</span>
-                          </td>
-                          <td className="py-2.5 px-3 text-right text-cyan-300">
-                            {a.scanDurationMs} ms
-                          </td>
-                          <td className="py-2.5 px-3 text-right text-blue-300">
-                            {a.analysisDurationMs} ms
-                          </td>
-                          <td className="py-2.5 px-3 text-right text-purple-300">
-                            {a.safetyGateDurationMs} ms
-                          </td>
-                          <td className="py-2.5 px-3 text-right text-rose-300">
-                            {a.brokerSubmissionDurationMs} ms
-                          </td>
-                          <td className="py-2.5 px-3 text-right text-slate-200">
-                            {a.entryPrice ? a.entryPrice.toFixed(5) : '—'}
-                          </td>
-                          <td className="py-2.5 px-3 text-center text-slate-400 text-[11px] truncate max-w-[120px]" title={a.brokerOrderId}>
-                            {a.brokerOrderId || '—'}
-                          </td>
-                          <td className="py-2.5 px-3 text-center">
-                            <button
-                              type="button"
-                              onClick={() => setSelectedAuditRecord(a)}
-                              className="px-2 py-1 rounded bg-slate-950 hover:bg-slate-800 text-[10px] text-cyan-400 border border-slate-800 transition"
-                            >
-                              Details
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {/* Details Modal */}
-          {selectedAuditRecord && (
-            <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4">
-              <div className="bg-slate-900 border border-slate-800 rounded-xl max-w-2xl w-full p-5 space-y-4 shadow-2xl">
-                <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-                  <div className="flex items-center gap-2">
-                    <Timer className="w-5 h-5 text-amber-400" />
-                    <h3 className="text-sm font-bold text-white uppercase">
-                      Execution Latency Telemetry Details
-                    </h3>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedAuditRecord(null)}
-                    className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white"
-                  >
-                    ✕
-                  </button>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3 text-xs bg-slate-950 p-3 rounded-lg border border-slate-800">
-                  <div><span className="text-slate-500">Pair:</span> <span className="font-bold text-white">{selectedAuditRecord.pair}</span></div>
-                  <div><span className="text-slate-500">Direction:</span> <span className="font-bold text-cyan-300">{selectedAuditRecord.side}</span></div>
-                  <div><span className="text-slate-500">Status:</span> <span className="font-bold text-emerald-400">{selectedAuditRecord.status}</span></div>
-                  <div><span className="text-slate-500">Total Latency:</span> <span className="font-bold text-amber-300">{selectedAuditRecord.totalDurationMs} ms ({(selectedAuditRecord.totalDurationMs / 1000).toFixed(3)}s)</span></div>
-                  <div><span className="text-slate-500">Broker Order ID:</span> <span className="font-mono text-slate-300">{selectedAuditRecord.brokerOrderId || 'N/A'}</span></div>
-                  <div><span className="text-slate-500">Execution Price:</span> <span className="font-mono text-slate-300">{selectedAuditRecord.entryPrice || 'N/A'}</span></div>
-                </div>
-
-                <div className="space-y-2">
-                  <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-                    Milestone Breakdown Timestamps & Latency:
-                  </div>
-                  <div className="space-y-1.5 text-xs font-mono bg-slate-950 p-3 rounded-lg border border-slate-800">
-                    <div className="flex justify-between py-1 border-b border-slate-900">
-                      <span className="text-cyan-400">1. Market Data & News Scan:</span>
-                      <span className="text-white font-bold">{selectedAuditRecord.scanDurationMs} ms</span>
-                    </div>
-                    <div className="flex justify-between py-1 border-b border-slate-900">
-                      <span className="text-blue-400">2. Technical & ML Prediction Analysis:</span>
-                      <span className="text-white font-bold">{selectedAuditRecord.analysisDurationMs} ms</span>
-                    </div>
-                    <div className="flex justify-between py-1 border-b border-slate-900">
-                      <span className="text-purple-400">3. Sizing & Safety Readiness Gates:</span>
-                      <span className="text-white font-bold">{selectedAuditRecord.safetyGateDurationMs} ms</span>
-                    </div>
-                    <div className="flex justify-between py-1 border-b border-slate-900">
-                      <span className="text-rose-400">4. Broker WebSocket Submission & Fill:</span>
-                      <span className="text-white font-bold">{selectedAuditRecord.brokerSubmissionDurationMs} ms</span>
-                    </div>
-                    <div className="flex justify-between py-1 text-amber-300 font-bold">
-                      <span>Total Time from Scan to Trade Executed:</span>
-                      <span>{selectedAuditRecord.totalDurationMs} ms</span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="space-y-1.5">
-                  <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-                    Raw Telemetry JSON:
-                  </div>
-                  <pre className="bg-slate-950 p-3 rounded-lg border border-slate-800 text-[10px] text-slate-300 overflow-x-auto max-h-40 font-mono">
-                    {JSON.stringify(selectedAuditRecord, null, 2)}
-                  </pre>
-                </div>
-
-                <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      void navigator.clipboard.writeText(JSON.stringify(selectedAuditRecord, null, 2));
-                    }}
-                    className="px-3.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold transition flex items-center gap-1.5"
-                  >
-                    <Copy className="w-3.5 h-3.5" />
-                    <span>Copy JSON</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedAuditRecord(null)}
-                    className="px-4 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold transition"
-                  >
-                    Close
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
+      ) : reportViewMode === 'DAY_OF_WEEK' ? (
+        <DayOfWeekPairPerformanceReport
+          report={report}
+          fromDate={fromDate}
+          toDate={toDate}
+          onSelectDatePreset={handleApplyPreset}
+        />
       ) : (
         <>
           {/* Top Level Summary Cards */}
@@ -1697,6 +1177,14 @@ export const AlertsPage: React.FC = () => {
           <span>Hover over cells for precise Win/Loss count and Net P&L</span>
         </div>
       </div>
+
+      {/* Detailed Day-of-Week Pair Profitability & Activation Strategy Section */}
+      <DayOfWeekPairPerformanceReport
+        report={report}
+        fromDate={fromDate}
+        toDate={toDate}
+        onSelectDatePreset={handleApplyPreset}
+      />
 
       {/* Pair-by-Pair Performance Breakdown Table */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">

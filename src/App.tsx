@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Header } from './components/Header';
-import { MarketHub } from './components/MarketHub';
+import { Dashboard } from './components/Dashboard';
 import { SignalsView } from './components/SignalsView';
 import { TradingHub } from './components/TradingHub';
 import { ShadowModeDashboard } from './components/ShadowModeDashboard';
@@ -14,7 +14,9 @@ import { TradingControlCenter } from './components/TradingControlCenter';
 import { HistoryPage } from './components/HistoryPage';
 import { DatabaseExplorerPage } from './components/DatabaseExplorerPage';
 import { AlertsPage } from './components/AlertsPage';
+import { PnLAccountingPage } from './components/PnLAccountingPage';
 import { SettingsHub } from './components/SettingsHub';
+import { MarketSessionsWidget } from './components/MarketSessionsWidget';
 import { GlobalAppShell } from './components/GlobalAppShell';
 import { SignalModal } from './components/SignalModal';
 import { DiagnosticsModal } from './components/DiagnosticsModal';
@@ -24,7 +26,7 @@ import { getForexSessionState, getIndianSessionState } from './markets/common/se
 import { BrokerType, TradingEnvironment, OrderRequest } from './brokers/types';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<string>('settings');
+  const [activeTab, setActiveTab] = useState<string>('market_watch');
   const [forexPairs, setForexPairs] = useState<any[]>([]);
   const [forexSessions, setForexSessions] = useState<ForexSessionState>(() => getForexSessionState(new Date()));
   const [indianUnderlyings, setIndianUnderlyings] = useState<any[]>([]);
@@ -310,7 +312,7 @@ export default function App() {
       }
     >
       {/* Fixed global shell content outlet: view components render here. */}
-      <main className="min-h-[calc(100vh-162px)] w-full px-4 sm:px-6 lg:px-8 py-5 space-y-4 bg-[#03070d] text-slate-100">
+      <main id="global_app_content" className="min-h-[calc(100vh-162px)] w-full space-y-4 bg-[#03070d] text-slate-100" style={{ paddingLeft: '10px', paddingRight: '10px', paddingTop: '10px', paddingBottom: '10px' }}>
         {loadingInitial ? (
           <div className="flex flex-col items-center justify-center min-h-[50vh] space-y-3 font-mono">
             <div className="w-10 h-10 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin"></div>
@@ -321,7 +323,7 @@ export default function App() {
           <>
             {/* Market Watch / scanners */}
             {activeTab === 'market_watch' && (
-              <MarketHub
+              <Dashboard
                 forexPairs={forexPairs}
                 indianUnderlyings={indianUnderlyings}
                 candlesMap={candlesMap}
@@ -330,6 +332,10 @@ export default function App() {
                 initialOptionSymbol={selectedOptionUnderlying}
                 environment={environment}
               />
+            )}
+
+            {activeTab === 'market_sessions' && (
+              <MarketSessionsWidget />
             )}
 
             {activeTab === 'signals' && (
@@ -376,12 +382,7 @@ export default function App() {
             )}
 
             {(activeTab === 'pnl' || activeTab === 'accounting') && (
-              <TradingControlCenter
-              initialSection="ALL_OVERVIEW"
-              onSelectSignalModal={(sig) => setSelectedSignal(sig)}
-              autoTradingStatus={autoTradingStatus}
-              onAutoTradingStatusChange={setAutoTradingStatus}
-            />
+              <PnLAccountingPage />
             )}
 
             {(activeTab === 'research' || activeTab === 'ml') && (

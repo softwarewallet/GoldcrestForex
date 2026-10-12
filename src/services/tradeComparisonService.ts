@@ -54,6 +54,42 @@ export interface HourlyPerformance {
   topPair: string | null;
 }
 
+export interface DayOfWeekPairEdge {
+  pair: string;
+  totalTrades: number;
+  winningTrades: number;
+  losingTrades: number;
+  winRate: number;
+  netPnL: number;
+  grossProfit: number;
+  grossLoss: number;
+  profitFactor: number;
+  avgWin: number;
+  avgLoss: number;
+  recommendation: 'ACTIVATE' | 'AVOID' | 'NEUTRAL';
+  edgeReason: string;
+}
+
+export interface DayOfWeekPerformance {
+  dayIndex: number;
+  dayName: string;
+  dayShort: string;
+  totalTrades: number;
+  winningTrades: number;
+  losingTrades: number;
+  winRate: number;
+  netPnL: number;
+  grossProfit: number;
+  grossLoss: number;
+  profitFactor: number;
+  pairs: DayOfWeekPairEdge[];
+  recommendedPairs: string[];
+  avoidPairs: string[];
+  neutralPairs: string[];
+  topPair: string | null;
+  worstPair: string | null;
+}
+
 export interface TradeComparisonReport {
   from: number;
   to: number;
@@ -70,6 +106,7 @@ export interface TradeComparisonReport {
   overallProfitFactor: number;
   pairBreakdown: PairPerformance[];
   hourlyBreakdown: HourlyPerformance[];
+  dayOfWeekBreakdown: DayOfWeekPerformance[];
   rawTrades: RawTradeRecord[];
   riskMetrics: {
     expectancyPerTrade: number;
@@ -548,6 +585,126 @@ export async function generateTradeComparisonReport(from: number, to: number): P
     };
   });
 
+  // Day of Week Performance Breakdown (Mon - Fri, plus Sun/Sat if any trades)
+  const DAYS_META = [
+    { index: 1, name: 'Monday', short: 'Mon' },
+    { index: 2, name: 'Tuesday', short: 'Tue' },
+    { index: 3, name: 'Wednesday', short: 'Wed' },
+    { index: 4, name: 'Thursday', short: 'Thu' },
+    { index: 5, name: 'Friday', short: 'Fri' },
+    { index: 0, name: 'Sunday', short: 'Sun' },
+    { index: 6, name: 'Saturday', short: 'Sat' }
+  ];
+
+  const dayOfWeekBreakdown: DayOfWeekPerformance[] = DAYS_META.map(dayMeta => {
+    const dayTrades = trades.filter(t => {
+      const d = new Date(t.timestamp);
+      return d.getDay() === dayMeta.index;
+    });
+
+    let wins = 0;
+    let losses = 0;
+    let grossProfit = 0;
+    let grossLoss = 0;
+    let netPnL = 0;
+
+    const pairMap = new Map<string, RawTradeRecord[]>();
+    for (const t of dayTrades) {
+      netPnL += t.pnl;
+      if (t.pnl > 0.0001) {
+        wins++;
+        grossProfit += t.pnl;
+      } else if (t.pnl < -0.0001) {
+        losses++;
+        grossLoss += Math.abs(t.pnl);
+      }
+      if (!pairMap.has(t.symbol)) pairMap.set(t.symbol, []);
+      pairMap.get(t.symbol)!.push(t);
+    }
+
+    const total = dayTrades.length;
+    const winRate = total > 0 ? (wins / total) * 100 : 0;
+    const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? 99.99 : 0;
+
+    const pairs: DayOfWeekPairEdge[] = Array.from(pairMap.entries()).map(([pair, pTrades]) => {
+      let pWins = 0;
+      let pLosses = 0;
+      let pGrossProfit = 0;
+      let pGrossLoss = 0;
+      let pNet = 0;
+
+      for (const pt of pTrades) {
+        pNet += pt.pnl;
+        if (pt.pnl > 0.0001) {
+          pWins++;
+          pGrossProfit += pt.pnl;
+        } else if (pt.pnl < -0.0001) {
+          pLosses++;
+          pGrossLoss += Math.abs(pt.pnl);
+        }
+      }
+
+      const pTotal = pTrades.length;
+      const pWinRate = pTotal > 0 ? (pWins / pTotal) * 100 : 0;
+      const pPF = pGrossLoss > 0 ? pGrossProfit / pGrossLoss : pGrossProfit > 0 ? 99.99 : 0;
+      const avgWin = pWins > 0 ? pGrossProfit / pWins : 0;
+      const avgLoss = pLosses > 0 ? pGrossLoss / pLosses : 0;
+
+      let recommendation: 'ACTIVATE' | 'AVOID' | 'NEUTRAL' = 'NEUTRAL';
+      let edgeReason = 'Balanced performance or low sample size';
+
+      if (pNet > 0 && pWinRate >= 50) {
+        recommendation = 'ACTIVATE';
+        edgeReason = `Strong profitable edge (+$${pNet.toFixed(2)}, ${pWinRate.toFixed(0)}% win rate across ${pTotal} trades)`;
+      } else if (pNet < 0 || (pTotal >= 2 && pWinRate < 40)) {
+        recommendation = 'AVOID';
+        edgeReason = `Underperforming or high drawdown (-$${Math.abs(pNet).toFixed(2)}, ${pWinRate.toFixed(0)}% win rate)`;
+      }
+
+      return {
+        pair,
+        totalTrades: pTotal,
+        winningTrades: pWins,
+        losingTrades: pLosses,
+        winRate: Math.round(pWinRate * 10) / 10,
+        netPnL: Math.round(pNet * 100) / 100,
+        grossProfit: Math.round(pGrossProfit * 100) / 100,
+        grossLoss: Math.round(pGrossLoss * 100) / 100,
+        profitFactor: Math.round(pPF * 100) / 100,
+        avgWin: Math.round(avgWin * 100) / 100,
+        avgLoss: Math.round(avgLoss * 100) / 100,
+        recommendation,
+        edgeReason
+      };
+    });
+
+    pairs.sort((a, b) => b.netPnL - a.netPnL);
+
+    const recommendedPairs = pairs.filter(p => p.recommendation === 'ACTIVATE').map(p => p.pair);
+    const avoidPairs = pairs.filter(p => p.recommendation === 'AVOID').map(p => p.pair);
+    const neutralPairs = pairs.filter(p => p.recommendation === 'NEUTRAL').map(p => p.pair);
+
+    return {
+      dayIndex: dayMeta.index,
+      dayName: dayMeta.name,
+      dayShort: dayMeta.short,
+      totalTrades: total,
+      winningTrades: wins,
+      losingTrades: losses,
+      winRate: Math.round(winRate * 10) / 10,
+      netPnL: Math.round(netPnL * 100) / 100,
+      grossProfit: Math.round(grossProfit * 100) / 100,
+      grossLoss: Math.round(grossLoss * 100) / 100,
+      profitFactor: Math.round(profitFactor * 100) / 100,
+      pairs,
+      recommendedPairs,
+      avoidPairs,
+      neutralPairs,
+      topPair: pairs.length > 0 && pairs[0].netPnL > 0 ? pairs[0].pair : null,
+      worstPair: pairs.length > 0 && pairs[pairs.length - 1].netPnL < 0 ? pairs[pairs.length - 1].pair : null
+    };
+  });
+
   const fromDate = new Date(from);
   const toDate = new Date(to);
   const padMonth = (m: number) => String(m).padStart(2, '0');
@@ -568,6 +725,7 @@ export async function generateTradeComparisonReport(from: number, to: number): P
     overallProfitFactor: totalGrossLoss > 0 ? Math.round((totalGrossProfit / totalGrossLoss) * 100) / 100 : totalGrossProfit > 0 ? 99.99 : 0,
     pairBreakdown,
     hourlyBreakdown,
+    dayOfWeekBreakdown,
     rawTrades: trades,
     riskMetrics: {
       expectancyPerTrade,

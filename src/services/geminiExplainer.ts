@@ -1,7 +1,23 @@
 import { GoogleGenAI } from '@google/genai';
 import { CompletePairAnalysisResponse } from '../markets/forex/types';
 
-const SYSTEM_INSTRUCTION = `You are the explanation layer of a quantitative Forex analysis system.
+const SYSTEM_INSTRUCTION = `You are an Advanced Quantitative Predictive Engine specializing in Multi-Timeframe Order Flow and Liquidity Analysis for Forex Major pairs. Your objective is to combine multi-source news sentiment, macro structure, and micro-execution parameters to output a hyper-optimized trading policy.
+
+### Input Data Extensions:
+1. macroStructure: { timeframe_1H_trend: "BULLISH" | "BEARISH" | "CHOPPY", key_1H_liquidity_pools: Array }
+2. marketVelocity: { atr_5M: float, current_session: "LONDON" | "NEW_YORK" | "TOKYO" | "GAP" }
+3. newsSentiment & systemSafetyCaps.
+
+### Profit Optimization & Filtering Mandates:
+1. Macro Alignment Filter:
+- Before checking the 5-Minute EMA, verify the timeframe_1H_trend.
+- You are strictly FORBIDDEN from issuing a BUY order if the 1H trend is BEARISH, and forbidden from issuing a SELL order if the 1H trend is BULLISH. If the macro trend is CHOPPY, scale down confidence instantly.
+2. Volatility-Based Target Scaling:
+- Instead of using fixed pip targets, dynamically scale your TP and SL using the incoming atr_5M variable.
+- Set your dynamic_stop_loss_pips to exactly 1.2x the current 5M ATR.
+- Set your dynamic_take_profit_pips to 2x the calculated Stop Loss to maintain a mathematically superior 1:2 Risk-to-Reward ratio, provided it does not hit a major 1H liquidity pool or structural barrier.
+3. Session Risk Filter:
+- If current_session matches "GAP" or "TOKYO", automatically apply a safety penalty to the confidence_score, keeping it below your 0.88 execution gate unless news sentiment is overwhelmingly one-sided (>0.95 absolute delta).
 
 Never invent market data.
 Never guarantee a market outcome.
@@ -41,13 +57,20 @@ export async function explainForexAnalysis(
 ): Promise<GeminiExplanationResult> {
   const apiKey = process.env.GEMINI_API_KEY;
 
-  if (!apiKey) {
-    // Graceful deterministic explanation when GEMINI_API_KEY is not configured
+  if (!apiKey || !apiKey.startsWith('AIza')) {
+    // Graceful deterministic explanation when valid GEMINI_API_KEY is not configured
     return generateDeterministicExplanation(analysis);
   }
 
   try {
-    const ai = new GoogleGenAI({ apiKey });
+    const ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build'
+        }
+      }
+    });
     const prompt = `Explain the following quantitative Forex analysis according to your instructions:
 
 ANALYSIS PAYLOAD:
@@ -65,8 +88,7 @@ ${JSON.stringify(analysis, null, 2)}
 
     const text = response.text || '';
     return parseExplanationIntoSections(analysis.pair, text);
-  } catch (err) {
-    console.warn('Gemini API call failed, falling back to deterministic quantitative explanation:', err);
+  } catch {
     return generateDeterministicExplanation(analysis);
   }
 }
@@ -135,23 +157,40 @@ function generateDeterministicExplanation(analysis: CompletePairAnalysisResponse
   const isNoTrade = analysis.signal.direction === 'NO_TRADE';
   const isBuy = analysis.signal.direction.includes('BUY');
   const isSell = analysis.signal.direction.includes('SELL');
+  const bs = analysis.bounceStrategy;
 
-  const marketSummary = `${analysis.pair} is currently trading at ${analysis.currentPrice.toFixed(5)} under a ${analysis.regime} regime in the ${analysis.session} session. The quantitative signal is ${analysis.signal.direction} with an aggregate score of ${analysis.signal.score}/100.`;
+  const marketSummary = `${analysis.pair} is currently trading at ${analysis.currentPrice.toFixed(5)} under a ${analysis.regime} regime in the ${analysis.session} session. The quantitative signal is ${analysis.signal.direction} (${bs?.setupState ?? analysis.signal.status}) with an aggregate score of ${analysis.signal.score}/100.`;
 
-  const trendExplanation = `The macro market structure displays a ${analysis.marketStructure.type} pattern in a ${analysis.marketStructure.phase} phase. Multi-timeframe trend alignment is evaluated as ${analysis.multiTimeframe.alignment} (${analysis.multiTimeframe.summary}).`;
+  const trendExplanation = bs?.trendReason
+    ? `Step 1 (Trend): ${bs.trendReason} ${bs.zoneReason ? `| Step 2 (Zone): ${bs.zoneReason}` : ''} | Alignment: ${analysis.multiTimeframe.alignment}.`
+    : `The macro market structure displays a ${analysis.marketStructure.type} pattern in a ${analysis.marketStructure.phase} phase. Multi-timeframe trend alignment is evaluated as ${analysis.multiTimeframe.alignment} (${analysis.multiTimeframe.summary}).`;
 
-  const supportingEvidence: string[] = [
-    `Price action printing ${analysis.marketStructure.type} on 15M execution candles.`,
-    analysis.indicators.rsi !== null ? `RSI is currently measured at ${analysis.indicators.rsi}.` : 'RSI baseline neutral.',
-    analysis.indicators.ema9 !== null && analysis.indicators.ema21 !== null
-      ? `EMA 9 (${analysis.indicators.ema9}) relative to EMA 21 (${analysis.indicators.ema21}) confirms ${isBuy ? 'bullish' : isSell ? 'bearish' : 'neutral'} moving average gradient.`
-      : 'Moving average alignment neutral.',
-    `Nearest significant Support at ${analysis.supportResistance.nearestSupport ?? 'N/A'} and Resistance at ${analysis.supportResistance.nearestResistance ?? 'N/A'}.`
-  ];
+  const supportingEvidence: string[] = [];
+  if (bs) {
+    supportingEvidence.push(`Step 1 (5M 50 EMA): ${bs.trendReason}`);
+    supportingEvidence.push(`Step 2 (Bounce Zone): ${bs.zoneReason}`);
+    supportingEvidence.push(`Step 3 (Rejection Trigger): ${bs.triggerReason}`);
+    if (bs.rejection?.hasRejection) {
+      supportingEvidence.push(`5M Rejection Candle Details: ${bs.rejection.summary} (wick: ${bs.rejection.wickPips}p, ratio: ${bs.rejection.wickRatio}x body).`);
+    }
+  } else {
+    supportingEvidence.push(`Price action printing ${analysis.marketStructure.type} on execution candles.`);
+  }
+
+  if (analysis.indicators.rsi !== null) {
+    supportingEvidence.push(`RSI is measured at ${analysis.indicators.rsi}.`);
+  }
+  supportingEvidence.push(`Nearest significant Support at ${analysis.supportResistance.nearestSupport ?? 'N/A'} and Resistance at ${analysis.supportResistance.nearestResistance ?? 'N/A'}.`);
 
   const conflictingEvidence: string[] = [];
   if (analysis.warnings.length > 0) {
     conflictingEvidence.push(...analysis.warnings);
+  }
+  if (bs && bs.setupState === 'WAITING_FOR_PULLBACK') {
+    conflictingEvidence.push(`Price has not yet completed its pullback into key ${bs.keyLevelType} level (${bs.distanceToLevelPips} pips away).`);
+  }
+  if (bs && bs.setupState === 'TESTING_ZONE' && !bs.rejection.hasRejection) {
+    conflictingEvidence.push(`Price is currently testing the ${bs.keyLevelType} zone, but the 5M candle has not yet closed with a confirmed rejection wick.`);
   }
   if (analysis.multiTimeframe.alignment === 'CONFLICTING') {
     conflictingEvidence.push('Higher timeframes conflict with lower timeframe execution trend.');
@@ -162,7 +201,7 @@ function generateDeterministicExplanation(analysis: CompletePairAnalysisResponse
 
   let tradePlanExplanation = 'No active trade plan is established due to filtering conditions.';
   if (analysis.tradePlan) {
-    tradePlanExplanation = `Entry zone defined between ${analysis.tradePlan.entryMin} and ${analysis.tradePlan.entryMax}. Stop-Loss set at ${analysis.tradePlan.stopLoss} (${analysis.tradePlan.stopLossReason}). Target 1 at ${analysis.tradePlan.takeProfit1} provides a ${analysis.tradePlan.riskReward}:1 Risk/Reward ratio.`;
+    tradePlanExplanation = `Entry zone defined between ${analysis.tradePlan.entryMin} and ${analysis.tradePlan.entryMax} (Preferred: ${((analysis.tradePlan.entryMin + analysis.tradePlan.entryMax) / 2).toFixed(5)}). Stop-Loss set at ${analysis.tradePlan.stopLoss} (${analysis.tradePlan.stopLossReason}). Target 1 at ${analysis.tradePlan.takeProfit1} provides a ${analysis.tradePlan.riskReward}:1 Risk/Reward ratio.`;
   }
 
   const mainRisks: string[] = [
@@ -172,8 +211,8 @@ function generateDeterministicExplanation(analysis: CompletePairAnalysisResponse
   ];
 
   const invalidationConditions: string[] = [
-    isBuy ? `Hourly candle close below ${analysis.tradePlan?.stopLoss ?? analysis.supportResistance.nearestSupport}.` : `Hourly candle close above ${analysis.tradePlan?.stopLoss ?? analysis.supportResistance.nearestResistance}.`,
-    `Trend alignment deterioration across 1H and 4H timeframes.`,
+    isBuy ? `5M candle close below rejection wick low at ${analysis.tradePlan?.stopLoss ?? analysis.supportResistance.nearestSupport}.` : `5M candle close above rejection wick high at ${analysis.tradePlan?.stopLoss ?? analysis.supportResistance.nearestResistance}.`,
+    bs?.ema50 ? `Price crossing opposite side of 5M 50 EMA (${bs.ema50}).` : `Trend alignment deterioration across 1H and 4H timeframes.`,
     `High-impact central bank announcement within 20 minutes.`
   ];
 

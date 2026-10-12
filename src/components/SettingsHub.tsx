@@ -202,9 +202,72 @@ export const SettingsHub: React.FC<SettingsHubProps> = ({
   onRefreshGlobal
 }) => {
   const [activeSettingsSection, setActiveSettingsSection] = useState<'BROKER_CONFIG' | 'LIVE_LOG' | 'STRATEGY_PLANNING' | 'MARTINGALE'>('BROKER_CONFIG');
+  const [phase44Enabled, setPhase44Enabled] = useState<boolean>(true);
+  const [savingPhase44, setSavingPhase44] = useState<boolean>(false);
+  const [phase44Msg, setPhase44Msg] = useState<string>('');
+
+  useEffect(() => {
+    fetch('/api/config')
+      .then(res => res.json())
+      .then(data => {
+        if (data && typeof data.phase44HardMaxEnabled === 'boolean') {
+          setPhase44Enabled(data.phase44HardMaxEnabled);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleTogglePhase44 = async () => {
+    const nextVal = !phase44Enabled;
+    setSavingPhase44(true);
+    setPhase44Msg('');
+    try {
+      const res = await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phase44HardMaxEnabled: nextVal })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to update Phase 44 setting.');
+      setPhase44Enabled(nextVal);
+      setPhase44Msg(`Phase 44 Hard Maximum is now ${nextVal ? 'ENABLED (Max 5.0 Pips)' : 'DISABLED (Unconstrained)'}.`);
+      onRefreshGlobal?.();
+      setTimeout(() => setPhase44Msg(''), 4000);
+    } catch (err: any) {
+      setPhase44Msg(err.message || 'Failed to update Phase 44 setting.');
+    } finally {
+      setSavingPhase44(false);
+    }
+  };
 
   return (
     <div id="unified_settings_hub" className="space-y-4">
+      {/* Global Phase 44 Hard Maximum Control Card */}
+      <div className="bg-slate-900 border border-emerald-900/60 rounded-xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 font-mono shadow-md">
+        <div>
+          <div className="flex items-center gap-2">
+            <Sliders className="w-4 h-4 text-emerald-400" />
+            <div className="text-xs font-bold text-white uppercase tracking-wider">Phase 44 Hard Maximum (Take Profit Cap)</div>
+          </div>
+          <div className="text-[11px] text-slate-400 mt-1 max-w-2xl">
+            When enabled, Forex Take Profit targets are strictly capped at 5.0 pips per Phase 44 safety rules. When disabled, take profit targets are unconstrained up to 100 pips.
+          </div>
+          {phase44Msg && <div className="text-[11px] text-cyan-300 mt-1">{phase44Msg}</div>}
+        </div>
+        <button
+          type="button"
+          disabled={savingPhase44}
+          onClick={handleTogglePhase44}
+          className={`shrink-0 px-4 py-2 rounded-lg text-xs font-bold border transition ${
+            phase44Enabled
+              ? 'bg-emerald-600 border-emerald-500 text-white hover:bg-emerald-500'
+              : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700'
+          }`}
+        >
+          {savingPhase44 ? 'SAVING...' : phase44Enabled ? 'ENABLED (MAX 5.0 PIPS)' : 'DISABLED (UNCONSTRAINED)'}
+        </button>
+      </div>
+
       {/* Top Settings Sub-Navigation Tabs */}
       <div className="flex items-center justify-between bg-slate-900 border border-slate-800 rounded-xl p-2 px-3 shadow-md">
         <div className="flex items-center space-x-1.5 overflow-x-auto text-xs font-mono">
