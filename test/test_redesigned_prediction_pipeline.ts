@@ -7,6 +7,7 @@ import { CalibrationEngine } from '../src/ml/prediction/calibrationEngine';
 import { WalkForwardEngine } from '../src/ml/prediction/walkForwardEngine';
 import { PredictionDecisionGate } from '../src/ml/prediction/predictionDecisionGate';
 import { PredictionStorage } from '../src/ml/prediction/predictionStorage';
+import { executeRun } from '../src/database/db';
 
 async function runTests() {
   console.log('============================================================');
@@ -150,6 +151,15 @@ async function runTests() {
 
   // 16. test_walk_forward_split
   console.log('16. test_walk_forward_split...');
+  for (let i = 0; i < 250; i++) {
+    const candleTs = now - (250 - i) * 86400_000;
+    const basePrice = 1.0800 + Math.sin(i / 10) * 0.0100;
+    await executeRun(
+      `INSERT OR IGNORE INTO candles (id, symbol, timeframe, timestamp, open, high, low, close, volume)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [`wf-${i}-${now}`, 'EUR/USD', 'Daily', candleTs, basePrice, basePrice + 0.0050, basePrice - 0.0050, basePrice + 0.0010, 1000]
+    );
+  }
   const wfReport = await WalkForwardEngine.runWalkForward('EUR/USD', 180, 50, 20);
   assert(wfReport.validationWindows > 0);
   console.log(`  -> PASS: Walk-forward splits created (${wfReport.validationWindows} chronological windows).`);
