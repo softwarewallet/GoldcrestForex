@@ -17,12 +17,12 @@ export const ConnectionHealthWidget: React.FC = () => {
       {connections.length === 0 ? (
         <p className="text-gray-400">No active connections</p>
       ) : (
-        connections.map(([id, meta]) => (
-          <div key={id} className="mb-2 text-sm border-b border-gray-700 pb-1">
-            <p className="font-mono text-xs">{id.slice(0, 15)}...</p>
-            <p>Duration: {Math.round((Date.now() - meta.connectionTime) / 1000)}s</p>
-            <p>Retries: {meta.retryCount}</p>
-            <p>Latency: {meta.pingLatency}ms</p>
+        connections.map((socket) => (
+          <div key={socket.id} className="mb-2 text-sm border-b border-gray-700 pb-1">
+            <p className="font-mono text-xs">{socket.id.slice(0, 15)}...</p>
+            <p>Duration: {Math.round((Date.now() - socket.connectionTime) / 1000)}s</p>
+            <p>Retries: {socket.retryCount}</p>
+            <p>Latency: {socket.pingLatency}ms</p>
           </div>
         ))
       )}
