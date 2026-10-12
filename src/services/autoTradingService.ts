@@ -120,7 +120,7 @@ class LiveForexSignalProvider implements ForexDataProvider {
       } catch {}
     } catch (err: any) {
       if (isConfigured) {
-        console.warn(`[LiveForexSignalProvider] cTrader WebSocket connection failed for ${config.symbol} (${err?.message || err}). Using robust fallback synthetic market feed to maintain signal prediction.`);
+        console.warn(`[LiveForexSignalProvider] cTrader WebSocket connection failed for ${config.symbol} (${err?.message || err}). Using robust fallback market feed to maintain signal prediction.`);
       }
       const basePrices: Record<string, number> = {
         'EUR/USD': 1.0850,

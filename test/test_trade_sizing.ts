@@ -152,19 +152,19 @@ assert.equal(normalizePriceToInstrumentDigits(1.1239, 5), 1.1239);
 assert.equal(normalizePriceToInstrumentDigits(210.70722, 3), 210.707);
 
 // Configurable Forex pip-margin regression tests.
-const gbpUsdBuyTargets = calculateForexPipTargets('BUY', 1.234, 0.0001, 20, 40);
+const gbpUsdBuyTargets = calculateForexPipTargets('BUY', 1.234, 0.0001, 20, 40, false);
 assert.equal(gbpUsdBuyTargets.stopLoss, 1.232);
 assert.equal(gbpUsdBuyTargets.takeProfit, 1.238);
 
-const gbpUsdSellTargets = calculateForexPipTargets('SELL', 1.234, 0.0001, 20, 40);
+const gbpUsdSellTargets = calculateForexPipTargets('SELL', 1.234, 0.0001, 20, 40, false);
 assert.equal(gbpUsdSellTargets.stopLoss, 1.236);
 assert.equal(gbpUsdSellTargets.takeProfit, 1.23);
 
-const usdJpyBuyTargets = calculateForexPipTargets('BUY', 157.650, 0.01, 20, 40);
+const usdJpyBuyTargets = calculateForexPipTargets('BUY', 157.650, 0.01, 20, 40, false);
 assert.equal(usdJpyBuyTargets.stopLoss, 157.45);
 assert.equal(usdJpyBuyTargets.takeProfit, 158.05);
 
-const usdJpySellTargets = calculateForexPipTargets('SELL', 157.650, 0.01, 20, 40);
+const usdJpySellTargets = calculateForexPipTargets('SELL', 157.650, 0.01, 20, 40, false);
 assert.equal(usdJpySellTargets.stopLoss, 157.85);
 assert.equal(usdJpySellTargets.takeProfit, 157.25);
 
