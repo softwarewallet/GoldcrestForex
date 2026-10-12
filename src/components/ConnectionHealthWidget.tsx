@@ -5,8 +5,13 @@ export const ConnectionHealthWidget: React.FC = () => {
   const [connections, setConnections] = useState<any[]>([]);
 
   useEffect(() => {
+    console.log('webSocketManager:', webSocketManager);
     const interval = setInterval(() => {
-      setConnections(webSocketManager.getAllSocketInfo());
+      try {
+        setConnections(webSocketManager.getAllSocketInfo());
+      } catch (e) {
+        console.error('Error calling getAllSocketInfo:', e);
+      }
     }, 1000);
     return () => clearInterval(interval);
   }, []);
