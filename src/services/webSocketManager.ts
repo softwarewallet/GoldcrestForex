@@ -61,7 +61,14 @@ class WebSocketManager {
     const connectionPromise = (async () => {
       try {
         const ws = await connectFn();
+        ws.on('close', () => {
+          this.stopHeartbeat(key);
+          this.handleReconnection(key, connectFn);
+        });
+        
         ws.on('message', (data: any) => {
+          const meta = this.activeSockets.get(keyStr);
+          if (meta) meta.lastHeartbeat = Date.now();
           try {
             const message = JSON.parse(data.toString());
             if (message.clientMsgId) {
@@ -82,6 +89,7 @@ class WebSocketManager {
           pendingRequests: new Map(),
           lastHeartbeat: Date.now(),
         });
+        this.startHeartbeat(key);
         return ws;
       } finally {
         this.pendingConnections.delete(keyStr);
@@ -137,7 +145,57 @@ class WebSocketManager {
     }
   }
 
+  private heartbeatIntervals: Map<string, NodeJS.Timeout> = new Map();
+
+  private startHeartbeat(key: ConnectionKey) {
+    const keyStr = serializeKey(key);
+    this.stopHeartbeat(key);
+    
+    this.heartbeatIntervals.set(keyStr, setInterval(() => {
+      const meta = this.activeSockets.get(keyStr);
+      if (!meta || meta.ws.readyState !== WebSocket.OPEN) return;
+
+      // cTrader Heartbeat is usually a simple ping/pong or a heartbeat message
+      // Assuming it needs to be sent explicitly based on requirements.
+      // For now, update state check.
+      if (Date.now() - meta.lastHeartbeat > 30000) {
+        meta.state = 'DEGRADED';
+        this.close(key);
+      }
+    }, 10000));
+  }
+
+  private stopHeartbeat(key: ConnectionKey) {
+    const keyStr = serializeKey(key);
+    if (this.heartbeatIntervals.has(keyStr)) {
+      clearInterval(this.heartbeatIntervals.get(keyStr)!);
+      this.heartbeatIntervals.delete(keyStr);
+    }
+  }
+
+  private async handleReconnection(key: ConnectionKey, connectFn: () => Promise<WebSocket>) {
+    const keyStr = serializeKey(key);
+    const meta = this.activeSockets.get(keyStr);
+    
+    // Increment retry count, apply exponential backoff
+    if (meta && meta.retryCount < 5) {
+        meta.retryCount++;
+        meta.state = 'RECONNECTING';
+        
+        const delay = Math.min(1000 * Math.pow(2, meta.retryCount), 30000);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        
+        // Retry
+        this.activeSockets.delete(keyStr); 
+        this.getConnection(key, connectFn);
+    } else {
+        this.activeSockets.delete(keyStr);
+        console.error('Max reconnection retries reached for', keyStr);
+    }
+  }
+
   close(key: ConnectionKey) {
+    this.stopHeartbeat(key);
     const keyStr = serializeKey(key);
     const meta = this.activeSockets.get(keyStr);
     if (meta) {
