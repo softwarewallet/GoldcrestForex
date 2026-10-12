@@ -138,7 +138,8 @@ export async function fetchLiveCTraderAccounts(
             },
             agent: new https.Agent({ rejectUnauthorized: false })
           });
-          webSocketManager.register(wsId, ws, attempt - 1);
+          // TODO: Refactor connection logic
+          // webSocketManager.register(wsId, ws, attempt - 1);
           
           const timer = setTimeout(() => {
             webSocketManager.close(wsId);
@@ -253,7 +254,7 @@ export async function fetchLiveCTraderAccountDetails(
       agent: new https.Agent({ rejectUnauthorized: false })
     });
     const wsId = `ct_det_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    webSocketManager.register(wsId, ws);
+    // webSocketManager.register(wsId, ws);
 
     const timer = setTimeout(() => {
       webSocketManager.close(wsId);
