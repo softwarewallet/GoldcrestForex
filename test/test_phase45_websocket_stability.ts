@@ -9,8 +9,11 @@ async function testSingleFlight() {
   const connectFn = async () => {
     calls++;
     await new Promise(r => setTimeout(r, 100)); // Simulate delay
-    // Mock WebSocket with dummy methods needed by WebSocketManager
-    return { readyState: WebSocket.OPEN, close: () => {} } as any; 
+    return { 
+      readyState: WebSocket.OPEN, 
+      close: () => {}, 
+      on: () => {} 
+    } as any; 
   };
 
   const results = await Promise.all([

@@ -61,6 +61,17 @@ class WebSocketManager {
     const connectionPromise = (async () => {
       try {
         const ws = await connectFn();
+        ws.on('message', (data: any) => {
+          try {
+            const message = JSON.parse(data.toString());
+            if (message.clientMsgId) {
+              this.resolveRequest(key, message.clientMsgId, message);
+            }
+          } catch (e) {
+            console.error('Failed to parse message', e);
+          }
+        });
+        
         this.activeSockets.set(keyStr, {
           key,
           ws,
@@ -79,6 +90,25 @@ class WebSocketManager {
 
     this.pendingConnections.set(keyStr, connectionPromise);
     return connectionPromise;
+  }
+
+  async sendRequest(key: ConnectionKey, payload: any, messageType: number): Promise<any> {
+    const keyStr = serializeKey(key);
+    const meta = this.activeSockets.get(keyStr);
+    if (!meta || meta.ws.readyState !== WebSocket.OPEN) {
+      throw new Error('Socket not ready');
+    }
+
+    const requestId = Math.random().toString(36).slice(2);
+    return new Promise((resolve, reject) => {
+      this.registerRequest(key, requestId, resolve, reject, 20000);
+      
+      meta.ws.send(JSON.stringify({
+        payload,
+        clientMsgId: requestId,
+        payloadType: messageType
+      }));
+    });
   }
 
   registerRequest(key: ConnectionKey, requestId: string, resolve: (v: any) => void, reject: (r: any) => void, timeoutMs: number) {

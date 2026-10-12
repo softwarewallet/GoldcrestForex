@@ -636,7 +636,6 @@ function sendAndAwait(
   });
 }
 
-const persistentConnections = new Map<number, { ws: WebSocket, wsId: string, lastUsed: number }>();
 
 async function withAuthenticatedAccount<T>(
   accountId: number,
@@ -644,103 +643,26 @@ async function withAuthenticatedAccount<T>(
   clientSecret: string,
   accessToken: string,
   isLive: boolean,
-  fn: (ws: WebSocket) => Promise<T>,
-  persistent: boolean = false,
-  stableWsId?: string
+  fn: (ws: WebSocket) => Promise<T>
 ): Promise<T> {
-  // Route account-scoped reads through the same cTrader environment that
-  // authenticated the selected account.
   const hosts = getCTraderRequestHosts(isLive);
-  const MAX_RETRIES = 3;
-  const TIMEOUT_MS = 20000;
+  const key: ConnectionKey = { broker: 'cTrader', isLive, endpoint: hosts[0], accountId };
 
-  let lastError: any = null;
+  const ws = await webSocketManager.getConnection(key, async () => {
+    const ws = new WebSocket(key.endpoint, { headers: { 'User-Agent': 'Goldcrest-Trading-Bot/1.3.0' } });
+    await new Promise<void>((resolve, reject) => {
+      ws.once('open', resolve);
+      ws.once('error', reject);
+      setTimeout(() => reject(new Error('Timeout')), 10000);
+    });
+    
+    // Auth
+    await sendAndAwait(ws, MSG_APP_AUTH_REQ, { clientId, clientSecret }, MSG_APP_AUTH_RES);
+    await sendAndAwait(ws, MSG_ACC_AUTH_REQ, { ctidTraderAccountId: accountId, accessToken }, MSG_ACC_AUTH_RES);
+    return ws;
+  });
 
-  if (persistent && persistentConnections.has(accountId)) {
-    const cached = persistentConnections.get(accountId)!;
-    try {
-      if (cached.ws.readyState === WebSocket.OPEN) {
-        return await fn(cached.ws);
-      } else {
-        persistentConnections.delete(accountId);
-      }
-    } catch (e) {
-      persistentConnections.delete(accountId);
-    }
-  }
-
-  for (const host of hosts) {
-    const wsId = stableWsId || `ctrader_${accountId}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      let ws: WebSocket | null = null;
-      try {
-        ws = new WebSocket(host, {
-          headers: {
-            'User-Agent': 'Goldcrest-Trading-Bot/1.3.0'
-          },
-          agent: new https.Agent({ rejectUnauthorized: false })
-        });
-        webSocketManager.register(wsId, ws, attempt - 1);
-        const currentWs = ws;
-        const connected = new Promise<void>((resolve, reject) => {
-          const timer = setTimeout(() => {
-            try { currentWs.close(); } catch {}
-            reject(new Error(`cTrader market-data connection timeout on ${host}`));
-          }, TIMEOUT_MS);
-          currentWs.on('open', () => {
-            clearTimeout(timer);
-            resolve();
-          });
-          currentWs.on('error', (err: any) => {
-            clearTimeout(timer);
-            reject(err || new Error(`cTrader market-data WebSocket error on ${host}`));
-          });
-        });
-
-        await connected;
-        await sendAndAwait(currentWs, MSG_APP_AUTH_REQ, { clientId, clientSecret }, MSG_APP_AUTH_RES);
-        await sendAndAwait(currentWs, MSG_ACC_AUTH_REQ, { ctidTraderAccountId: accountId, accessToken }, MSG_ACC_AUTH_RES);
-        return await fn(currentWs);
-      } catch (err: any) {
-        lastError = err;
-        const msg = String(err?.message || '');
-        const isTransient =
-          msg.includes('connection timeout') ||
-          msg.includes('request timeout') ||
-          msg.includes('timeout') ||
-          msg.includes('WebSocket error') ||
-          msg.includes('ECONNRESET') ||
-          msg.includes('ETIMEDOUT') ||
-          msg.includes('socket');
-
-        if (isTransient && attempt < MAX_RETRIES) {
-          const backoff = Math.min(2000 * Math.pow(2, attempt - 1), 10000);
-          console.warn(`[cTrader] Market-data WebSocket connection to ${host} failed (${msg}). Automatically retrying and re-establishing connection (attempt ${attempt + 1}/${MAX_RETRIES}) in ${Math.round(backoff)}ms...`);
-          await new Promise(r => setTimeout(r, backoff));
-          continue;
-        }
-
-        if (msg.includes('CANT_ROUTE_REQUEST') || msg.includes('Cannot route request')) {
-          break; // Try next host
-        }
-
-        if (!isTransient) {
-          break; // Stop on non-transient fatal errors
-        }
-      } finally {
-        if (!persistent) {
-          webSocketManager.close(wsId);
-        } else {
-          // If persistent, add/update the cache
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            persistentConnections.set(accountId, { ws, wsId, lastUsed: Date.now() });
-          }
-        }
-      }
-    }
-  }
-
-  throw lastError || new Error('cTrader API: failed to authenticate account on available cTrader endpoints.');
+  return await fn(ws);
 }
 
 export interface CTraderExecutionActionResult {
