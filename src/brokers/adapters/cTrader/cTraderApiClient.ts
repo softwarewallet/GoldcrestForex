@@ -3,7 +3,7 @@ import https from 'node:https';
 import { BrokerAccountInfo, TradingEnvironment } from '../../types';
 import { getCTraderApiMode } from '../../../services/configService';
 import { recordTradeRequest, recordTradeResult } from '../../../services/tradeAuditLog';
-import { webSocketManager } from '../../../services/webSocketManager';
+import { webSocketManager, ConnectionKey } from '../../../services/webSocketManager';
 
 export interface CTraderRawAccount {
   ctidTraderAccountId: number;
@@ -1214,7 +1214,7 @@ export async function fetchLiveCTraderQuote(
         }
       }));
     });
-  }, true, wsId);
+  });
 }
 
 export async function fetchCTraderTrendbars(

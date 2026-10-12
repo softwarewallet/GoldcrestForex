@@ -1,4 +1,6 @@
 
+import WebSocket from 'ws';
+
 type WebSocketHandler = WebSocket;
 
 export type ConnectionState = 
@@ -65,16 +67,16 @@ class WebSocketManager {
     const connectionPromise = (async () => {
       try {
         const ws = await connectFn();
-        ws.addEventListener('close', () => {
+        ws.on('close', () => {
           this.stopHeartbeat(key);
           this.handleReconnection(key, connectFn);
         });
         
-        ws.addEventListener('message', (event: MessageEvent) => {
+        ws.on('message', (data: any) => {
           const meta = this.activeSockets.get(keyStr);
           if (meta) meta.lastHeartbeat = Date.now();
           try {
-            const message = JSON.parse(event.data.toString());
+            const message = JSON.parse(data.toString());
             if (message.clientMsgId) {
               this.resolveRequest(key, message.clientMsgId, message);
             }
@@ -198,9 +200,17 @@ class WebSocketManager {
     }
   }
 
-  close(key: ConnectionKey) {
-    this.stopHeartbeat(key);
-    const keyStr = serializeKey(key);
+  close(keyOrId: ConnectionKey | string) {
+    const keyStr = typeof keyOrId === 'string' ? keyOrId : serializeKey(keyOrId);
+    if (typeof keyOrId !== 'string') {
+      this.stopHeartbeat(keyOrId);
+    } else {
+      for (const [k, meta] of this.activeSockets.entries()) {
+        if (k === keyOrId) {
+          this.stopHeartbeat(meta.key);
+        }
+      }
+    }
     const meta = this.activeSockets.get(keyStr);
     if (meta) {
       meta.pendingRequests.forEach(req => {
