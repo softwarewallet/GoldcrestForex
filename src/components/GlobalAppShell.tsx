@@ -55,6 +55,7 @@ const nav: NavEntry[] = [
   { id: 'history', label: 'History', icon: HistoryIcon },
   { id: 'pnl', label: 'PnL / Accounting', icon: DollarSign },
   { id: 'database', label: 'Database', icon: Database },
+  { id: 'connection_monitor', label: 'Connection Monitor', icon: Activity },
   { id: 'alerts', label: 'Analytics & Charts', icon: BarChart2 },
   { id: 'settings', label: 'Settings', icon: Settings }
 ];

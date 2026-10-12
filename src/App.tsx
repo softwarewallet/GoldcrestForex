@@ -13,6 +13,7 @@ import { TradingOperationsDashboard } from './components/TradingOperationsDashbo
 import { TradingControlCenter } from './components/TradingControlCenter';
 import { HistoryPage } from './components/HistoryPage';
 import { DatabaseExplorerPage } from './components/DatabaseExplorerPage';
+import { ConnectionMonitorPage } from './components/ConnectionMonitorPage';
 import { AlertsPage } from './components/AlertsPage';
 import { PnLAccountingPage } from './components/PnLAccountingPage';
 import { SettingsHub } from './components/SettingsHub';
@@ -409,6 +410,10 @@ export default function App() {
 
             {activeTab === 'database' && (
               <DatabaseExplorerPage />
+            )}
+
+            {activeTab === 'connection_monitor' && (
+              <ConnectionMonitorPage />
             )}
 
             {(activeTab === 'settings' || activeTab === 'governance') && (

@@ -44,6 +44,10 @@ class WebSocketManager {
   private activeSockets: Map<string, SocketMetadata> = new Map();
   private pendingConnections: Map<string, Promise<WebSocket>> = new Map();
 
+  constructor() {
+    console.log('WebSocketManager initialized');
+  }
+
   async getConnection(key: ConnectionKey, connectFn: () => Promise<WebSocket>): Promise<WebSocket> {
     const keyStr = serializeKey(key);
     
@@ -61,16 +65,16 @@ class WebSocketManager {
     const connectionPromise = (async () => {
       try {
         const ws = await connectFn();
-        ws.on('close', () => {
+        ws.addEventListener('close', () => {
           this.stopHeartbeat(key);
           this.handleReconnection(key, connectFn);
         });
         
-        ws.on('message', (data: any) => {
+        ws.addEventListener('message', (event: MessageEvent) => {
           const meta = this.activeSockets.get(keyStr);
           if (meta) meta.lastHeartbeat = Date.now();
           try {
-            const message = JSON.parse(data.toString());
+            const message = JSON.parse(event.data.toString());
             if (message.clientMsgId) {
               this.resolveRequest(key, message.clientMsgId, message);
             }
@@ -208,7 +212,13 @@ class WebSocketManager {
     }
   }
 
-  getAllSocketInfo() {
+  getAllSocketInfo(): {
+    id: string;
+    state: ConnectionState;
+    connectionTime: number;
+    retryCount: number;
+    pingLatency: number;
+  }[] {
     return Array.from(this.activeSockets.entries()).map(([id, meta]) => ({
       id,
       state: meta.state,

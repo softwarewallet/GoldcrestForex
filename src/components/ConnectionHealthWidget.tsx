@@ -5,14 +5,20 @@ export const ConnectionHealthWidget: React.FC = () => {
   const [connections, setConnections] = useState<any[]>([]);
 
   useEffect(() => {
-    console.log('webSocketManager:', webSocketManager);
-    const interval = setInterval(() => {
-      try {
-        setConnections(webSocketManager.getAllSocketInfo());
-      } catch (e) {
-        console.error('Error calling getAllSocketInfo:', e);
+    const update = () => {
+      if (typeof webSocketManager?.getAllSocketInfo === 'function') {
+        try {
+          setConnections(webSocketManager.getAllSocketInfo());
+        } catch (e) {
+          console.error('Error in ConnectionHealthWidget update:', e);
+        }
+      } else {
+        console.error('webSocketManager.getAllSocketInfo is not a function. Manager:', webSocketManager);
       }
-    }, 1000);
+    };
+    
+    update();
+    const interval = setInterval(update, 1000);
     return () => clearInterval(interval);
   }, []);
 
