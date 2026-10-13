@@ -1,7 +1,7 @@
 import { CTraderBrokerAdapter, CTraderConfig } from './CTraderBrokerAdapter';
 import { NormalizedOrder, OrderRequest, TradingEnvironment } from '../../types';
 import { BrokerError } from '../../errors';
-import { getSystemConfig } from '../../../services/configService';
+import { getCTraderApiMode, getSystemConfig } from '../../../services/configService';
 import { normalizePriceToInstrumentDigits } from '../../safety/TradeSizing';
 
 export class CTraderLiveAdapter extends CTraderBrokerAdapter {
@@ -9,30 +9,37 @@ export class CTraderLiveAdapter extends CTraderBrokerAdapter {
   readonly isLive: boolean = true;
 
   constructor(customConfig?: Partial<CTraderConfig>) {
+    const isDemo = getCTraderApiMode() === 'DEMO';
     const config: CTraderConfig = {
-      clientId: customConfig?.clientId ?? process.env.CTRADER_LIVE_CLIENT_ID,
-      clientSecret: customConfig?.clientSecret ?? process.env.CTRADER_LIVE_CLIENT_SECRET,
-      accessToken: customConfig?.accessToken ?? process.env.CTRADER_LIVE_ACCESS_TOKEN,
-      accountId: customConfig?.accountId ?? process.env.CTRADER_LIVE_ACCOUNT_ID,
-      environment: 'LIVE',
-      apiHost: customConfig?.apiHost ?? process.env.CTRADER_LIVE_API_HOST ?? 'https://live.ctraderapi.com'
+      clientId: customConfig?.clientId ?? (isDemo ? process.env.CTRADER_DEMO_CLIENT_ID : process.env.CTRADER_LIVE_CLIENT_ID),
+      clientSecret: customConfig?.clientSecret ?? (isDemo ? process.env.CTRADER_DEMO_CLIENT_SECRET : process.env.CTRADER_LIVE_CLIENT_SECRET),
+      accessToken: customConfig?.accessToken ?? (isDemo ? process.env.CTRADER_DEMO_ACCESS_TOKEN : process.env.CTRADER_LIVE_ACCESS_TOKEN),
+      accountId: customConfig?.accountId ?? (isDemo ? process.env.CTRADER_DEMO_ACCOUNT_ID : process.env.CTRADER_LIVE_ACCOUNT_ID),
+      environment: isDemo ? 'DEMO' : 'LIVE',
+      apiHost: customConfig?.apiHost ?? (isDemo ? (process.env.CTRADER_DEMO_API_HOST ?? 'https://demo.ctraderapi.com') : (process.env.CTRADER_LIVE_API_HOST ?? 'https://live.ctraderapi.com'))
     };
     super(config);
   }
 
   override syncConfig(): void {
-    if (!this.config.clientId && process.env.CTRADER_LIVE_CLIENT_ID) {
-      this.config.clientId = process.env.CTRADER_LIVE_CLIENT_ID;
-    }
-    if (!this.config.clientSecret && process.env.CTRADER_LIVE_CLIENT_SECRET) {
-      this.config.clientSecret = process.env.CTRADER_LIVE_CLIENT_SECRET;
-    }
-    if (!this.config.accessToken && process.env.CTRADER_LIVE_ACCESS_TOKEN) {
-      this.config.accessToken = process.env.CTRADER_LIVE_ACCESS_TOKEN;
-    }
-    if (!this.config.accountId && process.env.CTRADER_LIVE_ACCOUNT_ID) {
-      this.config.accountId = process.env.CTRADER_LIVE_ACCOUNT_ID;
-    }
+    const isDemo = getCTraderApiMode() === 'DEMO';
+    const targetEnv: TradingEnvironment = isDemo ? 'DEMO' : 'LIVE';
+    (this as any).environment = targetEnv;
+    (this as any).isLive = !isDemo;
+
+    const clientIdEnv = isDemo ? process.env.CTRADER_DEMO_CLIENT_ID : process.env.CTRADER_LIVE_CLIENT_ID;
+    const clientSecretEnv = isDemo ? process.env.CTRADER_DEMO_CLIENT_SECRET : process.env.CTRADER_LIVE_CLIENT_SECRET;
+    const accessTokenEnv = isDemo ? process.env.CTRADER_DEMO_ACCESS_TOKEN : process.env.CTRADER_LIVE_ACCESS_TOKEN;
+    const accountIdEnv = isDemo ? process.env.CTRADER_DEMO_ACCOUNT_ID : process.env.CTRADER_LIVE_ACCOUNT_ID;
+    const apiHostEnv = isDemo ? (process.env.CTRADER_DEMO_API_HOST ?? 'https://demo.ctraderapi.com') : (process.env.CTRADER_LIVE_API_HOST ?? 'https://live.ctraderapi.com');
+
+    if (clientIdEnv) this.config.clientId = clientIdEnv;
+    if (clientSecretEnv) this.config.clientSecret = clientSecretEnv;
+    if (accessTokenEnv) this.config.accessToken = accessTokenEnv;
+    if (accountIdEnv) this.config.accountId = accountIdEnv;
+    if (apiHostEnv) this.config.apiHost = apiHostEnv;
+    this.config.environment = targetEnv;
+
     super.syncConfig();
   }
 
@@ -43,33 +50,37 @@ export class CTraderLiveAdapter extends CTraderBrokerAdapter {
     this.config = {
       ...this.config,
       ...cleanUpdates,
-      environment: 'LIVE'
+      environment: getCTraderApiMode() === 'DEMO' ? 'DEMO' : 'LIVE'
     };
     this.status = 'DISCONNECTED';
   }
 
   clearCredentials(): void {
+    const isDemo = getCTraderApiMode() === 'DEMO';
     this.config = {
       clientId: undefined,
       clientSecret: undefined,
       accessToken: undefined,
       accountId: undefined,
-      environment: 'LIVE',
-      apiHost: process.env.CTRADER_LIVE_API_HOST ?? 'https://live.ctraderapi.com'
+      environment: isDemo ? 'DEMO' : 'LIVE',
+      apiHost: isDemo ? (process.env.CTRADER_DEMO_API_HOST ?? 'https://demo.ctraderapi.com') : (process.env.CTRADER_LIVE_API_HOST ?? 'https://live.ctraderapi.com')
     };
     this.status = 'DISCONNECTED';
   }
 
   getConfigStatus() {
+    this.syncConfig();
+    const isDemo = getCTraderApiMode() === 'DEMO';
     return {
+      environment: isDemo ? 'DEMO' : 'LIVE',
       configured: Boolean(
         this.config.clientId &&
         this.config.clientSecret &&
         this.config.accessToken &&
         this.config.accountId
       ),
-      maskedAccountId: this.config.accountId ? '****' + this.config.accountId.slice(-4) : undefined,
-      maskedClientId: this.config.clientId ? '****' + this.config.clientId.slice(-4) : undefined,
+      maskedAccountId: this.config.accountId ? '****' + String(this.config.accountId).slice(-4) : undefined,
+      maskedClientId: this.config.clientId ? '****' + String(this.config.clientId).slice(-4) : undefined,
       maskedClientSecret: this.config.clientSecret ? '•••••••• (Saved)' : undefined,
       maskedAccessToken: this.config.accessToken ? '•••••••• (Saved)' : undefined
     };

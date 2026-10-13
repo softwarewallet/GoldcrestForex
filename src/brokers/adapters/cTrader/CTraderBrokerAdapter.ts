@@ -44,7 +44,7 @@ export interface CTraderConfig {
   clientSecret?: string;
   accessToken?: string;
   accountId?: string;
-  environment: 'LIVE';
+  environment: TradingEnvironment;
   apiHost?: string;
 }
 
@@ -268,7 +268,7 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
 
           results.push({
             accountId: String(details.traderLogin),
-            accountType: 'LIVE',
+            accountType: (this.environment as string) === 'DEMO' ? 'DEMO' : 'LIVE',
             balance: details.balance,
             equity: details.equity,
             availableMargin: details.availableMargin,
@@ -278,7 +278,7 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
             broker: 'CTRADER',
             environment: this.environment,
             connectionStatus: 'CONNECTED',
-            server: details.brokerName || raw.brokerTitleShort || 'cTrader-Live',
+            server: details.brokerName || raw.brokerTitleShort || ((this.environment as string) === 'DEMO' ? 'cTrader-Demo' : 'cTrader-Live'),
             permissions: CTraderBrokerAdapter.getEffectivePermissions(raw.permissionScope, details.accessRights),
             lastUpdate: Date.now(),
             isLiveAccount: details.isLive
@@ -398,7 +398,7 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
         this.status = 'CONNECTED';
         const authoritativeAccount: BrokerAccountInfo = {
           accountId: String(details.traderLogin),
-          accountType: 'LIVE',
+          accountType: (this.environment as string) === 'DEMO' ? 'DEMO' : 'LIVE',
           balance: details.balance,
           equity: details.equity,
           availableMargin: details.availableMargin,
@@ -408,7 +408,7 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
           broker: 'CTRADER',
           environment: this.environment,
           connectionStatus: 'CONNECTED',
-          server: details.brokerName || matched.brokerTitleShort || 'cTrader-Live',
+          server: details.brokerName || matched.brokerTitleShort || ((this.environment as string) === 'DEMO' ? 'cTrader-Demo' : 'cTrader-Live'),
           permissions: CTraderBrokerAdapter.getEffectivePermissions(matched.permissionScope, details.accessRights),
           lastUpdate: Date.now(),
           isLiveAccount: details.isLive

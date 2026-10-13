@@ -167,7 +167,7 @@ export class BrokerRegistry {
     return [
       {
         broker: 'CTRADER',
-        environment: 'LIVE',
+        environment: (cLiveStatus.environment as any) || 'DEMO',
         configured: cLiveStatus.configured,
         maskedAccountId: cLiveStatus.maskedAccountId,
         maskedClientId: cLiveStatus.maskedClientId,

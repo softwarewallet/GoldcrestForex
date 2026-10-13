@@ -10,8 +10,6 @@ import {
 import { ForexDashboard } from './ForexDashboard';
 import { TradingSignal, Candle } from '../markets/common/types';
 
-import { ConnectionHealthWidget } from './ConnectionHealthWidget';
-
 interface DashboardProps {
   forexPairs: any[];
   indianUnderlyings?: any[];
@@ -110,19 +108,14 @@ export const Dashboard: React.FC<DashboardProps> = ({
       </div>
 
       {/* Forex Dashboard Main View */}
-      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-        <div className="lg:col-span-3 transition-all duration-200">
-          <ForexDashboard
-            pairs={forexPairs}
-            onSelectSignal={onSelectSignal}
-            candlesMap={candlesMap}
-            onEnsureCandles={onEnsureCandles}
-            environment={environment}
-          />
-        </div>
-        <div className="lg:col-span-1">
-          <ConnectionHealthWidget />
-        </div>
+      <div className="w-full transition-all duration-200">
+        <ForexDashboard
+          pairs={forexPairs}
+          onSelectSignal={onSelectSignal}
+          candlesMap={candlesMap}
+          onEnsureCandles={onEnsureCandles}
+          environment={environment}
+        />
       </div>
     </div>
   );
