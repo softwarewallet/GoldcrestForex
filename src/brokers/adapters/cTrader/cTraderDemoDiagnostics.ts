@@ -1,5 +1,6 @@
 import { getCTraderApiMode, getSystemConfig } from '../../../services/configService';
 import { CTraderLiveAdapter } from './CTraderLiveAdapter';
+import { brokerRegistry } from '../../registry';
 import { LIVE_AUTO_EXECUTION_ALLOWED } from '../../safety/AutoExecutionEngine';
 import { killSwitch } from '../../safety/KillSwitch';
 import { LiveTradingGate } from '../../safety/LiveTradingGate';
@@ -90,33 +91,47 @@ export function sanitizeErrorMessage(error: any): string {
 }
 
 export function inspectDemoCredentialStatus(): DemoDiagnosticsReport {
+  let adapter: any;
+  try {
+    adapter = brokerRegistry.getAdapter('CTRADER', 'LIVE');
+  } catch {
+    adapter = new CTraderLiveAdapter();
+  }
+  adapter.syncConfig();
+  const cfg = adapter.config || {};
+
+  const clientId = cfg.clientId || process.env.CTRADER_DEMO_CLIENT_ID;
+  const clientSecret = cfg.clientSecret || process.env.CTRADER_DEMO_CLIENT_SECRET;
+  const accessToken = cfg.accessToken || process.env.CTRADER_DEMO_ACCESS_TOKEN;
+  const accountId = cfg.accountId || process.env.CTRADER_DEMO_ACCOUNT_ID;
+
   const variables: Record<string, SanitizedVariableMeta> = {
     CTRADER_DEMO_CLIENT_ID: {
-      status: process.env.CTRADER_DEMO_CLIENT_ID && String(process.env.CTRADER_DEMO_CLIENT_ID).trim().length > 0 ? 'PRESENT' : 'MISSING',
+      status: clientId && String(clientId).trim().length > 0 ? 'PRESENT' : 'MISSING',
       label: 'Client ID',
       description: 'Open API OAuth application client identifier',
-      maskedPreview: process.env.CTRADER_DEMO_CLIENT_ID
-        ? `****${String(process.env.CTRADER_DEMO_CLIENT_ID).trim().slice(-4)}`
+      maskedPreview: clientId
+        ? `****${String(clientId).trim().slice(-4)}`
         : 'NOT CONFIGURED'
     },
     CTRADER_DEMO_CLIENT_SECRET: {
-      status: process.env.CTRADER_DEMO_CLIENT_SECRET && String(process.env.CTRADER_DEMO_CLIENT_SECRET).trim().length > 0 ? 'PRESENT' : 'MISSING',
+      status: clientSecret && String(clientSecret).trim().length > 0 ? 'PRESENT' : 'MISSING',
       label: 'Client Secret',
       description: 'Open API OAuth application client secret',
-      maskedPreview: process.env.CTRADER_DEMO_CLIENT_SECRET ? '•••••••• (Saved)' : 'NOT CONFIGURED'
+      maskedPreview: clientSecret ? '•••••••• (Saved)' : 'NOT CONFIGURED'
     },
     CTRADER_DEMO_ACCESS_TOKEN: {
-      status: process.env.CTRADER_DEMO_ACCESS_TOKEN && String(process.env.CTRADER_DEMO_ACCESS_TOKEN).trim().length > 0 ? 'PRESENT' : 'MISSING',
+      status: accessToken && String(accessToken).trim().length > 0 ? 'PRESENT' : 'MISSING',
       label: 'Access Token',
       description: 'Spotware OAuth 2.0 authorized user access token',
-      maskedPreview: process.env.CTRADER_DEMO_ACCESS_TOKEN ? '•••••••• (Saved)' : 'NOT CONFIGURED'
+      maskedPreview: accessToken ? '•••••••• (Saved)' : 'NOT CONFIGURED'
     },
     CTRADER_DEMO_ACCOUNT_ID: {
-      status: process.env.CTRADER_DEMO_ACCOUNT_ID && String(process.env.CTRADER_DEMO_ACCOUNT_ID).trim().length > 0 ? 'PRESENT' : 'MISSING',
+      status: accountId && String(accountId).trim().length > 0 ? 'PRESENT' : 'MISSING',
       label: 'Account ID',
       description: 'Numeric cTrader demo trading account number',
-      maskedPreview: process.env.CTRADER_DEMO_ACCOUNT_ID
-        ? `****${String(process.env.CTRADER_DEMO_ACCOUNT_ID).trim().slice(-4)}`
+      maskedPreview: accountId
+        ? `****${String(accountId).trim().slice(-4)}`
         : 'NOT CONFIGURED'
     }
   };
@@ -192,7 +207,12 @@ export async function executeDemoPreflightValidation(): Promise<DemoDiagnosticsR
   baseStatus.authentication.attempted = true;
   const startAuth = Date.now();
 
-  const adapter = new CTraderLiveAdapter();
+  let adapter: any;
+  try {
+    adapter = brokerRegistry.getAdapter('CTRADER', 'LIVE');
+  } catch {
+    adapter = new CTraderLiveAdapter();
+  }
   adapter.syncConfig();
 
   try {

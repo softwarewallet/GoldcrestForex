@@ -53,6 +53,24 @@ async function runPhase60TestSuite() {
   console.log('  -> PASS: Status correctly distinguishes missing vs unvalidated credentials without premature validation.');
 
   // --------------------------------------------------------------------------
+  // TEST 2.5: Settings-Saved Credentials Recognition (P0 Bugfix Verification)
+  // --------------------------------------------------------------------------
+  console.log('\nTEST 2.5: Verifying Settings-Saved Credentials Recognition...');
+  const { brokerRegistry } = await import('../src/brokers/registry');
+  brokerRegistry.updateLiveCredentials('CTRADER', {
+    clientId: 'demo_client_id_123',
+    clientSecret: 'demo_secret_456',
+    accessToken: 'demo_token_789',
+    accountId: '12345678'
+  });
+  const savedStatus = inspectDemoCredentialStatus();
+  assert.strictEqual(savedStatus.presentCount, 4, 'All 4 credentials saved via UI/settings must be recognized as PRESENT');
+  assert.strictEqual(savedStatus.lifecycleStatus, 'CREDENTIALS_PRESENT_NOT_VALIDATED');
+  assert.strictEqual(savedStatus.variables.CTRADER_DEMO_CLIENT_ID.status, 'PRESENT');
+  console.log('  -> PASS: Credentials saved via settings UI successfully recognized by diagnostic status engine.');
+
+
+  // --------------------------------------------------------------------------
   // TEST 3: Preflight Validation Safe Halting (Step 3)
   // --------------------------------------------------------------------------
   console.log('\nTEST 3: Verifying Preflight Validation Flow on Current Environment (Step 3)...');
