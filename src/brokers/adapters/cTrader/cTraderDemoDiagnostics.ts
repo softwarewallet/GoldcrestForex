@@ -248,9 +248,8 @@ export async function executeDemoPreflightValidation(): Promise<DemoDiagnosticsR
       const quote = await adapter.getQuote('EURUSD');
       const now = Date.now();
       const quoteTimestamp = quote.timestamp || now;
-      const isFresh = (now - quoteTimestamp) < 60000;
+      const isFresh = (now - quoteTimestamp) < 30_000;
 
-      baseStatus.marketDataVerification.verified = true;
       baseStatus.marketDataVerification.symbol = quote.symbol || 'EURUSD';
       baseStatus.marketDataVerification.bid = quote.bid;
       baseStatus.marketDataVerification.ask = quote.ask;
@@ -258,12 +257,22 @@ export async function executeDemoPreflightValidation(): Promise<DemoDiagnosticsR
       baseStatus.marketDataVerification.dataTimestamp = quoteTimestamp;
       baseStatus.marketDataVerification.freshness = isFresh ? 'LIVE_STREAMING' : 'STALE';
 
+      if (!isFresh) {
+        baseStatus.marketDataVerification.verified = false;
+        baseStatus.readinessGate = 'BLOCKED';
+        baseStatus.readinessBlocker = 'DEMO market data quote is stale (>30s old). Readiness gate remains blocked.';
+        baseStatus.lifecycleStatus = 'ACCOUNT_IDENTITY_VERIFIED';
+        baseStatus.statusLabel = 'ACCOUNT IDENTITY VERIFIED (STALE DATA)';
+        lastValidatedReport = baseStatus;
+        return baseStatus;
+      }
+
+      baseStatus.marketDataVerification.verified = true;
       baseStatus.lifecycleStatus = 'MARKET_DATA_VERIFIED';
       baseStatus.statusLabel = 'DEMO CONNECTIVITY VERIFIED';
 
       // STEP 6: Preserve Execution Locks & Invariants
       const sysConfig = getSystemConfig();
-      const stopLossGate = new LiveTradingGate();
       const isLiveLocked = LIVE_AUTO_EXECUTION_ALLOWED === false && sysConfig.liveTradingEnabled === false;
       const isKillSwitchActive = !killSwitch.isHalted();
 
