@@ -18,6 +18,7 @@ import { liveRuntimeLog } from '../services/liveRuntimeLog';
 import { autoTradingService } from '../services/autoTradingService';
 console.log('[DEBUG] brokerRoutes imported, autoTradingService imported:', !!autoTradingService);
 import { generateTradeComparisonReport } from '../services/tradeComparisonService';
+import { getLatestDemoStatusReport, executeDemoPreflightValidation } from './adapters/cTrader/cTraderDemoDiagnostics';
 
 export const brokerRouter = Router();
 
@@ -364,6 +365,16 @@ brokerRouter.get('/status', async (req: Request, res: Response) => {
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
+});
+
+brokerRouter.get('/ctrader/demo-env-status', (_req: Request, res: Response) => {
+  const status = getLatestDemoStatusReport();
+  res.json(status);
+});
+
+brokerRouter.post('/ctrader/demo-preflight', async (_req: Request, res: Response) => {
+  const result = await executeDemoPreflightValidation();
+  res.json(result);
 });
 
 brokerRouter.post('/test-connection', async (req: Request, res: Response) => {

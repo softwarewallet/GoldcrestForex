@@ -109,6 +109,7 @@ All applicable test suites, typechecks, and build steps were executed:
 
 | Test Suite | Command | Outcome | Details |
 | :--- | :--- | :---: | :--- |
+| **Phase 59 DEMO Runtime Verification** | `npm run test:phase59_demo_runtime` | **PASSED** | Steps 1–8: Credential audit, endpoint isolation, decoupling invariants, Condition 9 SL gate, zero ledger pollution |
 | **Phase 58 DEMO Readiness** | `npm run test:phase58_demo_readiness` | **PASSED (6/6)** | Credential inspection, transport isolation, dynamic masking, error handling, readiness gates, clean ledger |
 | **Phase 56 Lifecycle Persistence** | `npm run test:phase56_demo_accumulation` | **PASSED (10/10)** | Complete lifecycle, 3-way reconciliation, idempotency |
 | **cTrader Transport Selection** | `npx tsx test/test_cTrader_transport_selection.ts` | **PASSED** | Certified DEMO vs LIVE transport isolation |

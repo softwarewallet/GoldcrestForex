@@ -3,6 +3,7 @@ import { Server, ShieldCheck, RefreshCw, CheckCircle2, XCircle, Lock, Database, 
 import { BrokerCredentialStatus, BrokerType, TradingEnvironment, ConnectionTestResult } from '../brokers/types';
 import { AutoLiveSchedulerPanel } from './AutoLiveSchedulerPanel';
 import { AutoLiveSchedulerConfig } from '../services/schedulerUtils';
+import { CTraderDemoConfigStatus } from './CTraderDemoConfigStatus';
 
 interface BrokerSettingsPanelProps {
   currentEnvironment: TradingEnvironment;
@@ -836,6 +837,9 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Read-Only cTrader DEMO Environment Variable Configuration Status */}
+      <CTraderDemoConfigStatus />
 
       <div className="grid gap-4">
         {(['CTRADER'] as const).map(broker => {

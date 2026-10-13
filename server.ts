@@ -60,6 +60,7 @@ import { reconcileInFlightExecutionIntents } from './src/services/executionRecon
 
 // Legacy demo execution is retired; LIVE_ONLY production mode is enforced by the server safety layer.
 import { brokerRegistry } from './src/brokers/registry';
+import { getLatestDemoStatusReport, executeDemoPreflightValidation } from './src/brokers/adapters/cTrader/cTraderDemoDiagnostics';
 
 const invokedByNpmDev = process.env.npm_lifecycle_event === 'dev';
 // npm run dev is an explicit local development command. Do not let a stale
@@ -1192,6 +1193,16 @@ app.get('/api/config', async (_req: Request, res: Response) => {
       message: err?.message || 'Persisted configuration is unavailable.'
     });
   }
+});
+
+app.get('/api/ctrader/demo-env-status', async (_req: Request, res: Response) => {
+  const status = getLatestDemoStatusReport();
+  res.json(status);
+});
+
+app.post('/api/ctrader/demo-preflight', async (_req: Request, res: Response) => {
+  const result = await executeDemoPreflightValidation();
+  res.json(result);
 });
 
 app.post('/api/config', operatorAuthRequired, async (req: Request, res: Response) => {

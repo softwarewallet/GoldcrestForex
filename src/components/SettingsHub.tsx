@@ -19,6 +19,7 @@ import {
 import { BrokerSettingsPanel } from './BrokerSettingsPanel';
 import { MartingaleSettingsPanel } from './MartingaleSettingsPanel';
 import { StrategyPlanningSettings } from './StrategyPlanningSettings';
+import { CTraderDemoConfigStatus } from './CTraderDemoConfigStatus';
 import { BrokerType, TradingEnvironment } from '../brokers/types';
 
 interface SettingsHubProps {
@@ -201,7 +202,7 @@ export const SettingsHub: React.FC<SettingsHubProps> = ({
   onBrokerSelect,
   onRefreshGlobal
 }) => {
-  const [activeSettingsSection, setActiveSettingsSection] = useState<'BROKER_CONFIG' | 'LIVE_LOG' | 'STRATEGY_PLANNING' | 'MARTINGALE'>('BROKER_CONFIG');
+  const [activeSettingsSection, setActiveSettingsSection] = useState<'BROKER_CONFIG' | 'DEMO_CONFIG' | 'LIVE_LOG' | 'STRATEGY_PLANNING' | 'MARTINGALE'>('BROKER_CONFIG');
   const [phase44Enabled, setPhase44Enabled] = useState<boolean>(true);
   const [savingPhase44, setSavingPhase44] = useState<boolean>(false);
   const [phase44Msg, setPhase44Msg] = useState<string>('');
@@ -276,6 +277,7 @@ export const SettingsHub: React.FC<SettingsHubProps> = ({
           </span>
           {[
             { id: 'BROKER_CONFIG', label: 'BROKER & RISK CONFIGURATION', icon: Server },
+            { id: 'DEMO_CONFIG', label: 'cTrader DEMO STATUS', icon: ShieldCheck },
             { id: 'MARTINGALE', label: 'MARTINGALE / RECOVERY STRATEGY', icon: Layers },
             { id: 'STRATEGY_PLANNING', label: 'STRATEGY PLANNING & PRESETS', icon: Sparkles },
             { id: 'LIVE_LOG', label: 'LIVE RUNTIME LOG', icon: Activity }
@@ -305,6 +307,10 @@ export const SettingsHub: React.FC<SettingsHubProps> = ({
           <span>Encrypted Secure Storage</span>
         </div>
       </div>
+
+      {activeSettingsSection === 'DEMO_CONFIG' && (
+        <CTraderDemoConfigStatus />
+      )}
 
       {activeSettingsSection === 'LIVE_LOG' && (
         <LiveRuntimeLogSettings />
