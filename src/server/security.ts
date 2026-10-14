@@ -2,8 +2,8 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
 
 const RATE_WINDOW_MS = 60_000;
-const READ_RATE_LIMIT = 3000;
-const MUTATION_RATE_LIMIT = 1000;
+const READ_RATE_LIMIT = 10000;
+const MUTATION_RATE_LIMIT = 5000;
 const requestCounts = new Map<string, { count: number; resetAt: number }>();
 let lastCleanup = 0;
 
@@ -33,7 +33,7 @@ export function requestId(req: Request, res: Response, next: NextFunction): void
 }
 
 export function apiRateLimit(req: Request, res: Response, next: NextFunction): void {
-  if (!req.path.startsWith('/api') || req.path === '/api/health' || req.path.startsWith('/api/brokers') || req.path.startsWith('/api/forex') || req.path.startsWith('/api/auto-trading') || req.path.startsWith('/api/signals') || req.path.startsWith('/api/candles') || req.path.startsWith('/api/today-summary')) {
+  if (!req.path.startsWith('/api')) {
     next();
     return;
   }

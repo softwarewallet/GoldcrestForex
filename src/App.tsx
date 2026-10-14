@@ -38,7 +38,7 @@ export default function App() {
   const [selectedOptionUnderlying, setSelectedOptionUnderlying] = useState<string>('NIFTY');
   const [showDiagnostics, setShowDiagnostics] = useState<boolean>(false);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
-  const [loadingInitial, setLoadingInitial] = useState<boolean>(true);
+  const [loadingInitial, setLoadingInitial] = useState<boolean>(false);
   const terminalRefreshInFlightRef = useRef<Promise<void> | null>(null);
 
   // Broker Environment & Safety State
@@ -181,11 +181,18 @@ export default function App() {
   useEffect(() => {
     void refreshTerminalData(true);
 
+    const safetyTimer = setTimeout(() => {
+      setLoadingInitial(false);
+    }, 4000);
+
     const dataTimer = setInterval(() => {
       void refreshTerminalData(false);
     }, 30000);
 
-    return () => clearInterval(dataTimer);
+    return () => {
+      clearTimeout(safetyTimer);
+      clearInterval(dataTimer);
+    };
   }, [refreshTerminalData]);
 
   // LIVE_ONLY runtime: no environment switching is exposed.
@@ -314,118 +321,108 @@ export default function App() {
     >
       {/* Fixed global shell content outlet: view components render here. */}
       <main id="global_app_content" className="min-h-[calc(100vh-162px)] w-full space-y-4 bg-[#03070d] text-slate-100" style={{ paddingLeft: '10px', paddingRight: '10px', paddingTop: '10px', paddingBottom: '10px' }}>
-        {loadingInitial ? (
-          <div className="flex flex-col items-center justify-center min-h-[50vh] space-y-3 font-mono">
-            <div className="w-10 h-10 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin"></div>
-            <div className="text-sm text-slate-300">Initializing Quantitative Terminal Engine...</div>
-            <div className="text-xs text-slate-500">Loading broker adapters, SQLite storage and risk gates</div>
+        {/* Market Watch / scanners */}
+        {activeTab === 'market_watch' && (
+          <Dashboard
+            forexPairs={forexPairs}
+            indianUnderlyings={indianUnderlyings}
+            candlesMap={candlesMap}
+            onSelectSignal={(sig) => setSelectedSignal(sig)}
+            onEnsureCandles={ensureCandlesLoaded}
+            initialOptionSymbol={selectedOptionUnderlying}
+            environment={environment}
+          />
+        )}
+
+        {activeTab === 'market_sessions' && (
+          <MarketSessionsWidget />
+        )}
+
+        {activeTab === 'signals' && (
+          <SignalsView
+            signals={signals}
+            onSelectSignal={(sig) => setSelectedSignal(sig)}
+          />
+        )}
+
+        {activeTab === 'trading' && (
+          <TradingHub
+            environment={environment}
+            selectedBroker={selectedBroker}
+            maskedAccount={maskedAccount}
+            balance={balance}
+            currency={currency}
+            isEmergencyHalted={isEmergencyHalted}
+            onRequestEnvironmentChange={handleRequestEnvironmentChange}
+          />
+        )}
+
+        {activeTab === 'shadow_mode' && (
+          <ShadowModeDashboard />
+        )}
+
+        {activeTab === 'forensics' && (
+          <PredictionForensicsPage />
+        )}
+
+        {activeTab === 'direction_analysis' && (
+          <DirectionAnalysisPage />
+        )}
+
+        {activeTab === 'native_indicators' && (
+          <NativeIndicatorsReportPage />
+        )}
+
+        {activeTab === 'dynamic_exits' && (
+          <DynamicExitAnalysisPage />
+        )}
+
+        {activeTab === 'short_tp' && (
+          <ShortTPOptimizationPage />
+        )}
+
+        {(activeTab === 'pnl' || activeTab === 'accounting') && (
+          <PnLAccountingPage />
+        )}
+
+        {(activeTab === 'research' || activeTab === 'ml') && (
+          <div className="rounded-lg border border-slate-800 bg-slate-900 p-6 text-sm text-slate-300">
+            Research and ML training interfaces are retired from the LIVE production runtime.
           </div>
-        ) : (
-          <>
-            {/* Market Watch / scanners */}
-            {activeTab === 'market_watch' && (
-              <Dashboard
-                forexPairs={forexPairs}
-                indianUnderlyings={indianUnderlyings}
-                candlesMap={candlesMap}
-                onSelectSignal={(sig) => setSelectedSignal(sig)}
-                onEnsureCandles={ensureCandlesLoaded}
-                initialOptionSymbol={selectedOptionUnderlying}
-                environment={environment}
-              />
-            )}
+        )}
 
-            {activeTab === 'market_sessions' && (
-              <MarketSessionsWidget />
-            )}
+        {(activeTab === 'control_center' || activeTab === 'operations' || activeTab === 'reconciliation' || activeTab === 'reconcile') && (
+          <TradingControlCenter
+          onSelectSignalModal={(sig) => setSelectedSignal(sig)}
+          autoTradingStatus={autoTradingStatus}
+          onAutoTradingStatusChange={setAutoTradingStatus}
+        />
+        )}
 
-            {activeTab === 'signals' && (
-              <SignalsView
-                signals={signals}
-                onSelectSignal={(sig) => setSelectedSignal(sig)}
-              />
-            )}
+        {activeTab === 'alerts' && (
+          <AlertsPage />
+        )}
 
-            {activeTab === 'trading' && (
-              <TradingHub
-                environment={environment}
-                selectedBroker={selectedBroker}
-                maskedAccount={maskedAccount}
-                balance={balance}
-                currency={currency}
-                isEmergencyHalted={isEmergencyHalted}
-                onRequestEnvironmentChange={handleRequestEnvironmentChange}
-              />
-            )}
+        {activeTab === 'history' && (
+          <HistoryPage />
+        )}
 
-            {activeTab === 'shadow_mode' && (
-              <ShadowModeDashboard />
-            )}
+        {activeTab === 'database' && (
+          <DatabaseExplorerPage />
+        )}
 
-            {activeTab === 'forensics' && (
-              <PredictionForensicsPage />
-            )}
+        {activeTab === 'connection_monitor' && (
+          <ConnectionMonitorPage />
+        )}
 
-            {activeTab === 'direction_analysis' && (
-              <DirectionAnalysisPage />
-            )}
-
-            {activeTab === 'native_indicators' && (
-              <NativeIndicatorsReportPage />
-            )}
-
-            {activeTab === 'dynamic_exits' && (
-              <DynamicExitAnalysisPage />
-            )}
-
-            {activeTab === 'short_tp' && (
-              <ShortTPOptimizationPage />
-            )}
-
-            {(activeTab === 'pnl' || activeTab === 'accounting') && (
-              <PnLAccountingPage />
-            )}
-
-            {(activeTab === 'research' || activeTab === 'ml') && (
-              <div className="rounded-lg border border-slate-800 bg-slate-900 p-6 text-sm text-slate-300">
-                Research and ML training interfaces are retired from the LIVE production runtime.
-              </div>
-            )}
-
-            {(activeTab === 'control_center' || activeTab === 'operations' || activeTab === 'reconciliation' || activeTab === 'reconcile') && (
-              <TradingControlCenter
-              onSelectSignalModal={(sig) => setSelectedSignal(sig)}
-              autoTradingStatus={autoTradingStatus}
-              onAutoTradingStatusChange={setAutoTradingStatus}
-            />
-            )}
-
-            {activeTab === 'alerts' && (
-              <AlertsPage />
-            )}
-
-            {activeTab === 'history' && (
-              <HistoryPage />
-            )}
-
-            {activeTab === 'database' && (
-              <DatabaseExplorerPage />
-            )}
-
-            {activeTab === 'connection_monitor' && (
-              <ConnectionMonitorPage />
-            )}
-
-            {(activeTab === 'settings' || activeTab === 'governance') && (
-              <SettingsHub
-                currentEnvironment={environment}
-                selectedBroker={selectedBroker}
-                onEnvironmentChange={handleRequestEnvironmentChange}
-                onBrokerSelect={handleSelectBroker}
-                onRefreshGlobal={refreshBrokerStatus}
-              />
-            )}
-          </>
+        {(activeTab === 'settings' || activeTab === 'governance') && (
+          <SettingsHub
+            currentEnvironment={environment}
+            selectedBroker={selectedBroker}
+            onEnvironmentChange={handleRequestEnvironmentChange}
+            onBrokerSelect={handleSelectBroker}
+            onRefreshGlobal={refreshBrokerStatus}
+          />
         )}
       </main>
  

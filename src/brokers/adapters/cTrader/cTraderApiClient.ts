@@ -134,8 +134,8 @@ export async function fetchLiveCTraderAccounts(
   _preferredHost: 'live' = 'live'
 ): Promise<CTraderRawAccount[]> {
   const hosts = getCTraderRequestHosts(true);
-  const MAX_RETRIES = 2;
-  const TIMEOUT_MS = 6000;
+  const MAX_RETRIES = 3;
+  const TIMEOUT_MS = 10000;
 
   let lastError: Error | null = null;
 
@@ -611,22 +611,22 @@ function getPayloadTypeName(payloadType: number): string {
   return names[payloadType] || `Type ${payloadType}`;
 }
 
-const wsRequestQueues = new WeakMap<WebSocket, Promise<any>>();
-const MIN_REQUEST_INTERVAL_MS = 100;
-let lastRequestTimestamp = 0;
+const wsConnectionState = new WeakMap<WebSocket, { queue: Promise<any>, lastRequestTimestamp: number }>();
+const MIN_REQUEST_INTERVAL_MS = 250; // Increased to be safer
 
 function queueWsRequest<T>(ws: WebSocket, task: () => Promise<T>): Promise<T> {
-  const currentQueue = wsRequestQueues.get(ws) || Promise.resolve();
-  const nextQueue = currentQueue.catch(() => {}).then(async () => {
+  const state = wsConnectionState.get(ws) || { queue: Promise.resolve(), lastRequestTimestamp: 0 };
+  const nextQueue = state.queue.catch(() => {}).then(async () => {
     const now = Date.now();
-    const elapsed = now - lastRequestTimestamp;
+    const elapsed = now - state.lastRequestTimestamp;
     if (elapsed < MIN_REQUEST_INTERVAL_MS) {
+      console.debug(`[cTrader] Throttling request by ${MIN_REQUEST_INTERVAL_MS - elapsed}ms`);
       await new Promise(r => setTimeout(r, MIN_REQUEST_INTERVAL_MS - elapsed));
     }
-    lastRequestTimestamp = Date.now();
+    state.lastRequestTimestamp = Date.now();
     return task();
   });
-  wsRequestQueues.set(ws, nextQueue);
+  wsConnectionState.set(ws, { queue: nextQueue, lastRequestTimestamp: state.lastRequestTimestamp });
   return nextQueue;
 }
 
