@@ -112,6 +112,18 @@ export function getCTraderRequestHosts(_accountIsLive: boolean): string[] {
   )];
 }
 
+function safeCloseSocket(ws?: WebSocket | null): void {
+  if (!ws) return;
+  try {
+    ws.removeAllListeners();
+  } catch {}
+  try {
+    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+      ws.terminate();
+    }
+  } catch {}
+}
+
 /**
  * Executes a WebSocket request flow against the cTrader Open API (port 5036 JSON interface)
  */
@@ -122,32 +134,41 @@ export async function fetchLiveCTraderAccounts(
   _preferredHost: 'live' = 'live'
 ): Promise<CTraderRawAccount[]> {
   const hosts = getCTraderRequestHosts(true);
-  const MAX_RETRIES = 3;
-  const TIMEOUT_MS = 20000;
+  const MAX_RETRIES = 2;
+  const TIMEOUT_MS = 6000;
 
   let lastError: Error | null = null;
 
   for (const host of hosts) {
-    const wsId = `ct_acc_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      let ws: WebSocket | null = null;
+      let timer: NodeJS.Timeout | null = null;
+      let isDone = false;
+      const cleanup = () => {
+        if (isDone) return;
+        isDone = true;
+        if (timer) clearTimeout(timer);
+        safeCloseSocket(ws);
+      };
+
       try {
         const accounts = await new Promise<CTraderRawAccount[]>((resolve, reject) => {
-          const ws = new WebSocket(host, {
+          ws = new WebSocket(host, {
             headers: {
               'User-Agent': 'Goldcrest-Trading-Bot/1.3.0'
             },
             agent: new https.Agent({ rejectUnauthorized: false })
           });
-          // TODO: Refactor connection logic
-          // webSocketManager.register(wsId, ws, attempt - 1);
-          
-          const timer = setTimeout(() => {
-            webSocketManager.close(wsId);
+          ws.setMaxListeners(100);
+
+          timer = setTimeout(() => {
+            cleanup();
             reject(new Error(`Timeout connecting to cTrader host: ${host}`));
           }, TIMEOUT_MS);
 
           ws.on('open', () => {
-            ws.send(JSON.stringify({
+            if (isDone) return;
+            ws?.send(JSON.stringify({
               clientMsgId: 'app_auth',
               payloadType: MSG_APP_AUTH_REQ,
               payload: { clientId, clientSecret }
@@ -155,18 +176,17 @@ export async function fetchLiveCTraderAccounts(
           });
 
           ws.on('message', (data: any) => {
+            if (isDone) return;
             try {
               const raw = typeof data === 'string' ? data : (data?.data ?? data).toString();
               const msg = JSON.parse(raw);
               if (msg.payloadType === MSG_APP_AUTH_RES) {
-                ws.send(JSON.stringify({
+                ws?.send(JSON.stringify({
                   clientMsgId: 'acc_list',
                   payloadType: MSG_GET_ACCOUNTS_REQ,
                   payload: { accessToken }
                 }));
               } else if (msg.payloadType === MSG_GET_ACCOUNTS_RES) {
-                clearTimeout(timer);
-                webSocketManager.close(wsId);
                 const permissionScope = msg.payload?.permissionScope !== undefined
                   ? Number(msg.payload.permissionScope)
                   : undefined;
@@ -176,28 +196,26 @@ export async function fetchLiveCTraderAccounts(
                 }));
                 const endpointIsLive = isAuthoritativeLiveHost(host);
                 const eligibleAccounts = accList.filter(account => endpointIsLive ? account.isLive === true : account.isLive === false);
-                // Fallback to all accounts if specific filter yielded 0
                 const accountsToReturn = eligibleAccounts.length > 0 ? eligibleAccounts : accList;
                 if (accountsToReturn.length === 0) {
+                  cleanup();
                   reject(new Error('cTrader returned accounts, but none match the connected Open API account environment.'));
                   return;
                 }
+                cleanup();
                 resolve(accountsToReturn);
               } else if (msg.payloadType === MSG_ERROR_RES) {
-                clearTimeout(timer);
-                webSocketManager.close(wsId);
+                cleanup();
                 reject(new Error(`cTrader API Error: ${JSON.stringify(msg.payload)}`));
               }
             } catch (e: any) {
-              clearTimeout(timer);
-              webSocketManager.close(wsId);
+              cleanup();
               reject(e);
             }
           });
 
           ws.on('error', (err: any) => {
-            clearTimeout(timer);
-            webSocketManager.close(wsId);
+            cleanup();
             reject(err);
           });
         });
@@ -206,6 +224,7 @@ export async function fetchLiveCTraderAccounts(
           return accounts;
         }
       } catch (err: any) {
+        cleanup();
         lastError = err;
         const msg = String(err?.message || '');
         const isTransient =
@@ -215,7 +234,7 @@ export async function fetchLiveCTraderAccounts(
           msg.includes('socket');
 
         if (isTransient && attempt < MAX_RETRIES) {
-          const backoff = Math.min(1000 * Math.pow(1.8, attempt - 1), 4000);
+          const backoff = Math.min(1000 * Math.pow(1.8, attempt - 1), 10000);
           console.warn(`[cTrader] Connection to ${host} failed (${msg}). Retrying attempt ${attempt + 1}/${MAX_RETRIES} in ${Math.round(backoff)}ms...`);
           await new Promise(r => setTimeout(r, backoff));
           continue;
@@ -253,6 +272,7 @@ export async function fetchLiveCTraderAccountDetails(
       },
       agent: new https.Agent({ rejectUnauthorized: false })
     });
+    ws.setMaxListeners(200);
     const wsId = `ct_det_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     // webSocketManager.register(wsId, ws);
 
@@ -591,14 +611,34 @@ function getPayloadTypeName(payloadType: number): string {
   return names[payloadType] || `Type ${payloadType}`;
 }
 
+const wsRequestQueues = new WeakMap<WebSocket, Promise<any>>();
+const MIN_REQUEST_INTERVAL_MS = 100;
+let lastRequestTimestamp = 0;
+
+function queueWsRequest<T>(ws: WebSocket, task: () => Promise<T>): Promise<T> {
+  const currentQueue = wsRequestQueues.get(ws) || Promise.resolve();
+  const nextQueue = currentQueue.catch(() => {}).then(async () => {
+    const now = Date.now();
+    const elapsed = now - lastRequestTimestamp;
+    if (elapsed < MIN_REQUEST_INTERVAL_MS) {
+      await new Promise(r => setTimeout(r, MIN_REQUEST_INTERVAL_MS - elapsed));
+    }
+    lastRequestTimestamp = Date.now();
+    return task();
+  });
+  wsRequestQueues.set(ws, nextQueue);
+  return nextQueue;
+}
+
 function sendAndAwait(
   ws: WebSocket,
   payloadType: number,
   payload: Record<string, unknown>,
   expectedPayloadType: number,
-  timeoutMs = 15000
+  timeoutMs = 60000,
+  attempt = 1
 ): Promise<any> {
-  return new Promise((resolve, reject) => {
+  return queueWsRequest(ws, () => new Promise((resolve, reject) => {
     const clientMsgId = `gc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const timer = setTimeout(
       () => {
@@ -617,11 +657,25 @@ function sendAndAwait(
           ws.removeEventListener('message', handler);
           ws.removeEventListener('error', errorHandler);
           resolve(msg.payload || {});
-        } else if (msg.payloadType === MSG_ERROR_RES && (!msg.clientMsgId || msg.clientMsgId === clientMsgId)) {
+        } else if ((msg.payloadType === MSG_ERROR_RES || msg.payloadType === MSG_ORDER_ERROR_EVENT) && (!msg.clientMsgId || msg.clientMsgId === clientMsgId)) {
           clearTimeout(timer);
           ws.removeEventListener('message', handler);
           ws.removeEventListener('error', errorHandler);
-          reject(new Error(`cTrader API error: ${JSON.stringify(msg.payload)}`));
+          
+          // Handle Rate Limiting (Error 2142 / BLOCKED_PAYLOAD_TYPE / RATE_LIMIT_EXCEEDED)
+          const errorCode = String(msg.payload?.errorCode || '');
+          const isRateLimit = errorCode === 'BLOCKED_PAYLOAD_TYPE' || errorCode === 'RATE_LIMIT_EXCEEDED' || errorCode === 'TOO_MANY_REQUESTS' || msg.payloadType === 2142 || /rate limit|too many requests|blocked/i.test(JSON.stringify(msg.payload));
+
+          if (isRateLimit && attempt <= 10) {
+            const baseRetry = Number(msg.payload?.retryAfter || 1000);
+            const retryAfter = Math.max(1000, baseRetry) * Math.pow(1.5, attempt - 1) + Math.random() * 400;
+            console.warn(`[cTrader] Rate limited (${msg.payloadType} / ${errorCode || '2142'}). Retrying in ${Math.round(retryAfter)}ms (attempt ${attempt}/10)...`);
+            setTimeout(() => {
+              sendAndAwait(ws, payloadType, payload, expectedPayloadType, timeoutMs, attempt + 1).then(resolve).catch(reject);
+            }, retryAfter);
+          } else {
+            reject(new Error(`cTrader API error (${msg.payloadType}): ${JSON.stringify(msg.payload)}`));
+          }
         }
       } catch {}
     };
@@ -634,7 +688,7 @@ function sendAndAwait(
     ws.addEventListener('message', handler);
     ws.addEventListener('error', errorHandler);
     ws.send(JSON.stringify({ clientMsgId, payloadType, payload }));
-  });
+  }));
 }
 
 
@@ -651,10 +705,11 @@ async function withAuthenticatedAccount<T>(
 
   const ws = await webSocketManager.getConnection(key, async () => {
     const ws = new WebSocket(key.endpoint, { headers: { 'User-Agent': 'Goldcrest-Trading-Bot/1.3.0' } });
+    ws.setMaxListeners(200);
     await new Promise<void>((resolve, reject) => {
       ws.once('open', resolve);
       ws.once('error', reject);
-      setTimeout(() => reject(new Error('Timeout')), 10000);
+      setTimeout(() => reject(new Error('Timeout')), 30000);
     });
     
     // Auth
@@ -683,7 +738,7 @@ async function submitLiveCTraderExecutionAction(
       const timer = setTimeout(() => {
         ws.removeEventListener('message', handler);
         reject(new Error('cTrader live execution action timed out without broker acknowledgement.'));
-      }, 15000);
+      }, 60000);
       const finish = (value: CTraderExecutionActionResult) => {
         clearTimeout(timer);
         ws.removeEventListener('message', handler);
@@ -1097,7 +1152,7 @@ export async function fetchCTraderDeals(
   return withAuthenticatedAccount(ctidTraderAccountId, clientId, clientSecret, accessToken, isLive, async ws => {
     const payload = await sendAndAwait(ws, MSG_DEAL_LIST_REQ, {
       ctidTraderAccountId, fromTimestamp, toTimestamp, maxRows: 10000
-    }, MSG_DEAL_LIST_RES, 15000);
+    }, MSG_DEAL_LIST_RES, 60000);
     return Array.isArray(payload.deal) ? payload.deal : [];
   });
 }
@@ -1155,7 +1210,7 @@ export async function fetchCTraderReconcileState(
   isLive: boolean
 ): Promise<{ positions: any[]; orders: any[] }> {
   return withAuthenticatedAccount(ctidTraderAccountId, clientId, clientSecret, accessToken, isLive, async ws => {
-    const payload = await sendAndAwait(ws, MSG_RECONCILE_REQ, { ctidTraderAccountId }, MSG_RECONCILE_RES, 15000);
+    const payload = await sendAndAwait(ws, MSG_RECONCILE_REQ, { ctidTraderAccountId }, MSG_RECONCILE_RES, 60000);
     return {
       positions: Array.isArray(payload.position) ? payload.position : [],
       orders: Array.isArray(payload.order) ? payload.order : []
@@ -1243,7 +1298,7 @@ export async function fetchCTraderTrendbars(
       count: safeCount,
       fromTimestamp,
       toTimestamp
-    }, MSG_GET_TRENDBARS_RES, 15000);
+    }, MSG_GET_TRENDBARS_RES, 60000);
 
     const trendbars = Array.isArray(payload.trendbar) ? payload.trendbar : [];
     return trendbars.map((bar: any) => {

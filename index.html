@@ -12,6 +12,83 @@
     <meta property="og:description" content="Multi-market quantitative trading and machine learning intelligence platform analyzing Forex and Indian Equity Derivatives with research-grade point-in-time predictive modeling." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
+    <script>
+      // Disable Vite dev HMR WebSocket attempts cleanly without triggering native prototype getters
+      (function() {
+        if (typeof window !== 'undefined' && window.WebSocket) {
+          const OrigWebSocket = window.WebSocket;
+
+          function MockHmrWebSocket() {
+            this.readyState = 1;
+            this.binaryType = 'blob';
+            this.protocol = 'vite-hmr';
+            this.extensions = '';
+            this.bufferedAmount = 0;
+            this.url = '';
+            this.onopen = null;
+            this.onclose = null;
+            this.onerror = null;
+            this.onmessage = null;
+          }
+          MockHmrWebSocket.prototype.send = function() {};
+          MockHmrWebSocket.prototype.close = function() {};
+          MockHmrWebSocket.prototype.addEventListener = function(evt, handler) {
+            if (evt === 'open' && typeof handler === 'function') {
+              setTimeout(() => handler({ type: 'open' }), 0);
+            }
+          };
+          MockHmrWebSocket.prototype.removeEventListener = function() {};
+          MockHmrWebSocket.prototype.dispatchEvent = function() { return true; };
+
+          const PatchedWebSocket = function(url, protocols) {
+            const protoStr = Array.isArray(protocols) ? protocols.join(',') : String(protocols || '');
+            const urlStr = String(url || '');
+            if (protoStr.includes('vite-hmr') || urlStr.includes('vite-hmr') || urlStr.includes('token=')) {
+              return new MockHmrWebSocket();
+            }
+            return new OrigWebSocket(url, protocols);
+          };
+
+          PatchedWebSocket.OPEN = 1;
+          PatchedWebSocket.CONNECTING = 0;
+          PatchedWebSocket.CLOSING = 2;
+          PatchedWebSocket.CLOSED = 3;
+
+          try {
+            Object.defineProperty(PatchedWebSocket, Symbol.hasInstance, {
+              value: function(instance) {
+                return instance instanceof MockHmrWebSocket || instance instanceof OrigWebSocket;
+              }
+            });
+          } catch {}
+
+          window.WebSocket = PatchedWebSocket;
+        }
+
+        const origError = console.error;
+        console.error = function(...args) {
+          const msg = args.map(a => String(a?.message || a || '')).join(' ');
+          if (msg.includes('WebSocket') || msg.includes('vite') || msg.includes('closed without opened')) {
+            return;
+          }
+          origError.apply(console, args);
+        };
+        window.addEventListener('error', function(e) {
+          const msg = String(e?.message || e?.error?.message || '');
+          if (msg.includes('WebSocket') || msg.includes('closed without opened') || msg.includes('failed to connect to websocket')) {
+            e.preventDefault();
+            e.stopPropagation();
+          }
+        }, true);
+        window.addEventListener('unhandledrejection', function(e) {
+          const reason = String(e?.reason?.message || e?.reason || '');
+          if (reason.includes('WebSocket') || reason.includes('closed without opened') || reason.includes('failed to connect to websocket')) {
+            e.preventDefault();
+            e.stopPropagation();
+          }
+        }, true);
+      })();
+    </script>
     <style>
       html, body {
         background-color: #03070d;

@@ -29,24 +29,69 @@ export async function getDatabase(): Promise<Database> {
     }
 
     if (fs.existsSync(dbFile)) {
-      const fileBuffer = fs.readFileSync(dbFile);
-      dbInstance = new SQL.Database(fileBuffer);
-      initSchema(dbInstance);
-      seedInitialData(dbInstance);
-      persistDatabase();
+      try {
+        const fileBuffer = fs.readFileSync(dbFile);
+        dbInstance = new SQL.Database(fileBuffer);
+        initSchema(dbInstance);
+        seedInitialData(dbInstance);
+        loadPersistedBrokerCredentials(dbInstance);
+        persistDatabase();
+      } catch (corruptErr: any) {
+        console.error('Failed to initialize SQLite database from existing file (recovering automatically):', corruptErr?.message || corruptErr);
+        try {
+          const backupPath = `${dbFile}.corrupt.${Date.now()}`;
+          fs.renameSync(dbFile, backupPath);
+          console.warn(`Moved corrupted SQLite database to ${backupPath}`);
+        } catch (renameErr) {
+          console.error('Failed to rename corrupted SQLite file:', renameErr);
+        }
+        dbInstance = new SQL.Database();
+        initSchema(dbInstance);
+        seedInitialData(dbInstance);
+        loadPersistedBrokerCredentials(dbInstance);
+        persistDatabase();
+      }
     } else {
       dbInstance = new SQL.Database();
       initSchema(dbInstance);
       seedInitialData(dbInstance);
+      loadPersistedBrokerCredentials(dbInstance);
       persistDatabase();
     }
   } else {
     dbInstance = new SQL.Database();
     initSchema(dbInstance);
     seedInitialData(dbInstance);
+    loadPersistedBrokerCredentials(dbInstance);
   }
 
   return dbInstance;
+}
+
+function loadPersistedBrokerCredentials(db: Database) {
+  try {
+    const stmt = db.prepare("SELECT key, value FROM system_settings WHERE key LIKE 'broker_credentials_%'");
+    while (stmt.step()) {
+      const row = stmt.getAsObject() as { key: string; value: string };
+      try {
+        const creds = JSON.parse(row.value);
+        if (row.key === 'broker_credentials_CTRADER') {
+          if (creds.clientId && !process.env.CTRADER_DEMO_CLIENT_ID) process.env.CTRADER_DEMO_CLIENT_ID = creds.clientId;
+          if (creds.clientSecret && !process.env.CTRADER_DEMO_CLIENT_SECRET) process.env.CTRADER_DEMO_CLIENT_SECRET = creds.clientSecret;
+          if (creds.accessToken && !process.env.CTRADER_DEMO_ACCESS_TOKEN) process.env.CTRADER_DEMO_ACCESS_TOKEN = creds.accessToken;
+          if (creds.accountId && !process.env.CTRADER_DEMO_ACCOUNT_ID) process.env.CTRADER_DEMO_ACCOUNT_ID = creds.accountId;
+
+          if (creds.clientId && !process.env.CTRADER_LIVE_CLIENT_ID) process.env.CTRADER_LIVE_CLIENT_ID = creds.clientId;
+          if (creds.clientSecret && !process.env.CTRADER_LIVE_CLIENT_SECRET) process.env.CTRADER_LIVE_CLIENT_SECRET = creds.clientSecret;
+          if (creds.accessToken && !process.env.CTRADER_LIVE_ACCESS_TOKEN) process.env.CTRADER_LIVE_ACCESS_TOKEN = creds.accessToken;
+          if (creds.accountId && !process.env.CTRADER_LIVE_ACCOUNT_ID) process.env.CTRADER_LIVE_ACCOUNT_ID = creds.accountId;
+        }
+      } catch {}
+    }
+    stmt.free();
+  } catch (err) {
+    console.error('Error loading persisted broker credentials:', err);
+  }
 }
 
 export function persistDatabase(): void {

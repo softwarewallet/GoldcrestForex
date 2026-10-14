@@ -178,6 +178,7 @@ export class ReconciliationService {
 
     const from = fromTimestamp ?? (Date.now() - 30 * 24 * 60 * 60 * 1000);
     const to = toTimestamp ?? Date.now();
+    const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
     try {
       // 1. Synchronize positions
@@ -201,6 +202,7 @@ export class ReconciliationService {
           syncedPositionsCount++;
         }
       }
+      await sleep(2500); // Throttling
 
       // 2. Synchronize open orders
       const orders = await adapter.getOpenOrders();
@@ -222,6 +224,7 @@ export class ReconciliationService {
           syncedOrdersCount++;
         }
       }
+      await sleep(2500); // Throttling
 
       // 3. Synchronize closed deals into trades
       const history = adapter.getOrderHistoryRange
@@ -288,6 +291,16 @@ export class ReconciliationService {
   public async captureBrokerSnapshot(broker: 'CTRADER' | 'FIVE_PAISA'): Promise<any> {
     const adapter = brokerRegistry.getAdapter(broker, 'LIVE');
     if (!adapter) return null;
+    const configStatus = typeof (adapter as any).getConfigStatus === 'function' ? (adapter as any).getConfigStatus() : null;
+    if (configStatus && !configStatus.configured) {
+      const timestamp = Date.now();
+      const snapshot = { id:`BROKER-SNAPSHOT-${broker}-${timestamp}`, broker, environment:'LIVE', timestamp, account:null, positions:[], orders:[], status:'UNCONFIGURED' };
+      await executeRun(
+        'INSERT INTO broker_reconciliation_snapshots (id, broker, environment, timestamp, account_json, positions_json, orders_json, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [snapshot.id, broker, 'LIVE', timestamp, JSON.stringify(null), JSON.stringify([]), JSON.stringify([]), snapshot.status]
+      );
+      return snapshot;
+    }
     try {
       const [account, positions, orders] = await Promise.all([
         adapter.getAccount(), adapter.getPositions(), adapter.getOpenOrders()

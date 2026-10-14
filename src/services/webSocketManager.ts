@@ -67,6 +67,7 @@ class WebSocketManager {
     const connectionPromise = (async () => {
       try {
         const ws = await connectFn();
+        ws.setMaxListeners(1000);
         ws.on('close', () => {
           this.stopHeartbeat(key);
           this.handleReconnection(key, connectFn);
@@ -184,11 +185,12 @@ class WebSocketManager {
     const meta = this.activeSockets.get(keyStr);
     
     // Increment retry count, apply exponential backoff
-    if (meta && meta.retryCount < 5) {
+    if (meta && meta.retryCount < 20) {
         meta.retryCount++;
         meta.state = 'RECONNECTING';
         
-        const delay = Math.min(1000 * Math.pow(2, meta.retryCount), 30000);
+        // Apply exponential backoff with jitter
+        const delay = Math.min(1000 * Math.pow(2, meta.retryCount) + Math.random() * 1000, 30000);
         await new Promise(resolve => setTimeout(resolve, delay));
         
         // Retry

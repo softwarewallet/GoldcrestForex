@@ -39,7 +39,7 @@ export interface OptionsOpportunityCandidate {
 
 const FOREX_SCAN_CONCURRENCY = Math.max(
   1,
-  Math.min(4, Number(process.env.GOLDCREST_FOREX_SCAN_CONCURRENCY || 4))
+  Math.min(2, Number(process.env.GOLDCREST_FOREX_SCAN_CONCURRENCY || 2))
 );
 
 async function mapWithConcurrency<T, R>(

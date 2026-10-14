@@ -12,7 +12,7 @@ import { getForexSessionState, getIndianSessionState } from '../markets/common/s
 import { claimExecutionIntent, completeExecutionIntent, failExecutionIntent, markExecutionIntentInFlight, getExecutionIntent, resumeExecutionIntentReconciliation } from '../services/executionIntentService';
 import { reconcileExecutionIntent } from '../services/executionReconciliationService';
 import { getSystemConfig } from '../services/configService';
-import { executeQuery, executeRun } from '../database/db';
+import { executeQuery, executeRun, getDatabase, persistDatabase } from '../database/db';
 import { calculateForexPipTargets, normalizePriceToThreeDigits, normalizePriceToInstrumentDigits, sizeForexOrderToMaxTradeValue } from './safety/TradeSizing';
 import { liveRuntimeLog } from '../services/liveRuntimeLog';
 import { autoTradingService } from '../services/autoTradingService';
@@ -239,6 +239,8 @@ async function persistBrokerAccountSnapshot(account: any): Promise<void> {
     // Persistence failure must never break broker status delivery.
   }
 }
+const brokerRecentFailureTime = new Map<string, number>();
+
 async function refreshBrokerStatusSnapshot(forceRefresh?: boolean): Promise<any> {
   const environment = brokerRegistry.getEnvironment();
   const controls = autoExecutionEngine.getControls();
@@ -247,14 +249,44 @@ async function refreshBrokerStatusSnapshot(forceRefresh?: boolean): Promise<any>
   const brokerStatus = await Promise.all(LIVE_BROKERS.map(async (broker) => {
     try {
       const adapter = brokerRegistry.getAdapter(broker, 'LIVE');
+      const configStatus = typeof (adapter as any).getConfigStatus === 'function' ? (adapter as any).getConfigStatus() : null;
+      if (configStatus && !configStatus.configured) {
+        return {
+          broker,
+          environment: 'LIVE',
+          connected: false,
+          account: null,
+          error: null,
+          code: 'UNCONFIGURED',
+          stale: false
+        };
+      }
+
+      // If this broker failed recently (e.g. host timeout/socket hang up), do not hammer it on every cycle
+      const lastFail = brokerRecentFailureTime.get(broker) || 0;
+      if (!forceRefresh && Date.now() - lastFail < 30_000) {
+        const fallback = lastKnownBrokerAccounts.get(broker) || await loadPersistedBrokerAccount(broker);
+        return {
+          broker,
+          environment: 'LIVE',
+          connected: false,
+          account: fallback || null,
+          stale: Boolean(fallback),
+          error: fallback ? null : 'Temporary connection cooldown',
+          code: 'BROKER_COOLDOWN'
+        };
+      }
+
       if (forceRefresh && typeof (adapter as any).clearCache === 'function') {
         (adapter as any).clearCache();
       }
       const account = await (adapter as any).getAccount(forceRefresh);
+      brokerRecentFailureTime.delete(broker);
       lastKnownBrokerAccounts.set(broker, account);
       await persistBrokerAccountSnapshot(account);
       return { broker, environment: 'LIVE', connected: true, account, error: null, stale: false };
     } catch (err: any) {
+      brokerRecentFailureTime.set(broker, Date.now());
       const normalized = normalizeBrokerError(err, broker, 'LIVE');
       const transient = ['RATE_LIMITED', 'TIMEOUT', 'NETWORK_ERROR', 'UNAVAILABLE', 'BROKER_UNAVAILABLE'].includes(normalized.code);
       const fallback = transient
@@ -452,7 +484,7 @@ brokerRouter.post('/select', (req: Request, res: Response) => {
   });
 });
 
-brokerRouter.post('/credentials/live', (req: Request, res: Response) => {
+brokerRouter.post('/credentials/live', async (req: Request, res: Response) => {
   const { broker, credentials, userConfirmedAcknowledge } = req.body;
 
   if (!userConfirmedAcknowledge) {
@@ -470,6 +502,38 @@ brokerRouter.post('/credentials/live', (req: Request, res: Response) => {
   }
 
   brokerRegistry.updateLiveCredentials(broker, credentials);
+
+  try {
+    const db = await getDatabase();
+    db.run(`INSERT OR REPLACE INTO system_settings (key, value, updated_at) VALUES (?, ?, ?)`, [
+      `broker_credentials_${broker}`,
+      JSON.stringify(credentials),
+      Date.now()
+    ]);
+    persistDatabase();
+
+    if (broker === 'CTRADER') {
+      if (credentials.clientId) {
+        process.env.CTRADER_DEMO_CLIENT_ID = credentials.clientId;
+        process.env.CTRADER_LIVE_CLIENT_ID = credentials.clientId;
+      }
+      if (credentials.clientSecret) {
+        process.env.CTRADER_DEMO_CLIENT_SECRET = credentials.clientSecret;
+        process.env.CTRADER_LIVE_CLIENT_SECRET = credentials.clientSecret;
+      }
+      if (credentials.accessToken) {
+        process.env.CTRADER_DEMO_ACCESS_TOKEN = credentials.accessToken;
+        process.env.CTRADER_LIVE_ACCESS_TOKEN = credentials.accessToken;
+      }
+      if (credentials.accountId) {
+        process.env.CTRADER_DEMO_ACCOUNT_ID = credentials.accountId;
+        process.env.CTRADER_LIVE_ACCOUNT_ID = credentials.accountId;
+      }
+    }
+  } catch (err) {
+    console.error('Failed to persist broker credentials to SQLite:', err);
+  }
+
   logBrokerAction({
     source: 'SETTINGS_UI',
     broker,
@@ -481,7 +545,7 @@ brokerRouter.post('/credentials/live', (req: Request, res: Response) => {
 
   res.json({
     success: true,
-    message: `${broker} LIVE credentials configured. Real-money autonomous order submission is enabled only when the server-side live safety gate passes.`,
+    message: `${broker} credentials configured and persisted successfully.`,
     maskedAccountId: maskIdentifier(credentials.accountId || credentials.clientId)
   });
 });

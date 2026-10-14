@@ -368,7 +368,11 @@ class AutoTradingService {
   private lastExecution: AutoTradingExecutionStatus | null = null;
 
   constructor() {
-    void MartingaleRecoveryService.initialize();
+    // Martingale is dynamic and disabled by default on startup.
+    // Avoid loading sequences or opening broker WebSockets until enabled.
+    if (getSystemConfig().martingale?.enabled) {
+      void MartingaleRecoveryService.initialize();
+    }
   }
 
   private isRequested(): boolean {
@@ -1783,7 +1787,7 @@ export const autoTradingService = new AutoTradingService();
 const martingaleManagerInterval = setInterval(() => {
   try {
     const config = getSystemConfig().martingale;
-    if (config?.enabled) {
+    if (config?.enabled && autoTradingService.getStatus().state === 'RUNNING') {
       liveRuntimeLog('SYSTEM', 'MARTINGALE_HEARTBEAT', { status: 'RUNNING' });
       void autoTradingService.processMartingaleActivePositions();
     }

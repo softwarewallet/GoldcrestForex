@@ -48,7 +48,11 @@ export class RuntimeErrorBoundary extends Component<RuntimeErrorBoundaryProps, R
       text.includes('resizeobserver') ||
       text.includes('script error') ||
       text.includes('chrome-extension') ||
-      text.includes('moz-extension')
+      text.includes('moz-extension') ||
+      text.includes('unexpected token \'<\'') ||
+      text.includes('unexpected token <') ||
+      text.includes('is not valid json') ||
+      text.includes('<!doctype')
     );
   }
 

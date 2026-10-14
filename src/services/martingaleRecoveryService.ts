@@ -65,8 +65,17 @@ export class MartingaleRecoveryService {
 
   /**
    * Initializes the service by loading active sequences from the database.
+   * Martingale is dynamic and disabled by default. If disabled, initialization
+   * is completely bypassed so no WebSockets or background watchers are started.
    */
   public static async initialize(): Promise<void> {
+    const config = getSystemConfig().martingale;
+    if (!config || !config.enabled) {
+      this.activeSequences.clear();
+      this.executionLocks.clear();
+      return;
+    }
+
     try {
       const rows = await executeQuery(`SELECT * FROM martingale_sequences WHERE status NOT IN ('COMPLETED', 'ABORTED')`);
       for (const row of rows) {
@@ -237,6 +246,11 @@ export class MartingaleRecoveryService {
     broker?: string;
     environment?: string;
   }): MartingaleSequenceRecord | null {
+    const config = getSystemConfig().martingale;
+    if (!config || !config.enabled) {
+      return null;
+    }
+
     if (!this.isPairEligible(options.pair)) {
       return null;
     }
@@ -247,7 +261,6 @@ export class MartingaleRecoveryService {
     
     if (this.activeSequences.has(key)) return this.activeSequences.get(key)!;
 
-    const config = getSystemConfig().martingale;
     const pairConfig = getForexPairConfig(options.pair);
     const pipSize = pairConfig.pipSize;
     const digits = pairConfig.digits || (options.pair.includes('JPY') ? 3 : 5);

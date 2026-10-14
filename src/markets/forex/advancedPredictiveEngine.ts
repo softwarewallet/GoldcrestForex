@@ -9,6 +9,7 @@ import { calculateEMA, calculateATR } from './indicators';
 import { findSwingPoints } from './marketStructure';
 import { calculateSupportResistance } from './supportResistance';
 import { getForexSessionState } from '../common/session';
+import { liveRuntimeLog } from '../../services/liveRuntimeLog';
 
 export interface KeyLiquidityPool {
   price: number;
@@ -700,7 +701,8 @@ Provide a strict JSON response with:
         aiGenerated: true,
         aiExplanation: parsed.aiRationale || parsed.policySummary || deterministic.policySummary
       };
-    } catch {
+    } catch (e: any) {
+      liveRuntimeLog('ERROR', 'AI_POLICY_GEN_ERROR', { error: e.message || String(e) });
       return {
         ...deterministic,
         aiGenerated: false,

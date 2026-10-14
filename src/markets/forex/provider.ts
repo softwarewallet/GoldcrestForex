@@ -75,7 +75,10 @@ export class LiveForexProvider implements LiveForexDataProvider {
       }
     } catch (err: any) {
       if (isConfigured) {
-        console.warn(`[ForexProvider] cTrader WebSocket connection failed for ${config.symbol} (${err?.message || err}). Using robust fallback market feed to maintain signal prediction.`);
+        const msg = String(err?.message || err);
+        if (!msg.includes('BLOCKED_PAYLOAD_TYPE') && !msg.includes('rate limited')) {
+          console.warn(`[ForexProvider] cTrader WebSocket connection failed for ${config.symbol} (${msg}). Using robust fallback market feed to maintain signal prediction.`);
+        }
       }
       const basePrices: Record<string, number> = {
         'EUR/USD': 1.0850,

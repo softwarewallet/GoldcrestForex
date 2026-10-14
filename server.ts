@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
+import fs from 'node:fs';
 import { timingSafeEqual } from 'node:crypto';
 import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
@@ -1715,6 +1716,7 @@ function generateResilientCandles(pair: string, tf: ForexTimeframe, count: numbe
 
 // Advanced Quantitative Predictive Engine Policy Endpoints
 app.post(['/api/forex/predict-policy', '/api/forex/predict-policy/:pair', '/api/forex/predict-policy/:part1/:part2'], async (req: Request, res: Response) => {
+  console.log(`[API] Predicting policy for: ${req.url}, Method: ${req.method}, Params: ${JSON.stringify(req.params)}`);
   try {
     const pair = extractForexPair(req);
     await liveForexProvider.refreshPair(pair).catch(() => {});
@@ -1752,7 +1754,8 @@ app.post(['/api/forex/predict-policy', '/api/forex/predict-policy/:pair', '/api/
     });
     res.json(policy);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    liveRuntimeLog('ERROR', 'PREDICT_POLICY_ROUTE_ERROR', { error: err.message || String(err) });
+    res.status(500).json({ error: err.message || String(err) });
   }
 });
 
@@ -2301,6 +2304,11 @@ async function startServer() {
     && process.env.NODE_ENV === 'production';
   productionPreflight(productionRuntime);
 
+  // 404 handler for API routes to prevent HTML fallback
+  app.use('/api/*', (req, res) => {
+    res.status(404).json({ error: 'API_NOT_FOUND', path: req.path });
+  });
+
   // Global JSON error-handling middleware for API routes
   app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
     const status = Number(err.status || err.statusCode || 500);
@@ -2322,11 +2330,18 @@ async function startServer() {
   app.use('/images', express.static(path.join(process.cwd(), 'public/images')));
   app.use('/assets', express.static(path.join(process.cwd(), 'public')));
 
-  if (process.env.NODE_ENV !== 'production') {
+  const isProduction = process.env.NODE_ENV === 'production'
+    || (typeof __filename !== 'undefined' && (__filename.includes('dist') || __filename.includes('dist/server.cjs') || __filename.includes('dist\\server.cjs')))
+    || (process.env.npm_lifecycle_event === 'start' && fs.existsSync(path.join(process.cwd(), 'dist/index.html')));
+
+  const http = await import('node:http');
+  const server = http.createServer(app);
+
+  if (!isProduction) {
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
-        hmr: process.env.DISABLE_HMR === 'true' ? false : undefined,
+        hmr: false,
       },
       // Express owns /api and SPA routing. Vite must not generate an HTML
       // fallback response for an unmatched API endpoint.
@@ -2335,7 +2350,7 @@ async function startServer() {
     app.use(vite.middlewares);
 
     // Express handles SPA navigation explicitly after API routes. This preserves
-    // Vite HMR/transforms while preventing API requests from reaching HTML fallback.
+    // Vite transforms while preventing API requests from reaching HTML fallback.
     app.use('*', async (req: Request, res: Response, next: NextFunction) => {
       if (req.method !== 'GET' && req.method !== 'HEAD') return next();
       if (req.path.startsWith('/api/')) return next();
@@ -2344,9 +2359,9 @@ async function startServer() {
       }
 
       try {
-        const fs = await import('node:fs/promises');
+        const fsPromises = await import('node:fs/promises');
         const indexPath = path.join(process.cwd(), 'index.html');
-        const template = await fs.readFile(indexPath, 'utf8');
+        const template = await fsPromises.readFile(indexPath, 'utf8');
         const html = await vite.transformIndexHtml(req.originalUrl, template);
         res.status(200).setHeader('Content-Type', 'text/html').end(html);
       } catch (error) {
@@ -2378,7 +2393,7 @@ async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
     process.env.GOLDCREST_LOCAL_DEVELOPMENT = localDevelopmentHost ? 'true' : 'false';
   }
-  const server = app.listen(PORT, host, () => {
+  server.listen(PORT, host, () => {
     const runtime = process.env.NODE_ENV || 'development';
     console.log(`Goldcrest server listening on http://${host}:${PORT} (NODE_ENV=${runtime})`);
     logApplicationAction('SERVER_STARTED', {
@@ -2387,7 +2402,8 @@ async function startServer() {
       nodeEnv: runtime,
       auditFile: getLiveRuntimeLogStatus().file
     });
-    void captureLiveBrokerReconciliation();
+    // Delay initial broker reconciliation by 10s so server boot completes smoothly without blocking
+    setTimeout(() => void captureLiveBrokerReconciliation(), 10_000).unref?.();
     void reconcileInFlightExecutionIntents();
     const reconciliationTimer = setInterval(() => void captureLiveBrokerReconciliation(), 5 * 60_000);
     const executionLifecycleTimer = setInterval(() => void reconcileInFlightExecutionIntents(), 15_000);

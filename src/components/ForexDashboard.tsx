@@ -60,6 +60,20 @@ export const ForexDashboard: React.FC<ForexDashboardProps> = ({
   const [predictivePolicy, setPredictivePolicy] = useState<any | null>(null);
   const [loadingPolicy, setLoadingPolicy] = useState<boolean>(false);
 
+  const safeParseResponse = async <T = any>(res: Response): Promise<T | null> => {
+    try {
+      const contentType = res.headers.get('content-type') || '';
+      const text = await res.text();
+      const trimmed = text.trim();
+      if (contentType.includes('application/json') || trimmed.startsWith('{') || trimmed.startsWith('[')) {
+        return JSON.parse(trimmed) as T;
+      }
+    } catch (e) {
+      console.warn('JSON parsing failed:', e);
+    }
+    return null;
+  };
+
   const handlePredictPolicy = useCallback(async (pairSymbol: string = selectedPairSymbol) => {
     setLoadingPolicy(true);
     try {
@@ -69,11 +83,13 @@ export const ForexDashboard: React.FC<ForexDashboardProps> = ({
         body: JSON.stringify({})
       });
       if (res.ok) {
-        const data = await res.json();
-        setPredictivePolicy(data);
+        const data = await safeParseResponse(res);
+        if (data) {
+          setPredictivePolicy(data);
+        }
       }
     } catch (err) {
-      console.error('Failed to run predictive policy:', err);
+      console.warn('Predictive policy request waiting for server ready state:', err);
     } finally {
       setLoadingPolicy(false);
     }
@@ -94,11 +110,13 @@ export const ForexDashboard: React.FC<ForexDashboardProps> = ({
         throw new Error(`Failed to load analysis for ${pair}`);
       }
 
-      const analysisData = await analysisRes.json();
-      setAnalysis(analysisData);
+      const analysisData = await safeParseResponse<CompletePairAnalysisResponse>(analysisRes);
+      if (analysisData) {
+        setAnalysis(analysisData);
+      }
 
       if (candlesRes.ok) {
-        const candlesData = await candlesRes.json();
+        const candlesData = await safeParseResponse<ForexCandle[]>(candlesRes);
         if (Array.isArray(candlesData)) {
           setTimeframeCandles(candlesData);
         }
@@ -122,8 +140,8 @@ export const ForexDashboard: React.FC<ForexDashboardProps> = ({
         body: JSON.stringify({ analysis })
       });
       if (res.ok) {
-        const data = await res.json();
-        setExplanation(data);
+        const data = await safeParseResponse(res);
+        if (data) setExplanation(data);
       }
     } catch (err) {
       console.error('Gemini explainer error:', err);
