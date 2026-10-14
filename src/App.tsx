@@ -97,33 +97,33 @@ export default function App() {
       if (showSpinner) setIsRefreshing(true);
 
       try {
-        const safeFetchJson = async (url: string, fallback: any = []) => {
+        const safeFetchJson = async (url: string, fallback: any = [], timeoutMs = 8000) => {
+          const controller = new AbortController();
+          const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
           try {
-            const res = await fetch(url, { cache: 'no-store' });
-            if (res.ok) {
-              return await res.json();
-            }
+            const res = await fetch(url, { cache: 'no-store', signal: controller.signal });
+            if (res.ok) return await res.json();
+            console.warn(`Safe fetch returned HTTP ${res.status} for ${url}`);
           } catch (e) {
             console.warn(`Safe fetch failed for ${url}:`, e);
+          } finally {
+            window.clearTimeout(timeout);
           }
           return fallback;
         };
 
-        const [fxPairs, inUnder, sigs, autoStatus, config] = await Promise.all([
+        // Load lightweight dashboard/config data independently of the signal
+        // scanner. A slow cTrader scan must not hold the whole UI data refresh.
+        const [fxPairs, inUnder, autoStatus, config] = await Promise.all([
           safeFetchJson('/api/forex/pairs'),
           safeFetchJson('/api/india/underlyings'),
-          safeFetchJson('/api/signals/all'),
           safeFetchJson('/api/auto-trading/status', null),
           safeFetchJson('/api/config', null)
         ]);
 
         if (config && typeof config === 'object') {
-          if (Array.isArray(config.autoLiveForexPairs)) {
-            setActiveForexUniverse(config.autoLiveForexPairs);
-          }
-          if (Array.isArray(config.autoLiveIndianUnderlyings)) {
-            setActiveIndianUniverse(config.autoLiveIndianUnderlyings);
-          }
+          if (Array.isArray(config.autoLiveForexPairs)) setActiveForexUniverse(config.autoLiveForexPairs);
+          if (Array.isArray(config.autoLiveIndianUnderlyings)) setActiveIndianUniverse(config.autoLiveIndianUnderlyings);
         }
 
         const selectedForex = Array.isArray(config?.autoLiveForexPairs)
@@ -138,28 +138,31 @@ export default function App() {
             ? fxPairs.filter((row: any) => selectedForex.has(String(row?.symbol || '').toUpperCase()))
             : fxPairs);
         }
-
         if (Array.isArray(inUnder) && inUnder.length > 0) {
           setIndianUnderlyings(selectedIndia
             ? inUnder.filter((row: any) => selectedIndia.has(String(row?.symbol || '').toUpperCase()))
             : inUnder);
         }
-
-        if (Array.isArray(sigs) && sigs.length > 0) setSignals(sigs);
         if (autoStatus && typeof autoStatus === 'object') setAutoTradingStatus(autoStatus);
 
-        const [eurCandles, niftyCandles] = await Promise.all([
-          safeFetchJson('/api/candles/EUR%2FUSD'),
-          safeFetchJson('/api/candles/NIFTY')
-        ]);
-
-        // Preserve valid chart data during transient broker/API errors.
-        if (Array.isArray(eurCandles) && eurCandles.length > 0) {
-          setCandlesMap(prev => ({ ...prev, 'EUR/USD': eurCandles }));
-        }
-        if (Array.isArray(niftyCandles) && niftyCandles.length > 0) {
-          setCandlesMap(prev => ({ ...prev, 'NIFTY': niftyCandles }));
-        }
+        // Market signals and candles are secondary requests. Bound each request
+        // so broker rate limiting or an unavailable data source cannot leave
+        // the dashboard's initial refresh pending indefinitely.
+        void safeFetchJson('/api/signals/all', [], 12000).then(sigs => {
+          if (Array.isArray(sigs)) setSignals(sigs);
+        });
+        void Promise.all([
+          safeFetchJson('/api/candles/EUR%2FUSD', [], 10000),
+          safeFetchJson('/api/candles/NIFTY', [], 10000)
+        ]).then(([eurCandles, niftyCandles]) => {
+          // Preserve valid chart data during transient broker/API errors.
+          if (Array.isArray(eurCandles) && eurCandles.length > 0) {
+            setCandlesMap(prev => ({ ...prev, 'EUR/USD': eurCandles }));
+          }
+          if (Array.isArray(niftyCandles) && niftyCandles.length > 0) {
+            setCandlesMap(prev => ({ ...prev, 'NIFTY': niftyCandles }));
+          }
+        });
       } catch (err) {
         console.error('Failed to load terminal data:', err);
       } finally {
