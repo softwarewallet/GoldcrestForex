@@ -2438,4 +2438,19 @@ async function startServer() {
   process.once('SIGINT', () => shutdown('SIGINT'));
 }
 
-startServer();
+startServer().catch((error: unknown) => {
+  const err = error instanceof Error ? error : new Error(String(error));
+  // Startup failures must be visible in the terminal and durable runtime log.
+  // Without this handler, the process-level unhandledRejection listener can
+  // consume the error and let Node exit before the HTTP server begins listening.
+  console.error('Goldcrest server startup failed:', err.stack || err.message);
+  liveRuntimeLog('ERROR', 'SERVER_STARTUP_FAILED', {
+    message: err.message,
+    stack: err.stack,
+    nodeEnv: process.env.NODE_ENV || 'development',
+    lifecycle: process.env.npm_lifecycle_event || null,
+    host: process.env.HOST || '0.0.0.0',
+    port: Number(process.env.PORT || 3000)
+  });
+  process.exitCode = 1;
+});
