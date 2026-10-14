@@ -32,14 +32,15 @@
     "test:phase60_readiness": "tsx test/test_phase60_credential_provisioning_and_runtime_readiness.ts",
     "test:phase61_demo_connection": "tsx test/test_phase61_demo_connection_and_market_data.ts",
     "test": "tsx test/test_live_runtime_log.ts && tsx test/test_config_persistence.ts && tsx test/test_trade_sizing.ts && tsx test/test_live_news_service.ts && tsx test/test_indian_market_news_service.ts && tsx test/test_auto_live_market_gate.ts && tsx test/test_live_only_audit.ts && tsx test/test_local_operator_bypass.ts && tsx test/test_auto_trade_readiness.ts && tsx test/test_auto_trading_orchestrator.ts && tsx test/test_local_auto_live_arm.ts && tsx test/test_cTrader_transport_selection.ts && tsx test/test_trade_continuity.ts && tsx test/test_redesigned_prediction_pipeline.ts && tsx test/test_universe_prediction_scanner.ts && tsx test/test_prediction_forensics_system.ts && tsx test/test_quantitative_direction_engine.ts && tsx test/test_ctrader_native_indicators.ts && tsx test/test_phase39_empirical_validation.ts && tsx test/test_phase40_extended_shadow_validation.ts && tsx test/test_phase41_dynamic_exit_engine.ts && tsx test/test_phase43_martingale_strategy.ts && tsx test/test_phase44_short_tp_optimization.ts && tsx test/test_phase47_demo_soak.ts && tsx test/test_phase56_demo_trade_accumulation.ts && tsx test/test_phase58_demo_connectivity_readiness.ts && tsx test/test_phase59_authenticated_demo_runtime.ts && tsx test/test_phase60_credential_provisioning_and_runtime_readiness.ts && tsx test/test_phase61_demo_connection_and_market_data.ts",
-    "start:prod": "NODE_ENV=production node dist/server.cjs",
+    "start:prod": "node --input-type=commonjs -e \"process.env.NODE_ENV='production'; require('./dist/server.cjs')\"",
     "prestart:prod": "npm run build",
     "test:auto_trading_orchestrator": "tsx test/test_auto_trading_orchestrator.ts",
     "test:local_operator_bypass": "tsx test/test_local_operator_bypass.ts",
     "test:live_runtime_log": "tsx test/test_live_runtime_log.ts",
     "test:auto_live_market_gate": "tsx test/test_auto_live_market_gate.ts",
     "test:live_only_audit": "tsx test/test_live_only_audit.ts",
-    "test:trade_sizing": "tsx test/test_trade_sizing.ts"
+    "test:trade_sizing": "tsx test/test_trade_sizing.ts",
+    "start:dev": "node dist/server.cjs"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
