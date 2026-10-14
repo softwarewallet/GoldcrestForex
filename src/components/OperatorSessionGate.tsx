@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { LockKeyhole, LogIn, LogOut, ShieldCheck } from 'lucide-react';
+import React, { useCallback, useEffect, useState } from 'react';
+import { LockKeyhole, LogIn, ShieldCheck, RefreshCw } from 'lucide-react';
 
 interface SessionState {
   configured: boolean;
@@ -12,17 +12,31 @@ export const OperatorSessionGate: React.FC<{ children: React.ReactNode }> = ({ c
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
-  const load = async () => {
+  // A failed request is not proof that operator authentication is unconfigured.
+  // Keep the gate closed until the server returns an authoritative session state.
+  const load = useCallback(async () => {
+    setError('');
     try {
-      const res = await fetch('/api/operator/session', { credentials: 'same-origin' });
+      const res = await fetch('/api/operator/session', {
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: { Accept: 'application/json' }
+      });
+      if (!res.ok) {
+        throw new Error(`Session service unavailable (HTTP ${res.status}).`);
+      }
       const data = await res.json();
-      setState({ configured: Boolean(data.configured), authenticated: Boolean(data.authenticated) });
-    } catch {
-      setState({ configured: false, authenticated: false });
+      if (!data || typeof data.configured !== 'boolean' || typeof data.authenticated !== 'boolean') {
+        throw new Error('Session service returned an invalid response.');
+      }
+      setState({ configured: data.configured, authenticated: data.authenticated });
+    } catch (err) {
+      setState(null);
+      setError(err instanceof Error ? err.message : 'Unable to verify operator session.');
     }
-  };
+  }, []);
 
-  useEffect(() => { void load(); }, []);
+  useEffect(() => { void load(); }, [load]);
 
   const login = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -32,22 +46,31 @@ export const OperatorSessionGate: React.FC<{ children: React.ReactNode }> = ({ c
       const res = await fetch('/api/operator/login', {
         method: 'POST',
         credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify({ key })
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.message || data.error || 'Operator authentication failed.');
       setKey('');
       await load();
-    } catch (err: any) {
-      setError(err.message || 'Operator authentication failed.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Operator authentication failed.');
     } finally {
       setBusy(false);
     }
   };
 
   if (state === null) {
-    return <div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center font-mono text-xs">Checking operator session…</div>;
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-200 flex flex-col items-center justify-center gap-4 p-6">
+        <LockKeyhole className="w-8 h-8 text-amber-400" />
+        <p className="text-sm text-slate-300">Operator session could not be verified. Access remains locked.</p>
+        {error && <p role="alert" className="max-w-lg text-center text-xs text-rose-400">{error}</p>}
+        <button type="button" onClick={() => void load()} className="inline-flex items-center gap-2 rounded-lg border border-slate-700 px-4 py-2 text-sm hover:bg-slate-800">
+          <RefreshCw className="w-4 h-4" /> Retry verification
+        </button>
+      </div>
+    );
   }
 
   if (!state.configured || state.authenticated) return <>{children}</>;
@@ -59,15 +82,16 @@ export const OperatorSessionGate: React.FC<{ children: React.ReactNode }> = ({ c
           <div className="p-2 rounded-lg bg-emerald-950 border border-emerald-800"><LockKeyhole className="w-5 h-5 text-emerald-400" /></div>
           <div>
             <h1 className="text-lg font-bold text-white">Goldcrest Operator Access</h1>
-            <p className="text-[11px] text-slate-500 font-mono">LIVE-only trading analyst · protected operator session</p>
+            <p className="text-[11px] text-slate-500 font-mono">Protected operator session</p>
           </div>
         </div>
         <div className="bg-slate-950 border border-slate-800 rounded-lg p-3 mb-5 text-xs text-slate-400 flex gap-2">
           <ShieldCheck className="w-4 h-4 text-cyan-400 shrink-0" />
           <span>The operator API key stays on the server. This browser receives only an HttpOnly, same-origin session cookie.</span>
         </div>
-        <label className="block text-xs font-mono text-slate-400 mb-2">Operator API Key</label>
+        <label className="block text-xs font-mono text-slate-400 mb-2" htmlFor="operator-key">Operator API Key</label>
         <input
+          id="operator-key"
           autoFocus
           type="password"
           value={key}
@@ -76,8 +100,8 @@ export const OperatorSessionGate: React.FC<{ children: React.ReactNode }> = ({ c
           className="w-full px-3 py-3 rounded-lg bg-slate-950 border border-slate-700 text-white outline-none focus:border-emerald-600 font-mono"
           placeholder="Enter server-configured operator key"
         />
-        {error && <div className="mt-3 text-xs text-rose-400 font-mono">{error}</div>}
-        <button disabled={busy || !key} className="mt-5 w-full py-3 rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white text-sm font-bold flex items-center justify-center gap-2">
+        {error && <div role="alert" className="mt-3 text-xs text-rose-400 font-mono">{error}</div>}
+        <button type="submit" disabled={busy || !key} className="mt-5 w-full py-3 rounded-lg bg-emerald-700 hover:bg-emerald-600 disabled:opacity-50 text-white text-sm font-bold flex items-center justify-center gap-2">
           <LogIn className="w-4 h-4" /> {busy ? 'AUTHENTICATING…' : 'ENTER GOLDCREST'}
         </button>
       </form>
