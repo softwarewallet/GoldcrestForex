@@ -2290,6 +2290,7 @@ async function captureLiveBrokerReconciliation(): Promise<void> {
 }
 
 async function startServer() {
+  console.log('[STARTUP TRACE] startServer entered');
   logApplicationAction('SERVER_STARTING', {
     nodeEnv: process.env.NODE_ENV || 'development',
     lifecycle: process.env.npm_lifecycle_event || null,
@@ -2334,8 +2335,27 @@ async function startServer() {
     || (typeof __filename !== 'undefined' && (__filename.includes('dist') || __filename.includes('dist/server.cjs') || __filename.includes('dist\\server.cjs')))
     || (process.env.npm_lifecycle_event === 'start' && fs.existsSync(path.join(process.cwd(), 'dist/index.html')));
 
+  console.log('[STARTUP TRACE] runtime mode resolved', {
+    isProduction,
+    nodeEnv: process.env.NODE_ENV || 'development',
+    lifecycle: process.env.npm_lifecycle_event || null,
+    cwd: process.cwd(),
+    distIndexExists: fs.existsSync(path.join(process.cwd(), 'dist', 'index.html')),
+    port: PORT
+  });
+
   const http = await import('node:http');
   const server = http.createServer(app);
+  server.on('error', (error: NodeJS.ErrnoException) => {
+    console.error('[STARTUP TRACE] HTTP server error:', error.code || '', error.stack || error.message);
+    liveRuntimeLog('ERROR', 'HTTP_SERVER_ERROR', {
+      code: error.code,
+      message: error.message,
+      stack: error.stack,
+      port: PORT,
+      host: process.env.HOST || '0.0.0.0'
+    });
+  });
 
   if (!isProduction) {
     const vite = await createViteServer({
@@ -2393,6 +2413,7 @@ async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
     process.env.GOLDCREST_LOCAL_DEVELOPMENT = localDevelopmentHost ? 'true' : 'false';
   }
+  console.log('[STARTUP TRACE] calling server.listen', { host, port: PORT });
   server.listen(PORT, host, () => {
     const runtime = process.env.NODE_ENV || 'development';
     console.log(`Goldcrest server listening on http://${host}:${PORT} (NODE_ENV=${runtime})`);
@@ -2438,6 +2459,12 @@ async function startServer() {
   process.once('SIGINT', () => shutdown('SIGINT'));
 }
 
+process.on('beforeExit', (code) => {
+  console.error('[STARTUP TRACE] Node beforeExit reached', { code, pid: process.pid });
+  liveRuntimeLog('ERROR', 'PROCESS_BEFORE_EXIT', { code, pid: process.pid });
+});
+
+console.log('[STARTUP TRACE] invoking startServer');
 startServer().catch((error: unknown) => {
   const err = error instanceof Error ? error : new Error(String(error));
   // Startup failures must be visible in the terminal and durable runtime log.
