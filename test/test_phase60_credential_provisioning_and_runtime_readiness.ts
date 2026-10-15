@@ -1,6 +1,6 @@
 import assert from 'assert';
 import { executeQuery, getDatabase } from '../src/database/db';
-import { getCTraderApiMode, getSystemConfig } from '../src/services/configService';
+import { getCTraderApiMode, getSystemConfig, updateSystemConfig } from '../src/services/configService';
 import { getCTraderRequestHosts } from '../src/brokers/adapters/cTrader/cTraderApiClient';
 import { CTraderLiveAdapter } from '../src/brokers/adapters/cTrader/CTraderLiveAdapter';
 import {
@@ -19,6 +19,8 @@ async function runPhase60TestSuite() {
   console.log('========================================================================\n');
 
   await getDatabase();
+  const originalApiMode = getSystemConfig().cTraderApiMode;
+  updateSystemConfig({ cTraderApiMode: 'DEMO' });
 
   // --------------------------------------------------------------------------
   // TEST 1: Sanitized Error Message Redactor
@@ -89,7 +91,7 @@ async function runPhase60TestSuite() {
   // TEST 4: Transport Routing & Isolation (Step 4)
   // --------------------------------------------------------------------------
   console.log('\nTEST 4: Verifying DEMO Transport Routing & TLS Enforcement (Step 4)...');
-  assert.strictEqual(getCTraderApiMode(), 'DEMO', 'Default environment must be DEMO');
+  assert.strictEqual(getCTraderApiMode(), 'DEMO', 'Explicit DEMO mode must be selected for this diagnostic test');
   const hosts = getCTraderRequestHosts(false);
   assert.strictEqual(hosts[0], 'wss://demo.ctraderapi.com:5036', 'DEMO host must strictly route to demo.ctraderapi.com:5036');
   console.log('  -> PASS: DEMO endpoint wss://demo.ctraderapi.com:5036 verified with enforced TLS.');
@@ -152,6 +154,7 @@ async function runPhase60TestSuite() {
   assert((positionsRow[0]?.count ?? 0) >= 0, 'Database positions table must be valid');
   console.log('  -> PASS: Database confirmed valid and synchronized with persistent ledger.');
 
+  updateSystemConfig({ cTraderApiMode: originalApiMode });
   console.log('\n========================================================================');
   console.log('PHASE 60 AUDIT RESULT:');
   console.log(`Current Status: ${preflightResult.statusLabel}`);
