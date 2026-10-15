@@ -213,7 +213,7 @@ export class ScannerService {
             changePercent: quote.changePercent24h,
             digits: pair.digits,
             signal: mapForexSignal(signal, prediction, quote),
-            dataStatus: 'LIVE',
+            dataStatus: quote.dataStatus === 'LIVE' ? 'LIVE' : 'DELAYED',
             dataSource: quote.provider
           };
         } catch (error: any) {
