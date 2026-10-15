@@ -2204,10 +2204,11 @@ app.get('/api/forex/news', async (req: Request, res: Response) => {
       : configuredPairs;
 
     const forceRefresh = req.query.refresh === '1' || req.query.refresh === 'true';
-    const news = await fetchLiveForexNews({
-      pairs: requestedPairs,
-      forceRefresh
-    });
+    const news = await withApiTimeout(
+      fetchLiveForexNews({ pairs: requestedPairs, forceRefresh }),
+      15_000,
+      'Live Forex news ingestion'
+    );
 
     res.status(news.status === 'UNAVAILABLE' ? 503 : 200).json(news);
   } catch (err: any) {
