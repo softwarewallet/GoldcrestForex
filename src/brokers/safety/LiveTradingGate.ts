@@ -29,8 +29,14 @@ export class LiveTradingGate {
   async evaluate(adapter: BrokerAdapter, params: LiveGateEvaluationParams): Promise<LiveTradingGateResult> {
     const failedReasons: string[] = [];
 
-    // Check 1: Live environment selected or operating on cTrader DEMO/LIVE API mode
-    const liveEnvironmentSelected = Boolean(adapter);
+    // Check the configured cTrader API mode as well as registry metadata.
+    // CTraderLiveAdapter's adapter type can remain LIVE while its credentials
+    // are routed to DEMO by the UI-selected API mode.
+    const selectedBrokerEnvironment = adapter.broker === 'CTRADER'
+      ? String((adapter as any).getConfigStatus?.()?.environment || adapter.environment).toUpperCase()
+      : String(adapter.environment).toUpperCase();
+    const liveEnvironmentSelected = selectedBrokerEnvironment === 'LIVE'
+      && brokerRegistry.getEnvironment() === 'LIVE';
     if (!liveEnvironmentSelected) {
       failedReasons.push('Condition 1 Failed: Active environment is not LIVE.');
     }
@@ -79,12 +85,12 @@ export class LiveTradingGate {
     // There is intentionally no caller override or shorter fallback. This
     // prevents any future execution path from silently reintroducing a 10s
     // freshness requirement without an explicit code change here.
-    const quoteMaxAgeMs = 1_800_000; // 30 minutes to prevent clock lag or tick latency issues
+    const quoteMaxAgeMs = 30_000; // LIVE execution requires an authoritative quote no older than 30 seconds
     const marketDataFresh = params.currentQuote.status === 'FRESH'
       && (Date.now() - params.currentQuote.timestamp < quoteMaxAgeMs);
     if (!marketDataFresh) {
       failedReasons.push(
-        `Condition 7 Failed: Market data quote is stale or delayed (>${Math.round(quoteMaxAgeMs / 1000)}s old).`
+        `Condition 7 Failed: Market data quote is stale or delayed (>${Math.round(quoteMaxAgeMs / 1000)}s old). Policy limit is 30s.`
       );
     }
 
@@ -200,8 +206,8 @@ export class LiveTradingGate {
     let tradeValue = NaN;
     let tradeValueUsd = NaN;
 
-    if (maximumTradeValueCheckPassed && isForex && adapter.environment === 'LIVE') {
-      // For cTrader LIVE Forex, maxTradeValueForexUsd is the broker protocol
+    if (maximumTradeValueCheckPassed && isForex && adapter.broker === 'CTRADER') {
+      // For cTrader Forex in either selected API mode, maxTradeValueForexUsd is the broker protocol
       // volume itself. Do not multiply order quantity by price or perform
       // quote-currency conversion here. The configured value is also the
       // authoritative per-order ceiling, so any execution path that supplies

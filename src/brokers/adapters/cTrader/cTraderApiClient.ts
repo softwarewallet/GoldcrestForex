@@ -611,22 +611,43 @@ function getPayloadTypeName(payloadType: number): string {
   return names[payloadType] || `Type ${payloadType}`;
 }
 
-const wsConnectionState = new WeakMap<WebSocket, { queue: Promise<any>, lastRequestTimestamp: number }>();
-const MIN_REQUEST_INTERVAL_MS = 250; // Increased to be safer
+const wsConnectionState = new WeakMap<WebSocket, { queue: Promise<any>; lastRequestTimestamp: number; cooldownUntil: number }>();
+// cTrader rate limits are account/connection scoped. The default request spacing
+// is deliberately conservative and can be raised, but never configured below
+// 750 ms to prevent a stale environment setting from reintroducing a request burst.
+const MIN_REQUEST_INTERVAL_MS = Math.max(
+  750,
+  Number(process.env.CTRADER_MIN_REQUEST_INTERVAL_MS || 1000)
+);
 
 function queueWsRequest<T>(ws: WebSocket, task: () => Promise<T>): Promise<T> {
-  const state = wsConnectionState.get(ws) || { queue: Promise.resolve(), lastRequestTimestamp: 0 };
+  const state = wsConnectionState.get(ws) || {
+    queue: Promise.resolve(),
+    lastRequestTimestamp: 0,
+    cooldownUntil: 0
+  };
   const nextQueue = state.queue.catch(() => {}).then(async () => {
-    const now = Date.now();
-    const elapsed = now - state.lastRequestTimestamp;
-    if (elapsed < MIN_REQUEST_INTERVAL_MS) {
-      console.debug(`[cTrader] Throttling request by ${MIN_REQUEST_INTERVAL_MS - elapsed}ms`);
-      await new Promise(r => setTimeout(r, MIN_REQUEST_INTERVAL_MS - elapsed));
+    const requiredAt = Math.max(state.lastRequestTimestamp + MIN_REQUEST_INTERVAL_MS, state.cooldownUntil);
+    const waitMs = Math.max(0, requiredAt - Date.now());
+    if (waitMs > 0) {
+      await new Promise(resolve => setTimeout(resolve, waitMs));
     }
     state.lastRequestTimestamp = Date.now();
-    return task();
+    try {
+      return await task();
+    } catch (error: any) {
+      const message = String(error?.message || error);
+      if (/BLOCKED_PAYLOAD_TYPE|RATE_LIMIT_EXCEEDED|TOO_MANY_REQUESTS|rate limit|too many requests/i.test(message)) {
+        // Every task rejection propagates through this queue. Apply a shared
+        // connection cooldown so the next queued request cannot immediately
+        // add more load after a provider throttle response.
+        state.cooldownUntil = Math.max(state.cooldownUntil, Date.now() + 5000);
+      }
+      throw error;
+    }
   });
-  wsConnectionState.set(ws, { queue: nextQueue, lastRequestTimestamp: state.lastRequestTimestamp });
+  state.queue = nextQueue;
+  wsConnectionState.set(ws, state);
   return nextQueue;
 }
 
@@ -635,10 +656,25 @@ function sendAndAwait(
   payloadType: number,
   payload: Record<string, unknown>,
   expectedPayloadType: number,
-  timeoutMs = 60000,
-  attempt = 1
+  timeoutMs = 60000
 ): Promise<any> {
-  return queueWsRequest(ws, () => new Promise((resolve, reject) => {
+  return queueWsRequest(ws, () =>
+    sendAndAwaitUnqueued(ws, payloadType, payload, expectedPayloadType, timeoutMs, 1)
+  );
+}
+
+// Retries run inside the already-acquired connection queue slot. Enqueuing a
+// nested sendAndAwait here would deadlock: the first queued request cannot
+// finish until the retry finishes, while the retry waits behind the first.
+function sendAndAwaitUnqueued(
+  ws: WebSocket,
+  payloadType: number,
+  payload: Record<string, unknown>,
+  expectedPayloadType: number,
+  timeoutMs: number,
+  attempt: number
+): Promise<any> {
+  return new Promise((resolve, reject) => {
     const clientMsgId = `gc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const timer = setTimeout(
       () => {
@@ -657,21 +693,33 @@ function sendAndAwait(
           ws.removeEventListener('message', handler);
           ws.removeEventListener('error', errorHandler);
           resolve(msg.payload || {});
-        } else if ((msg.payloadType === MSG_ERROR_RES || msg.payloadType === MSG_ORDER_ERROR_EVENT) && (!msg.clientMsgId || msg.clientMsgId === clientMsgId)) {
+        } else if (
+          (msg.payloadType === MSG_ERROR_RES || msg.payloadType === MSG_ORDER_ERROR_EVENT)
+          && (msg.clientMsgId === clientMsgId || !msg.clientMsgId)
+        ) {
           clearTimeout(timer);
           ws.removeEventListener('message', handler);
           ws.removeEventListener('error', errorHandler);
           
-          // Handle Rate Limiting (Error 2142 / BLOCKED_PAYLOAD_TYPE / RATE_LIMIT_EXCEEDED)
+          // Request-scoped API errors are handled only by their matching
+          // request listener. Uncorrelated broker error events are not fanned
+          // out as if every in-flight request failed.
           const errorCode = String(msg.payload?.errorCode || '');
-          const isRateLimit = errorCode === 'BLOCKED_PAYLOAD_TYPE' || errorCode === 'RATE_LIMIT_EXCEEDED' || errorCode === 'TOO_MANY_REQUESTS' || msg.payloadType === 2142 || /rate limit|too many requests|blocked/i.test(JSON.stringify(msg.payload));
+          const isRateLimit = errorCode === 'BLOCKED_PAYLOAD_TYPE'
+            || errorCode === 'RATE_LIMIT_EXCEEDED'
+            || errorCode === 'TOO_MANY_REQUESTS'
+            || msg.payloadType === MSG_ERROR_RES
+              && /rate limit|too many requests|blocked/i.test(JSON.stringify(msg.payload));
 
-          if (isRateLimit && attempt <= 10) {
-            const baseRetry = Number(msg.payload?.retryAfter || 1000);
-            const retryAfter = Math.max(1000, baseRetry) * Math.pow(1.5, attempt - 1) + Math.random() * 400;
-            console.warn(`[cTrader] Rate limited (${msg.payloadType} / ${errorCode || '2142'}). Retrying in ${Math.round(retryAfter)}ms (attempt ${attempt}/10)...`);
+          if (isRateLimit && attempt < 4) {
+            const serverRetryAfter = Number(msg.payload?.retryAfter);
+            const baseRetry = Number.isFinite(serverRetryAfter) && serverRetryAfter > 0
+              ? serverRetryAfter
+              : 2000;
+            const retryAfter = Math.max(1500, baseRetry) * Math.pow(2, attempt - 1) + Math.random() * 500;
+            console.warn(`[cTrader] Rate limited (${msg.payloadType} / ${errorCode || '2142'}). Cooling down ${Math.round(retryAfter)}ms before retry ${attempt + 1}/4.`);
             setTimeout(() => {
-              sendAndAwait(ws, payloadType, payload, expectedPayloadType, timeoutMs, attempt + 1).then(resolve).catch(reject);
+              sendAndAwaitUnqueued(ws, payloadType, payload, expectedPayloadType, timeoutMs, attempt + 1).then(resolve).catch(reject);
             }, retryAfter);
           } else {
             reject(new Error(`cTrader API error (${msg.payloadType}): ${JSON.stringify(msg.payload)}`));
@@ -688,7 +736,7 @@ function sendAndAwait(
     ws.addEventListener('message', handler);
     ws.addEventListener('error', errorHandler);
     ws.send(JSON.stringify({ clientMsgId, payloadType, payload }));
-  }));
+  });
 }
 
 
@@ -770,7 +818,16 @@ async function submitLiveCTraderExecutionAction(
         } catch {}
       };
       ws.addEventListener('message', handler);
-      ws.send(JSON.stringify({ clientMsgId, payloadType, payload }));
+      // Serialize the outbound order action with all other cTrader requests.
+      // There is deliberately no automatic retry here because an order
+      // submission with a missing acknowledgement is ambiguous.
+      void queueWsRequest(ws, async () => {
+        ws.send(JSON.stringify({ clientMsgId, payloadType, payload }));
+      }).catch((error: any) => {
+        clearTimeout(timer);
+        ws.removeEventListener('message', handler);
+        reject(error);
+      });
     });
   });
 }
@@ -1218,6 +1275,8 @@ export async function fetchCTraderReconcileState(
   });
 }
 
+const inFlightSpotQuotes = new Map<string, Promise<CTraderMarketQuote>>();
+
 export async function fetchLiveCTraderQuote(
   ctidTraderAccountId: number,
   symbolId: number,
@@ -1228,25 +1287,48 @@ export async function fetchLiveCTraderQuote(
   isLive: boolean,
   digits: number
 ): Promise<CTraderMarketQuote> {
-  const wsId = `quote_conn_${ctidTraderAccountId}`;
-  return withAuthenticatedAccount(ctidTraderAccountId, clientId, clientSecret, accessToken, isLive, async ws => {
-    const clientMsgId = `quote_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    return new Promise<CTraderMarketQuote>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`Timeout waiting for cTrader spot event for ${symbol}`)), 3000);
-      const onMsg = (data: any) => {
-        try {
-          const raw = typeof data === 'string' ? data : (data?.data ?? data).toString();
-          const msg = JSON.parse(raw);
-          if (msg.payloadType === MSG_ERROR_RES) {
-            clearTimeout(timer);
-            ws.off?.('message', onMsg);
-            reject(new Error(`cTrader quote error: ${JSON.stringify(msg.payload)}`));
-          }
-          if (msg.payloadType === MSG_SPOT_EVENT && Number(msg.payload?.symbolId) === symbolId) {
+  const quoteKey = `${isLive ? 'LIVE' : 'DEMO'}:${ctidTraderAccountId}:${symbolId}`;
+  const existing = inFlightSpotQuotes.get(quoteKey);
+  if (existing) return existing;
+
+  const work = withAuthenticatedAccount(
+    ctidTraderAccountId,
+    clientId,
+    clientSecret,
+    accessToken,
+    isLive,
+    async ws => {
+      const clientMsgId = `quote_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      let timer: NodeJS.Timeout | undefined;
+      let settled = false;
+      let onMsg: ((data: any) => void) | undefined;
+
+      const eventPromise = new Promise<CTraderMarketQuote>((resolve, reject) => {
+        const cleanup = () => {
+          if (timer) clearTimeout(timer);
+          if (onMsg) ws.off('message', onMsg);
+        };
+        onMsg = (data: any) => {
+          try {
+            const raw = typeof data === 'string' ? data : (data?.data ?? data).toString();
+            const msg = JSON.parse(raw);
+            // Ignore request errors emitted for other queued operations on this
+            // persistent WebSocket. Only a correlated rejection belongs to
+            // this spot subscription; uncorrelated errors must not fan out.
+            if (
+              msg.payloadType === MSG_ERROR_RES
+              && msg.clientMsgId === clientMsgId
+            ) {
+              settled = true;
+              cleanup();
+              reject(new Error(`cTrader quote error: ${JSON.stringify(msg.payload)}`));
+              return;
+            }
+            if (msg.payloadType !== MSG_SPOT_EVENT || Number(msg.payload?.symbolId) !== symbolId) return;
             const p = msg.payload;
             if (p.bid === undefined && p.ask === undefined) return;
-            clearTimeout(timer);
-            ws.off?.('message', onMsg);
+            settled = true;
+            cleanup();
             resolve({
               symbol,
               symbolId,
@@ -1255,21 +1337,49 @@ export async function fetchLiveCTraderQuote(
               timestamp: p.timestamp ? Number(p.timestamp) : Date.now(),
               status: 'FRESH'
             });
-          }
-        } catch {}
-      };
-      ws.on('message', onMsg);
-      ws.send(JSON.stringify({
-        clientMsgId,
-        payloadType: MSG_SUBSCRIBE_SPOTS_REQ,
-        payload: {
-          ctidTraderAccountId,
-          symbolId: [symbolId],
-          subscribeToSpotTimestamp: true
-        }
-      }));
-    });
+          } catch {}
+        };
+        ws.on('message', onMsg);
+      });
+
+      try {
+        // Pace the outbound subscription request through the same per-socket
+        // queue used by historical, account and order requests. The queue slot
+        // ends after send; the spot event is awaited separately.
+        await queueWsRequest(ws, async () => {
+          timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            if (onMsg) ws.off('message', onMsg);
+          }, 5000);
+          ws.send(JSON.stringify({
+            clientMsgId,
+            payloadType: MSG_SUBSCRIBE_SPOTS_REQ,
+            payload: {
+              ctidTraderAccountId,
+              symbolId: [symbolId],
+              subscribeToSpotTimestamp: true
+            }
+          }));
+        });
+        return await Promise.race([
+          eventPromise,
+          new Promise<CTraderMarketQuote>((_resolve, reject) => {
+            setTimeout(() => reject(new Error(`Timeout waiting for cTrader spot event for ${symbol}`)), 5500).unref?.();
+          })
+        ]);
+      } catch (error) {
+        if (timer) clearTimeout(timer);
+        if (onMsg) ws.off('message', onMsg);
+        throw error;
+      }
+    }
+  ).finally(() => {
+    if (inFlightSpotQuotes.get(quoteKey) === work) inFlightSpotQuotes.delete(quoteKey);
   });
+
+  inFlightSpotQuotes.set(quoteKey, work);
+  return work;
 }
 
 export async function fetchCTraderTrendbars(

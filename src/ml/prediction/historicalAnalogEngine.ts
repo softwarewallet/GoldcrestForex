@@ -33,7 +33,20 @@ export class HistoricalAnalogEngine {
     cutoffTimestamp: number = Date.now(),
     limitCandles: number = 500
   ): Promise<HistoricalAnalogEvidence> {
-    const candles = await HistoricalDatabaseExtractor.getCandlesUpTo(pair, 'Daily', cutoffTimestamp, limitCandles);
+    const timeframeForHorizon: Record<PredictionHorizon, string> = {
+      '5M': '5M',
+      '15M': '15M',
+      '1H': '1H',
+      '4H': '4H',
+      '1D': 'Daily'
+    };
+    const sourceTimeframe = timeframeForHorizon[horizon] || '15M';
+    const candles = await HistoricalDatabaseExtractor.getCandlesUpTo(
+      pair,
+      sourceTimeframe,
+      cutoffTimestamp,
+      limitCandles
+    );
 
     if (candles.length < 35) {
       return this.emptyEvidence('Insufficient historical candle count');
@@ -47,7 +60,10 @@ export class HistoricalAnalogEngine {
       futureDirection: 'UP' | 'DOWN' | 'FLAT';
     }> = [];
 
-    const horizonBars = horizon === '5M' ? 1 : horizon === '15M' ? 1 : horizon === '1H' ? 2 : horizon === '4H' ? 3 : 5;
+    // Outcome labels must be measured in bars of the same timeframe as
+    // the source candles; using daily bars for an intraday prediction changes
+    // a 15-minute target into an overnight target.
+    const horizonBars = 1;
 
     for (let i = 20; i < candles.length - horizonBars; i++) {
       const c = candles[i];

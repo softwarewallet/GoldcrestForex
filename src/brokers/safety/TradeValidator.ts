@@ -208,24 +208,26 @@ export class TradeValidator {
     const isForex = input.market === 'FOREX';
     const maxTradeValue = isForex ? config.maxTradeValueForexUsd : config.maxTradeValueIndianInr;
     const referencePrice = order.price && order.price > 0 ? order.price : input.currentPrice;
-    const quoteCurrency = isForex ? input.symbol.replace(/[^A-Z]/g, '').slice(-3) : 'INR';
-    const tradeValue = Number(order.quantity) * Number(referencePrice);
-    let maximumTradeValuePassed = Number.isFinite(maxTradeValue) && maxTradeValue > 0 && Number.isFinite(tradeValue) && tradeValue > 0;
 
-    if (maximumTradeValuePassed && isForex && quoteCurrency !== 'USD') {
+    // Forex sizing follows the documented cTrader volume contract:
+    // sizeForexOrderToMaxTradeValue returns the configured cTrader protocol
+    // volume cap (and the adapter converts protocol volume to its internal
+    // order quantity). Multiplying that protocol-volume value by price here
+    // double-counts price and can reject a correctly capped order.
+    // Indian orders retain their quantity × premium notional check.
+    const checkedValue = isForex
+      ? Number(order.quantity)
+      : Number(order.quantity) * Number(referencePrice);
+    let maximumTradeValuePassed = Number.isFinite(maxTradeValue) && maxTradeValue > 0
+      && Number.isFinite(checkedValue) && checkedValue > 0;
+
+    if (maximumTradeValuePassed && checkedValue > maxTradeValue) {
       maximumTradeValuePassed = false;
       return {
         valid: false,
-        rejectionReason: `MAX_TRADE_VALUE_UNVERIFIABLE: Forex pair ${input.symbol} is quoted in ${quoteCurrency}; USD conversion is unavailable, so the configured USD limit cannot be safely verified.`,
-        checks: { ...checks, maximumTradeValuePassed }
-      };
-    }
-
-    if (maximumTradeValuePassed && tradeValue > maxTradeValue) {
-      maximumTradeValuePassed = false;
-      return {
-        valid: false,
-        rejectionReason: `MAX_TRADE_VALUE_EXCEEDED: Trade value ${tradeValue.toFixed(2)} ${isForex ? 'USD' : 'INR'} exceeds the configured maximum of ${maxTradeValue.toFixed(2)} ${isForex ? 'USD' : 'INR'} for ${isForex ? 'cTrader' : '5paisa'}.`,
+        rejectionReason: isForex
+          ? `MAX_TRADE_VOLUME_EXCEEDED: cTrader protocol volume ${checkedValue.toFixed(2)} exceeds the configured maximum of ${maxTradeValue.toFixed(2)}.`
+          : `MAX_TRADE_VALUE_EXCEEDED: Trade value ${checkedValue.toFixed(2)} INR exceeds the configured maximum of ${maxTradeValue.toFixed(2)} INR for 5paisa.`,
         checks: { ...checks, maximumTradeValuePassed }
       };
     }

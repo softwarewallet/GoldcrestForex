@@ -363,4 +363,4 @@ const staleAt20s = await liveTradingGate.evaluate(gateAdapter, {
   maxOpenPositions: 5
 });
 assert.equal(staleAt20s.checks.marketDataFresh, false);
-assert.ok(staleAt20s.failedReasons.some(reason => reason.includes('>1800s old')));
+assert.ok(staleAt20s.failedReasons.some(reason => reason.includes('>30s old')));

@@ -3,6 +3,21 @@ import { FOREX_PAIRS, ForexPairConfig, getForexPairConfig } from './instruments'
 import { ForexCandle, ForexMarketStatus, ForexQuote, ForexTimeframe } from './types';
 import { getForexSessionState } from '../common/session';
 import { brokerRegistry } from '../../brokers/registry';
+import { persistHistoricalCandles } from '../../database/db';
+import { liveRuntimeLog } from '../../services/liveRuntimeLog';
+
+interface SharedForexPairSnapshot {
+  candles: Map<string, ForexCandle[]>;
+  quote: ForexQuote;
+  candleFetchedAt: Map<string, number>;
+  quoteFetchedAt: number;
+}
+
+// Shared across the scanner and Auto Live provider instances in this process.
+// A simultaneous dashboard scan must reuse the same broker snapshot rather
+// than creating another wave of WebSocket history requests.
+const sharedForexSnapshots = new Map<string, SharedForexPairSnapshot>();
+const sharedForexRefreshes = new Map<string, Promise<void>>();
 
 export interface ForexDataProvider {
   getQuote(pair: string): Promise<ForexQuote> | ForexQuote;
@@ -30,178 +45,200 @@ export class LiveForexProvider implements LiveForexDataProvider {
 
   private candles = new Map<string, ForexCandle[]>();
   private quotes = new Map<string, ForexQuote>();
+  private readonly quoteCacheMs = Math.max(5_000, Number(process.env.GOLDCREST_FOREX_QUOTE_CACHE_MS || 8_000));
+
+  private hydrateSharedSnapshot(symbol: string): SharedForexPairSnapshot | null {
+    const snapshot = sharedForexSnapshots.get(symbol);
+    if (!snapshot) return null;
+    for (const [key, candles] of snapshot.candles) this.candles.set(key, candles);
+    this.quotes.set(symbol, snapshot.quote);
+    return snapshot;
+  }
 
   async refreshPair(pair: string): Promise<void> {
-    const config = getForexPairConfig(pair);
-    const adapter = brokerRegistry.getAdapter('CTRADER', 'LIVE');
+    const symbol = getForexPairConfig(pair).symbol;
+    const inflight = sharedForexRefreshes.get(symbol);
+    if (inflight) {
+      await inflight;
+      if (!this.hydrateSharedSnapshot(symbol)) {
+        throw new Error(`Shared broker refresh for ${symbol} completed without a market-data snapshot.`);
+      }
+      return;
+    }
 
-    let rows: any[] = [];
-    let liveQuote: any = null;
-    let quoteDataStatus: ForexCandle['dataStatus'] = 'DELAYED';
+    const snapshot = this.hydrateSharedSnapshot(symbol);
+    const now = Date.now();
+    if (snapshot && now - snapshot.quoteFetchedAt < this.quoteCacheMs) {
+      // Reuse the shared quote/candles snapshot across UI polling, signal
+      // scanning and Auto Live while it is recent; order-time gates still
+      // enforce the stricter 30-second authoritative quote limit.
+      return;
+    }
 
-    const configStatus = (adapter as any).getConfigStatus?.();
-    const isConfigured = configStatus ? configStatus.configured : false;
-
+    const work = this.refreshPairFromBroker(symbol);
+    sharedForexRefreshes.set(symbol, work);
     try {
-      if (!isConfigured) {
-        throw new Error('cTrader LIVE credentials missing. Required: Client ID, Client Secret, and Access Token.');
-      }
-      if (!adapter.getHistoricalCandles) {
-        throw new Error('Authoritative cTrader historical market-data capability is unavailable.');
-      }
+      await work;
+    } finally {
+      if (sharedForexRefreshes.get(symbol) === work) sharedForexRefreshes.delete(symbol);
+    }
+  }
 
-      const timeframes: ForexTimeframe[] = ['5M', '15M', '1H', '4H', 'Daily'];
-      rows = await Promise.all(
-        timeframes.map(async timeframe => ({
-          timeframe,
-          data: await adapter.getHistoricalCandles!(config.symbol, timeframe, 80)
-        }))
-      );
-
-      const marketStatus = this.getMarketStatus();
-      if (marketStatus.isOpen) {
-        try {
-          const quote = await adapter.getQuote(config.symbol);
-          if (
-            quote.status === 'FRESH'
-            && Date.now() - quote.timestamp < 10_000
-            && quote.bid > 0
-            && quote.ask > 0
-          ) {
-            liveQuote = quote;
-            quoteDataStatus = 'LIVE';
-          }
-        } catch {}
-      }
-    } catch (err: any) {
-      if (isConfigured) {
-        const msg = String(err?.message || err);
-        if (!msg.includes('BLOCKED_PAYLOAD_TYPE') && !msg.includes('rate limited')) {
-          console.warn(`[ForexProvider] cTrader WebSocket connection failed for ${config.symbol} (${msg}). Using robust fallback market feed to maintain signal prediction.`);
-        }
-      }
-      const basePrices: Record<string, number> = {
-        'EUR/USD': 1.0850,
-        'GBP/USD': 1.2750,
-        'USD/JPY': 152.00,
-        'USD/CHF': 0.9000,
-        'AUD/USD': 0.6550,
-        'USD/CAD': 1.3650,
-        'NZD/USD': 0.6050,
-        'EUR/GBP': 0.8500,
-        'EUR/JPY': 164.50,
-        'GBP/JPY': 193.80,
-        'AUD/JPY': 99.50,
-      };
-      const mid = basePrices[config.symbol] || 1.0000;
-      const spread = config.typicalSpreadPips * config.pipSize;
-      const timeframes: ForexTimeframe[] = ['5M', '15M', '1H', '4H', 'Daily'];
-      const now = Date.now();
-      const tfIntervals: Record<string, number> = {
-        '1M': 60 * 1000,
-        '5M': 5 * 60 * 1000,
-        '15M': 15 * 60 * 1000,
-        '30M': 30 * 60 * 1000,
-        '1H': 60 * 60 * 1000,
-        '4H': 4 * 60 * 60 * 1000,
-        'Daily': 24 * 60 * 60 * 1000,
-      };
-
-      rows = timeframes.map(timeframe => {
-        const interval = tfIntervals[timeframe];
-        const data: any[] = [];
-        let currentPrice = mid;
-        for (let i = 0; i < 80; i++) {
-          const t = now - (80 - i) * interval;
-          const noise = (Math.sin(i * 0.3) * 0.0015 + (Math.random() - 0.48) * 0.001) * mid;
-          const open = currentPrice;
-          const close = open + noise;
-          const high = Math.max(open, close) + Math.abs(noise) * 0.5;
-          const low = Math.min(open, close) - Math.abs(noise) * 0.5;
-          currentPrice = close;
-          data.push({
-            timestamp: t,
-            open,
-            high,
-            low,
-            close,
-            volume: 1000 + Math.floor(Math.random() * 5000)
-          });
-        }
-        return { timeframe, data };
-      });
-
-      liveQuote = {
-        pair: config.symbol,
-        timestamp: now,
-        bid: mid,
-        ask: mid + spread,
-        spread: config.typicalSpreadPips,
-        status: 'FRESH'
-      };
-      quoteDataStatus = 'LIVE';
+  private async refreshPairFromBroker(symbol: string): Promise<void> {
+    const config = getForexPairConfig(symbol);
+    const adapter = brokerRegistry.getAdapter('CTRADER', 'LIVE');
+    const configStatus = (adapter as any).getConfigStatus?.();
+    if (!configStatus?.configured) {
+      throw new Error('cTrader market data is unavailable for the selected API environment; configure matching credentials first.');
+    }
+    if (!adapter.getHistoricalCandles) {
+      throw new Error('Authoritative cTrader historical market-data capability is unavailable.');
     }
 
-    const quoteCandles = rows.find(row => row.timeframe === '15M')?.data || [];
-    const latestHistoricalClose = Array.isArray(quoteCandles) && quoteCandles.length > 0
-      ? Number(quoteCandles[quoteCandles.length - 1].close)
-      : 0;
+    const snapshot = this.hydrateSharedSnapshot(symbol);
+    const fetchedAt = new Map(snapshot?.candleFetchedAt || []);
+    const requestedTimeframes: Array<{ timeframe: ForexTimeframe; limit: number; ttlMs: number }> = [
+      { timeframe: '5M', limit: 80, ttlMs: 4 * 60_000 },
+      { timeframe: '15M', limit: 500, ttlMs: 12 * 60_000 },
+      { timeframe: '1H', limit: 80, ttlMs: 50 * 60_000 },
+      { timeframe: '4H', limit: 80, ttlMs: 3.5 * 60 * 60_000 },
+      { timeframe: 'Daily', limit: 500, ttlMs: 20 * 60 * 60_000 }
+    ];
+    const persistenceRows: Array<{
+      symbol: string; timeframe: string; timestamp: number;
+      open: number; high: number; low: number; close: number; volume: number;
+    }> = [];
 
-    if (!liveQuote && !(latestHistoricalClose > 0)) {
-      throw new Error(`No authoritative cTrader price is available for ${config.symbol}.`);
-    }
+    // Re-request each timeframe only when its candle cadence requires it.
+    // The 15M/Daily histories are large enough to support analog validation;
+    // higher timeframes refresh much less frequently than every Auto Live cycle.
+    for (const item of requestedTimeframes) {
+      const key = `${symbol}:${item.timeframe}`;
+      const cached = this.candles.get(key);
+      const cacheAge = Date.now() - (fetchedAt.get(item.timeframe) || 0);
+      const needsFetch = !cached || cached.length < 35 || cacheAge >= item.ttlMs;
+      if (!needsFetch) continue;
 
-    for (const row of rows) {
-      if (!Array.isArray(row.data) || row.data.length < 35) {
-        throw new Error(`Insufficient live ${row.timeframe} candle history for ${config.symbol}.`);
+      const data = await adapter.getHistoricalCandles(symbol, item.timeframe, item.limit);
+      if (!Array.isArray(data) || data.length < 35) {
+        throw new Error(`Insufficient broker-confirmed ${item.timeframe} candle history for ${symbol}; received ${Array.isArray(data) ? data.length : 0}.`);
       }
-
-      const candles: ForexCandle[] = row.data.map((candle, index) => ({
-        pair: config.symbol,
-        timeframe: row.timeframe,
-        timestamp: Number(candle.timestamp),
-        open: Number(candle.open),
-        high: Number(candle.high),
-        low: Number(candle.low),
-        close: Number(candle.close),
-        // Historical bars provide OHLCV. When an executable live quote is
-        // unavailable, bid/ask are anchored to the broker-reported bar close
-        // and marked DELAYED rather than being presented as a live quote.
-        bid: Number(liveQuote?.bid ?? candle.close),
-        ask: Number(liveQuote?.ask ?? candle.close),
-        spread: Number(liveQuote ? (liveQuote.ask - liveQuote.bid) : 0),
-        volume: Number(candle.volume || 0),
-        tickVolume: Number(candle.volume || 0),
-        provider: liveQuote ? this.providerName : 'CTRADER_HISTORICAL_CLOSE',
-        dataStatus: liveQuote && row.timeframe === '15M' ? 'LIVE' : quoteDataStatus,
+      const candles: ForexCandle[] = data.map((bar: any) => ({
+        pair: symbol,
+        timeframe: item.timeframe,
+        timestamp: Number(bar.timestamp),
+        open: Number(bar.open),
+        high: Number(bar.high),
+        low: Number(bar.low),
+        close: Number(bar.close),
+        bid: Number(bar.close),
+        ask: Number(bar.close),
+        spread: 0,
+        volume: Number(bar.volume || 0),
+        tickVolume: Number(bar.volume || 0),
+        provider: 'CTRADER_HISTORICAL_CLOSE',
+        dataStatus: 'DELAYED'
       }));
-
-      this.candles.set(`${config.symbol}:${row.timeframe}`, candles);
+      this.candles.set(key, candles);
+      fetchedAt.set(item.timeframe, Date.now());
+      persistenceRows.push(...candles.map(bar => ({
+        symbol,
+        timeframe: item.timeframe,
+        timestamp: bar.timestamp,
+        open: bar.open,
+        high: bar.high,
+        low: bar.low,
+        close: bar.close,
+        volume: bar.volume
+      })));
     }
 
-    const first = quoteCandles[0];
-    const latest = quoteCandles[quoteCandles.length - 1];
-    const closePrice = latestHistoricalClose;
-    const change = latest && first ? latest.close - first.open : 0;
-    const changePips = change / config.pipSize;
-    const changePct = first?.open ? (change / first.open) * 100 : 0;
+    if (persistenceRows.length) {
+      const persisted = await persistHistoricalCandles(persistenceRows);
+      liveRuntimeLog('INFO', 'BROKER_HISTORICAL_CANDLES_PERSISTED', {
+        pair: symbol,
+        broker: 'CTRADER',
+        rowsReceived: persistenceRows.length,
+        rowsPersisted: persisted,
+        timeframes: [...new Set(persistenceRows.map(row => row.timeframe))]
+      });
+    }
 
-    this.quotes.set(config.symbol, {
-      pair: config.symbol,
-      timestamp: liveQuote?.timestamp ?? Number(latest?.timestamp || Date.now()),
-      bid: liveQuote?.bid ?? closePrice,
-      ask: liveQuote?.ask ?? closePrice,
-      spreadPips: liveQuote
-        ? liveQuote.spread * (config.symbol.includes('JPY') ? 100 : 10000)
-        : 0,
-      digits: config.digits,
-      pipSize: config.pipSize,
-      changePips24h: Number(changePips.toFixed(1)),
-      changePercent24h: Number(changePct.toFixed(2)),
-      high24h: quoteCandles.length ? Math.max(...quoteCandles.map(c => c.high)) : closePrice,
-      low24h: quoteCandles.length ? Math.min(...quoteCandles.map(c => c.low)) : closePrice,
-      provider: liveQuote ? this.providerName : 'CTRADER_HISTORICAL_CLOSE',
-      dataStatus: quoteDataStatus,
+    const quoteCandles = this.candles.get(`${symbol}:15M`) || [];
+    const latest = quoteCandles[quoteCandles.length - 1];
+    if (!latest || !(latest.close > 0)) {
+      throw new Error(`No authoritative cTrader 15M candle is available for ${symbol}.`);
+    }
+
+    let brokerQuote: any = null;
+    let quoteFetchedAt = snapshot?.quoteFetchedAt || 0;
+    let quote = snapshot?.quote || null;
+    const marketIsOpen = this.getMarketStatus().isOpen;
+    if (marketIsOpen && (!quote || Date.now() - quoteFetchedAt >= this.quoteCacheMs)) {
+      brokerQuote = await adapter.getQuote(symbol);
+      quoteFetchedAt = Date.now();
+      if (
+        brokerQuote?.status === 'FRESH' &&
+        Date.now() - Number(brokerQuote.timestamp) < 10_000 &&
+        Number(brokerQuote.bid) > 0 &&
+        Number(brokerQuote.ask) >= Number(brokerQuote.bid)
+      ) {
+        const spreadPips = (Number(brokerQuote.ask) - Number(brokerQuote.bid)) / config.pipSize;
+        const first = quoteCandles[0];
+        const change = first ? latest.close - first.open : 0;
+        quote = {
+          pair: symbol,
+          timestamp: Number(brokerQuote.timestamp),
+          bid: Number(brokerQuote.bid),
+          ask: Number(brokerQuote.ask),
+          spreadPips,
+          digits: config.digits,
+          pipSize: config.pipSize,
+          changePips24h: Number((change / config.pipSize).toFixed(1)),
+          changePercent24h: Number(first?.open ? (change / first.open * 100).toFixed(2) : '0'),
+          high24h: Math.max(...quoteCandles.map(bar => bar.high)),
+          low24h: Math.min(...quoteCandles.map(bar => bar.low)),
+          provider: this.providerName,
+          dataStatus: 'LIVE'
+        };
+      } else {
+        quote = null;
+      }
+    }
+
+    // If no fresh broker quote exists, expose only a delayed last candle close.
+    // It is never relabelled as live and will fail the execution freshness gate.
+    if (!quote) {
+      quote = {
+        pair: symbol,
+        timestamp: Number(latest.timestamp),
+        bid: latest.close,
+        ask: latest.close,
+        spreadPips: 0,
+        digits: config.digits,
+        pipSize: config.pipSize,
+        changePips24h: 0,
+        changePercent24h: 0,
+        high24h: Math.max(...quoteCandles.map(bar => bar.high)),
+        low24h: Math.min(...quoteCandles.map(bar => bar.low)),
+        provider: 'CTRADER_HISTORICAL_CLOSE',
+        dataStatus: 'DELAYED'
+      };
+      quoteFetchedAt = Date.now();
+    }
+
+    this.quotes.set(symbol, quote);
+    sharedForexSnapshots.set(symbol, {
+      candles: new Map<string, ForexCandle[]>(
+        requestedTimeframes.reduce<Array<[string, ForexCandle[]]>>((entries, item) => {
+          const rows = this.candles.get(`${symbol}:${item.timeframe}`);
+          if (rows) entries.push([`${symbol}:${item.timeframe}`, rows]);
+          return entries;
+        }, [])
+      ),
+      quote,
+      candleFetchedAt: fetchedAt,
+      quoteFetchedAt
     });
   }
 
