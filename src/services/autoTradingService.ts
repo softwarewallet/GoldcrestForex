@@ -1040,7 +1040,7 @@ class AutoTradingService {
       if (!Number.isFinite(bid) || bid <= 0 || !Number.isFinite(ask) || ask <= 0 || ask < bid) {
         const reason = `cTrader did not provide a valid bid/ask for ${pair}; signal generation skipped until market data recovers.`;
         this.lastActions.push({ pair, result: 'BLOCKED', reason });
-        liveRuntimeLog('WARN', 'AUTO_TRADING_INVALID_MARKET_QUOTE', { pair, bid, ask, quoteStatus: quote?.status, quoteTimestamp: quote?.timestamp, reason });
+        liveRuntimeLog('WARN', 'AUTO_TRADING_INVALID_MARKET_QUOTE', { pair, bid, ask, quoteTimestamp: quote?.timestamp, reason });
         tradeAuditLog('AUTO_TRADING_INVALID_MARKET_QUOTE', { pair, bid, ask, reason });
         return;
       }
