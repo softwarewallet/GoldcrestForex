@@ -161,10 +161,8 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
     void load();
     const handleSettingsUpdated = () => { void load(); };
     window.addEventListener('goldcrest:settings-updated', handleSettingsUpdated);
-    window.addEventListener('focus', handleSettingsUpdated);
     return () => {
       window.removeEventListener('goldcrest:settings-updated', handleSettingsUpdated);
-      window.removeEventListener('focus', handleSettingsUpdated);
     };
   }, []);
 
