@@ -222,6 +222,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
   const [selectedSignalDecision, setSelectedSignalDecision] = useState<any | null>(null);
   const [autoTradingStatus, setAutoTradingStatus] = useState<any | null>(parentAutoTradingStatus);
   const [autoTradingBusy, setAutoTradingBusy] = useState(false);
+  const [autoTradingControlError, setAutoTradingControlError] = useState<string | null>(null);
   const [closedMarketPrompt, setClosedMarketPrompt] = useState<any | null>(null);
   const [dailyLossLimitPct, setDailyLossLimitPct] = useState<number>(3);
 
@@ -568,6 +569,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
 
   const toggleAutoTrading = useCallback(async () => {
     setAutoTradingBusy(true);
+    setAutoTradingControlError(null);
     try {
       const shouldStop = ['RUNNING', 'PREPARING'].includes(autoTradingStatus?.state);
       const res = await fetchWithTimeout(shouldStop ? '/api/auto-trading/stop' : '/api/auto-trading/start', {
@@ -590,12 +592,29 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
           data?.lastCycleResult || data?.message || data?.error || res.statusText
         );
       }
-    } catch (err) {
+    } catch (err: any) {
+      const message = err?.name === 'AbortError'
+        ? 'Auto Live control request timed out. Checking the backend state before another attempt.'
+        : (err?.message || 'Auto Live control request failed.');
       console.warn('Auto trading control failed:', err);
+      setAutoTradingControlError(message);
+      // A client timeout does not prove that the server did not arm/stop Auto
+      // Live. Reconcile authoritative state before permitting another click.
+      try {
+        const statusRes = await fetchWithTimeout('/api/auto-trading/status', { cache: 'no-store' }, 5_000);
+        if (statusRes.ok) {
+          const latestStatus = await statusRes.json();
+          setAutoTradingStatus(latestStatus);
+          onAutoTradingStatusChange?.(latestStatus);
+          setAutoTradingControlError(`${message} Current backend state: ${latestStatus?.state || 'UNKNOWN'}.`);
+        }
+      } catch {
+        // Retain the original actionable timeout/error message.
+      }
     } finally {
       setAutoTradingBusy(false);
     }
-  }, [autoTradingStatus?.state]);
+  }, [autoTradingStatus?.state, onAutoTradingStatusChange]);
 
   const confirmClosedMarketAutoLive = useCallback(async () => {
     setAutoTradingBusy(true);
@@ -970,6 +989,15 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
                 ? 'STOP AUTO LIVE'
                 : 'START AUTO LIVE'}
             </button>
+            {autoTradingControlError && (
+              <span
+                role="status"
+                title={autoTradingControlError}
+                className="max-w-[220px] truncate text-[10px] font-medium text-rose-300"
+              >
+                {autoTradingControlError}
+              </span>
+            )}
 
             {autoTradingStatus?.preOpenPreparation?.news && (
               <div className={`flex items-center gap-2 px-2.5 py-1 rounded border text-[10px] font-mono ${
