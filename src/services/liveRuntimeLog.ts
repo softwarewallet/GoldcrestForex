@@ -32,6 +32,10 @@ function getDailyLogFile(date = getLogDate()): string {
 
 let enabled = false;
 let consoleCaptureInstalled = false;
+// Serialize audit writes asynchronously so filesystem latency does not block API/UI actions.
+let pendingLogWrites: Promise<void> = Promise.resolve();
+let ensuredWriteDate: string | null = null;
+let ensuredWriteFile: string | null = null;
 
 export function initializeLiveRuntimeLog(source = 'APPLICATION_START'): { enabled: boolean; file: string } {
   const status = startLiveRuntimeLog(source);
@@ -96,15 +100,31 @@ function sanitize(value: unknown): string {
 
 function writeLine(level: LiveLogLevel, event: string, details?: unknown): void {
   if (!enabled) return;
-  const logFile = ensureLogFile();
+
+  const date = getLogDate();
+  if (ensuredWriteDate !== date || !ensuredWriteFile) {
+    // Create/check the daily file once, rather than performing synchronous
+    // directory and file checks for every request/audit event.
+    ensuredWriteFile = ensureLogFile(date);
+    ensuredWriteDate = date;
+  }
+
+  const logFile = ensuredWriteFile;
   const timestamp = new Date().toISOString();
   const detailText = details === undefined ? '' : ` | ${sanitize(details)}`;
-  const line = `[${timestamp}] [${level}] [${event}]${detailText}\n`;
-  try {
-    fs.appendFileSync(logFile, line, 'utf8');
-  } catch (error) {
-    process.stderr.write(`[LIVE-LOG] Failed to append log file: ${String(error)}\n`);
-  }
+  const line = `[${timestamp}] [${level}] [${event}]${detailText}\\n`;
+
+  pendingLogWrites = pendingLogWrites
+    .then(() => fs.promises.appendFile(logFile, line, 'utf8'))
+    .catch(error => {
+      // Logging failures must not break trading or API actions.
+      process.stderr.write(`[LIVE-LOG] Failed to append log file: ${String(error)}\\n`);
+    });
+}
+
+/** Await queued audit writes when a caller requires read-after-write consistency. */
+export async function flushLiveRuntimeLog(): Promise<void> {
+  await pendingLogWrites;
 }
 
 export function startLiveRuntimeLog(source = 'SETTINGS'): {
