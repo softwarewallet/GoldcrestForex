@@ -1,6 +1,6 @@
 import assert from 'assert';
 import { executeQuery, getDatabase } from '../src/database/db';
-import { getCTraderApiMode, getSystemConfig, updateSystemConfig } from '../src/services/configService';
+import { DEFAULT_SYSTEM_CONFIG, getCTraderApiMode, getSystemConfig, updateSystemConfig } from '../src/services/configService';
 import { getCTraderRequestHosts } from '../src/brokers/adapters/cTrader/cTraderApiClient';
 import { brokerRegistry } from '../src/brokers/registry';
 import { CTraderLiveAdapter } from '../src/brokers/adapters/cTrader/CTraderLiveAdapter';
@@ -14,6 +14,7 @@ async function runPhase58TestSuite() {
   console.log('============================================================\n');
 
   await getDatabase();
+  const originalApiMode = getSystemConfig().cTraderApiMode;
 
   // --------------------------------------------------------------------------
   // TEST 1: Sanitized Credential Presence Verification
@@ -40,8 +41,12 @@ async function runPhase58TestSuite() {
   // --------------------------------------------------------------------------
   // TEST 2: Active Transport Endpoint & Environment Isolation
   // --------------------------------------------------------------------------
-  console.log('\nTEST 2: Verifying Transport Isolation & DEMO Endpoint Selection...');
-  assert.strictEqual(getCTraderApiMode(), 'DEMO', 'DEMO mode must be selected by default');
+  console.log('\nTEST 2: Verifying LIVE default and strict DEMO Endpoint Isolation...');
+  assert.strictEqual(DEFAULT_SYSTEM_CONFIG.cTraderApiMode, 'LIVE', 'Fresh configuration must default to LIVE as required by Auto Live');
+  // DEMO remains an explicitly selectable diagnostic mode; it is not the
+  // default environment used by the LIVE-only Auto Live execution service.
+  updateSystemConfig({ cTraderApiMode: 'DEMO' });
+  assert.strictEqual(getCTraderApiMode(), 'DEMO', 'Explicit DEMO selection must be respected');
   const demoHosts = getCTraderRequestHosts(false);
   assert.strictEqual(demoHosts.length, 1, 'Exactly one DEMO host must be resolved');
   assert.strictEqual(demoHosts[0], 'wss://demo.ctraderapi.com:5036', 'DEMO host must route to demo.ctraderapi.com:5036');
@@ -155,6 +160,7 @@ async function runPhase58TestSuite() {
   assert.strictEqual(Number(posRows[0].cnt), 0, 'positions table must have 0 rows');
   console.log('  -> PASS: Clean ledger verified. Database contains zero fabricated or mock trades.');
 
+  updateSystemConfig({ cTraderApiMode: originalApiMode });
   console.log('\n============================================================');
   console.log('ALL PHASE 58 AUDIT & READINESS TESTS PASSED SUCCESSFULLY!');
   console.log(' - Sanitized credential inspection certified');
