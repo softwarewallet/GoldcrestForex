@@ -67,7 +67,9 @@ class WebSocketManager {
     const connectionPromise = (async () => {
       try {
         const ws = await connectFn();
-        ws.setMaxListeners(1000);
+        if (typeof (ws as any).setMaxListeners === 'function') {
+          (ws as any).setMaxListeners(1000);
+        }
         ws.on('close', () => {
           this.stopHeartbeat(key);
           this.handleReconnection(key, connectFn);
