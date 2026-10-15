@@ -652,90 +652,60 @@ const wsConnectionState = new WeakMap<WebSocket, { queue: Promise<any>; lastRequ
 const MIN_REQUEST_INTERVAL_MS = Math.max(750, Number(process.env.CTRADER_MIN_REQUEST_INTERVAL_MS || 1000));
 
 function queueWsRequest<T>(ws: WebSocket, task: () => Promise<T>): Promise<T> {
-  const state = wsConnectionState.get(ws) || {
-    queue: Promise.resolve(), lastRequestTimestamp: 0, cooldownUntil: 0
-  };
-  const queued = state.queue.catch(() => undefined).then(async () => {
-    const readyAt = Math.max(state.lastRequestTimestamp + MIN_REQUEST_INTERVAL_MS, state.cooldownUntil);
-    const waitMs = Math.max(0, readyAt - Date.now());
-    if (waitMs) await new Promise(resolve => setTimeout(resolve, waitMs));
+  const state = wsConnectionState.get(ws) || { queue: Promise.resolve(), lastRequestTimestamp: 0, cooldownUntil: 0 };
+  const nextQueue = state.queue.catch(() => {}).then(async () => {
+    const requiredAt = Math.max(state.lastRequestTimestamp + MIN_REQUEST_INTERVAL_MS, state.cooldownUntil);
+    const waitMs = Math.max(0, requiredAt - Date.now());
+    if (waitMs > 0) await new Promise(resolve => setTimeout(resolve, waitMs));
     state.lastRequestTimestamp = Date.now();
     try { return await task(); }
     catch (error: any) {
-      if (/BLOCKED_PAYLOAD_TYPE|RATE_LIMIT_EXCEEDED|TOO_MANY_REQUESTS|rate.?limit|too many requests/i.test(String(error?.message || error))) {
-        state.cooldownUntil = Math.max(state.cooldownUntil, Date.now() + 5_000);
-      }
+      const message = String(error?.message || error);
+      if (/BLOCKED_PAYLOAD_TYPE|RATE_LIMIT_EXCEEDED|TOO_MANY_REQUESTS|rate limit|too many requests/i.test(message)) state.cooldownUntil = Math.max(state.cooldownUntil, Date.now() + 5000);
       throw error;
     }
   });
-  state.queue = queued;
+  state.queue = nextQueue;
   wsConnectionState.set(ws, state);
-  return queued;
+  return nextQueue;
 }
 
-function sendAndAwait(
-  ws: WebSocket,
-  payloadType: number,
-  payload: Record<string, unknown>,
-  expectedPayloadType: number,
-  timeoutMs = 60000
-): Promise<any> {
-  return queueWsRequest(ws, () => sendAndAwaitUnqueued(
-    ws, payloadType, payload, expectedPayloadType, timeoutMs, 1
-  ));
+function sendAndAwait(ws: WebSocket, payloadType: number, payload: Record<string, unknown>, expectedPayloadType: number, timeoutMs = 60000): Promise<any> {
+  return queueWsRequest(ws, () => sendAndAwaitUnqueued(ws, payloadType, payload, expectedPayloadType, timeoutMs, 1));
 }
 
-function sendAndAwaitUnqueued(
-  ws: WebSocket,
-  payloadType: number,
-  payload: Record<string, unknown>,
-  expectedPayloadType: number,
-  timeoutMs: number,
-  attempt: number
-): Promise<any> {
+// Retries stay inside the queue slot; nested queue calls would deadlock.
+function sendAndAwaitUnqueued(ws: WebSocket, payloadType: number, payload: Record<string, unknown>, expectedPayloadType: number, timeoutMs: number, attempt: number): Promise<any> {
   return new Promise((resolve, reject) => {
     const clientMsgId = `gc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    let timer: NodeJS.Timeout;
-    const cleanup = () => {
-      clearTimeout(timer);
-      ws.removeListener('message', handler);
-      ws.removeListener('error', errorHandler);
-    };
+    const timer = setTimeout(() => { cleanup(); reject(new Error(`cTrader request timeout: ${expectedPayloadType} (${getPayloadTypeName(expectedPayloadType)})`)); }, timeoutMs);
+    const cleanup = () => { clearTimeout(timer); ws.removeListener('message', handler); ws.removeListener('error', errorHandler); };
     const handler = (event: any) => {
       try {
         const raw = typeof event?.data === 'string' ? event.data : (event?.data || event).toString();
         const msg = JSON.parse(raw);
-        if (msg.clientMsgId === clientMsgId && msg.payloadType === expectedPayloadType) {
-          cleanup(); resolve(msg.payload || {}); return;
-        }
-        if ((msg.payloadType !== MSG_ERROR_RES && msg.payloadType !== MSG_ORDER_ERROR_EVENT) ||
-            (msg.clientMsgId && msg.clientMsgId !== clientMsgId)) return;
+        if (msg.clientMsgId === clientMsgId && msg.payloadType === expectedPayloadType) { cleanup(); resolve(msg.payload || {}); return; }
+        if ((msg.payloadType !== MSG_ERROR_RES && msg.payloadType !== MSG_ORDER_ERROR_EVENT) || (msg.clientMsgId && msg.clientMsgId !== clientMsgId)) return;
         cleanup();
-        const errCode = String(msg.payload?.errorCode || '');
-        const throttled = errCode === 'BLOCKED_PAYLOAD_TYPE' || errCode === 'RATE_LIMIT_EXCEEDED' ||
-          errCode === 'TOO_MANY_REQUESTS' || /rate limit|too many requests|blocked/i.test(JSON.stringify(msg.payload));
-        const mutation = [MSG_NEW_ORDER_REQ, MSG_CANCEL_ORDER_REQ, MSG_AMEND_ORDER_REQ,
-          MSG_AMEND_POSITION_SLTP_REQ, MSG_CLOSE_POSITION_REQ].includes(payloadType);
-        if (throttled && attempt < 4 && !mutation) {
-          const requested = Number(msg.payload?.retryAfter);
-          const base = Number.isFinite(requested) && requested > 0 ? requested : 2000;
-          const delay = Math.max(1500, base) * Math.pow(2, attempt - 1) + Math.random() * 500;
-          setTimeout(() => sendAndAwaitUnqueued(ws, payloadType, payload, expectedPayloadType, timeoutMs, attempt + 1)
-            .then(resolve).catch(reject), delay);
+        const errorCode = String(msg.payload?.errorCode || '');
+        const isRateLimit = errorCode === 'BLOCKED_PAYLOAD_TYPE' || errorCode === 'RATE_LIMIT_EXCEEDED' || errorCode === 'TOO_MANY_REQUESTS' || /rate limit|too many requests|blocked/i.test(JSON.stringify(msg.payload));
+        const isOrderMutation = [MSG_NEW_ORDER_REQ, MSG_CANCEL_ORDER_REQ, MSG_AMEND_ORDER_REQ, MSG_AMEND_POSITION_SLTP_REQ, MSG_CLOSE_POSITION_REQ].includes(payloadType);
+        if (isRateLimit && attempt < 4 && !isOrderMutation) {
+          const retryAfter = Number(msg.payload?.retryAfter);
+          const delay = Math.max(1500, Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 2000) * Math.pow(2, attempt - 1) + Math.random() * 500;
+          console.warn(`[cTrader] Rate limited (${errorCode || msg.payloadType}); cooling down ${Math.round(delay)}ms before retry ${attempt + 1}/4.`);
+          setTimeout(() => sendAndAwaitUnqueued(ws, payloadType, payload, expectedPayloadType, timeoutMs, attempt + 1).then(resolve).catch(reject), delay);
           return;
         }
         reject(new Error(`cTrader API error (${msg.payloadType}): ${JSON.stringify(msg.payload)}`));
-      } catch { /* Ignore unrelated non-JSON messages. */ }
+      } catch { /* Ignore unrelated or malformed messages. */ }
     };
     const errorHandler = (error: any) => { cleanup(); reject(error); };
-    timer = setTimeout(() => { cleanup(); reject(new Error(`cTrader request timeout: ${expectedPayloadType} (${getPayloadTypeName(expectedPayloadType)})`)); }, timeoutMs);
     ws.on('message', handler);
     ws.on('error', errorHandler);
-    try { ws.send(JSON.stringify({ clientMsgId, payloadType, payload })); }
-    catch (error) { cleanup(); reject(error); }
+    try { ws.send(JSON.stringify({ clientMsgId, payloadType, payload })); } catch (error) { cleanup(); reject(error); }
   });
 }
-
 async function withAuthenticatedAccount<T>(
   accountId: number,
   clientId: string,
