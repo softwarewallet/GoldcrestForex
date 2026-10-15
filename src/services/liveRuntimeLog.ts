@@ -112,13 +112,13 @@ function writeLine(level: LiveLogLevel, event: string, details?: unknown): void 
   const logFile = ensuredWriteFile;
   const timestamp = new Date().toISOString();
   const detailText = details === undefined ? '' : ` | ${sanitize(details)}`;
-  const line = `[${timestamp}] [${level}] [${event}]${detailText}\\n`;
+  const line = `[${timestamp}] [${level}] [${event}]${detailText}\n`;
 
   pendingLogWrites = pendingLogWrites
     .then(() => fs.promises.appendFile(logFile, line, 'utf8'))
     .catch(error => {
       // Logging failures must not break trading or API actions.
-      process.stderr.write(`[LIVE-LOG] Failed to append log file: ${String(error)}\\n`);
+      process.stderr.write(`[LIVE-LOG] Failed to append log file: ${String(error)}\n`);
     });
 }
 
