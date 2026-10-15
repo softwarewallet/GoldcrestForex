@@ -82,12 +82,20 @@ class LiveForexSignalProvider implements ForexDataProvider {
     }
 
     const timeframes: ForexTimeframe[] = ['5M', '15M', '1H', '4H', 'Daily'];
-    const rows = await Promise.all(
-      timeframes.map(async timeframe => ({
-        timeframe,
-        data: await adapter.getHistoricalCandles(pair, timeframe, 80)
-      }))
-    );
+    const refreshStartedAt = Date.now();
+    liveRuntimeLog('INFO', 'AUTO_LIVE_MARKET_DATA_REFRESH_STARTED', { pair, mode: getCTraderApiMode(), timeframes });
+    const rows = await Promise.all(timeframes.map(async timeframe => {
+      const startedAt = Date.now();
+      liveRuntimeLog('INFO', 'AUTO_LIVE_CANDLE_REQUEST_STARTED', { pair, timeframe, limit: 80 });
+      try {
+        const data = await adapter.getHistoricalCandles(pair, timeframe, 80);
+        liveRuntimeLog('INFO', 'AUTO_LIVE_CANDLE_REQUEST_COMPLETED', { pair, timeframe, candleCount: Array.isArray(data) ? data.length : null, durationMs: Date.now() - startedAt });
+        return { timeframe, data };
+      } catch (error: any) {
+        liveRuntimeLog('ERROR', 'AUTO_LIVE_CANDLE_REQUEST_FAILED', { pair, timeframe, durationMs: Date.now() - startedAt, error: error?.message || String(error) });
+        throw error;
+      }
+    }));
 
     for (const row of rows) {
       if (!Array.isArray(row.data) || row.data.length < 35) {
@@ -730,6 +738,16 @@ class AutoTradingService {
   private async runCycle(): Promise<void> {
     if (this.state !== 'RUNNING' || this.cycleInFlight) return;
     this.cycleInFlight = true;
+    const cycleStartedAt = Date.now();
+    const cycleId = `autolive-${cycleStartedAt}-${Math.random().toString(36).slice(2, 8)}`;
+    const cycleWatchdog = setTimeout(() => {
+      liveRuntimeLog('ERROR', 'AUTO_LIVE_CYCLE_STILL_IN_PROGRESS', {
+        cycleId, elapsedMs: Date.now() - cycleStartedAt, state: this.state,
+        currentExecution: this.currentExecution,
+        message: 'Diagnostic watchdog threshold exceeded; no broker operation is cancelled.'
+      });
+    }, Math.max(90_000, AUTO_INTERVAL_MS * 2));
+    cycleWatchdog.unref?.();
 
     this.lastCycleAt = Date.now();
     this.lastActions = [];
@@ -740,8 +758,12 @@ class AutoTradingService {
       signalId: null,
       message: 'Scanning configured Forex pairs for executable signals.'
     });
-    liveRuntimeLog('INFO', 'AUTO_TRADING_CYCLE_STARTED', { timestamp: this.lastCycleAt, pairs: getConfiguredAutoForexPairs() });
-    tradeAuditLog('CYCLE_STARTED', { timestamp: this.lastCycleAt, pairs: getConfiguredAutoForexPairs() });
+    liveRuntimeLog('INFO', 'AUTO_TRADING_CYCLE_STARTED', {
+      cycleId, timestamp: this.lastCycleAt, pairs: getConfiguredAutoForexPairs(),
+      configuredPairCount: getConfiguredAutoForexPairs().length, intervalMs: AUTO_INTERVAL_MS,
+      mode: getCTraderApiMode()
+    });
+    tradeAuditLog('CYCLE_STARTED', { cycleId, timestamp: this.lastCycleAt, pairs: getConfiguredAutoForexPairs() });
 
     try {
       if (killSwitch.isHalted()) {
@@ -775,8 +797,14 @@ class AutoTradingService {
       // Live news is an execution input, not just a display metric. The
       // deterministic technical strategy can only enter a new trade when a
       // current authoritative news snapshot is available.
-      const cycleNews = await fetchLiveForexNews({
-        pairs: getConfiguredAutoForexPairs()
+      const newsStartedAt = Date.now();
+      liveRuntimeLog('INFO', 'AUTO_LIVE_NEWS_CHECK_STARTED', { cycleId, pairs: getConfiguredAutoForexPairs() });
+      const cycleNews = await fetchLiveForexNews({ pairs: getConfiguredAutoForexPairs() });
+      liveRuntimeLog(cycleNews.status === 'LIVE' ? 'INFO' : 'WARN', 'AUTO_LIVE_NEWS_CHECK_FINISHED', {
+        cycleId, durationMs: Date.now() - newsStartedAt, status: cycleNews.status,
+        source: cycleNews.source, articleCount: cycleNews.articleCount,
+        highImpactCount: cycleNews.highImpactCount, riskLevel: cycleNews.riskLevel,
+        providerStatus: cycleNews.providerStatus, error: cycleNews.error
       });
       this.preOpenNews = cycleNews;
       this.preOpenStatus = cycleNews.status === 'LIVE' ? 'READY' : 'UNAVAILABLE';
@@ -870,7 +898,20 @@ class AutoTradingService {
       // independently isolated, while the execution portion of evaluatePair
       // is serialized by withExecutionLock(). This removes the old sequential
       // scan bottleneck without weakening account-level safety gates.
-      await Promise.all(pairsToEvaluate.map(pair => this.evaluatePair(pair)));
+      liveRuntimeLog('INFO', 'AUTO_LIVE_PAIR_EVALUATION_BATCH_STARTED', { cycleId, pairsToEvaluate });
+      const pairBatchStartedAt = Date.now();
+      await Promise.all(pairsToEvaluate.map(async pair => {
+        const startedAt = Date.now();
+        liveRuntimeLog('INFO', 'AUTO_LIVE_PAIR_EVALUATION_STARTED', { cycleId, pair });
+        try {
+          await this.evaluatePair(pair);
+          liveRuntimeLog('INFO', 'AUTO_LIVE_PAIR_EVALUATION_FINISHED', { cycleId, pair, durationMs: Date.now() - startedAt });
+        } catch (error: any) {
+          liveRuntimeLog('ERROR', 'AUTO_LIVE_PAIR_EVALUATION_UNHANDLED_ERROR', { cycleId, pair, durationMs: Date.now() - startedAt, error: error?.message || String(error) });
+          throw error;
+        }
+      }));
+      liveRuntimeLog('INFO', 'AUTO_LIVE_PAIR_EVALUATION_BATCH_FINISHED', { cycleId, durationMs: Date.now() - pairBatchStartedAt, actions: this.lastActions });
 
       const executed = this.lastActions.find(action => action.result === 'EXECUTED');
       if (!executed) {
@@ -890,17 +931,24 @@ class AutoTradingService {
       this.lastCycleResult = executed
         ? `Cycle completed. Executed ${executed.pair}.`
         : 'Cycle completed. No trade executed.';
-      liveRuntimeLog('INFO', 'AUTO_TRADING_CYCLE_COMPLETED', { actions: this.lastActions });
-      tradeAuditLog('CYCLE_COMPLETED', { actions: this.lastActions, result: this.lastCycleResult });
+      liveRuntimeLog('INFO', 'AUTO_TRADING_CYCLE_COMPLETED', {
+        cycleId, durationMs: Date.now() - cycleStartedAt, actionCount: this.lastActions.length,
+        actions: this.lastActions, result: this.lastCycleResult, finalExecution: this.currentExecution
+      });
+      tradeAuditLog('CYCLE_COMPLETED', { cycleId, durationMs: Date.now() - cycleStartedAt, actions: this.lastActions, result: this.lastCycleResult });
     } catch (error: any) {
       this.lastCycleResult = error?.message || String(error);
-      liveRuntimeLog('ERROR', 'AUTO_TRADING_CYCLE_ERROR', { error: this.lastCycleResult });
+      liveRuntimeLog('ERROR', 'AUTO_TRADING_CYCLE_ERROR', { cycleId, durationMs: Date.now() - cycleStartedAt, error: this.lastCycleResult, currentExecution: this.currentExecution });
     } finally {
+      clearTimeout(cycleWatchdog);
+      liveRuntimeLog('INFO', 'AUTO_LIVE_CYCLE_FINALLY', { cycleId, durationMs: Date.now() - cycleStartedAt, state: this.state });
       this.cycleInFlight = false;
     }
   }
 
   private async evaluatePair(pair: string): Promise<void> {
+    const pairStartedAt = Date.now();
+    liveRuntimeLog('INFO', 'AUTO_LIVE_PAIR_STARTED', { pair, mode: getCTraderApiMode() });
     try {
       this.setExecutionStatus({
         stage: 'SCANNING_MARKET',
@@ -911,7 +959,14 @@ class AutoTradingService {
       });
       await this.provider.refreshPair(pair);
       liveRuntimeLog('INFO', 'LIVE_DATA_REFRESHED', { pair });
+      const signalStartedAt = Date.now();
+      liveRuntimeLog('INFO', 'AUTO_LIVE_SIGNAL_GENERATION_STARTED', { pair });
       const signal = await this.signalEngine.generateSignal(pair);
+      liveRuntimeLog('INFO', 'AUTO_LIVE_SIGNAL_GENERATION_FINISHED', {
+        pair, durationMs: Date.now() - signalStartedAt, signalId: signal.id,
+        direction: signal.direction, score: signal.score, status: signal.status,
+        hasTradePlan: Boolean(signal.tradePlan), strategyId: signal.strategyVersion
+      });
       const isDirectionalSignal = signal.direction.includes('BUY') || signal.direction.includes('SELL');
       const signalSide: 'BUY' | 'SELL' | null = signal.direction.includes('BUY')
         ? 'BUY'
