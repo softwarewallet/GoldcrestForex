@@ -229,9 +229,12 @@ export class LiveForexProvider implements LiveForexDataProvider {
 
     this.quotes.set(symbol, quote);
     sharedForexSnapshots.set(symbol, {
-      candles: new Map(requestedTimeframes
-        .map(item => [`${symbol}:${item.timeframe}`, this.candles.get(`${symbol}:${item.timeframe}`)] as const)
-        .filter((entry): entry is readonly [string, ForexCandle[]] => Boolean(entry[1]))),
+      candles: new Map<string, ForexCandle[]>(
+        requestedTimeframes.flatMap(item => {
+          const rows = this.candles.get(`${symbol}:${item.timeframe}`);
+          return rows ? [[`${symbol}:${item.timeframe}`, rows] as [string, ForexCandle[]]] : [];
+        })
+      ),
       quote,
       candleFetchedAt: fetchedAt,
       quoteFetchedAt
