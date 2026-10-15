@@ -1484,9 +1484,26 @@ app.get('/api/forex/pairs', async (_req: Request, res: Response) => {
         }));
       }
 
-      // Keep fallback discovery bounded; scanning hundreds of instruments in
-      // parallel can trigger broker rate limits and starve the dashboard.
-      const fallbackInstruments = instruments.slice(0, 8);
+      // Keep fallback discovery bounded and anchored to the application's
+      // supported Forex universe. A broker master may put metals, indices, or
+      // symbols with broker-specific formatting first; slicing it directly can
+      // accidentally return zero usable Forex pairs to the dashboard.
+      const normalizePairKey = (value: unknown) => String(value || '').toUpperCase().replace(/[^A-Z]/g, '');
+      const fallbackInstruments = FOREX_PAIRS.slice(0, 8).map(pair => {
+        const key = normalizePairKey(pair.symbol);
+        const discovered = instruments.find(inst => normalizePairKey(inst.symbol) === key)
+          || instruments.find(inst => normalizePairKey(inst.name) === key);
+        return {
+          ...(discovered || {}),
+          symbol: pair.symbol,
+          name: pair.description,
+          description: pair.description,
+          assetClass: 'FOREX',
+          exchange: discovered?.exchange || 'CTRADER',
+          pipSize: pair.pipSize,
+          digits: pair.digits
+        };
+      });
       const pairsWithQuotes = await Promise.all(fallbackInstruments.map(async inst => {
         const pipSize = inst.symbol.includes('JPY') ? 0.01 : 0.0001;
         let atr5mPips = inst.symbol.includes('JPY') ? 8.4 : inst.symbol.includes('GBP') ? 7.6 : 5.8;
@@ -1558,8 +1575,8 @@ app.get('/api/forex/pairs', async (_req: Request, res: Response) => {
           baseCurrency: inst.symbol.split('/')[0],
           quoteCurrency: inst.symbol.split('/')[1] || '',
           bid: close > 0 ? close : null,
-          ask: close > 0 ? Number((close + (inst.pipSize || pipSize) * 1.0).toFixed(5)) : null,
-          spreadPips: 1.0,
+          ask: close > 0 ? close : null,
+          spreadPips: 0,
           atr5m: atr5mVal,
           atr5mPips,
           dynamicSlPips,
@@ -1573,9 +1590,20 @@ app.get('/api/forex/pairs', async (_req: Request, res: Response) => {
         };
       }));
 
+      const hasFreshLiveQuote = pairsWithQuotes.some((pair: any) =>
+        Number(pair.bid) > 0 && Number(pair.ask) > 0 &&
+        ['LIVE', 'FRESH'].includes(String(pair.dataStatus || '').toUpperCase())
+      );
+      const hasAnyAuthoritativePrice = pairsWithQuotes.some((pair: any) =>
+        Number(pair.bid) > 0 && Number(pair.ask) > 0
+      );
+      // Healthy live snapshots get the normal cache TTL. Missing/degraded
+      // providers are rechecked quickly so a transient outage cannot leave the
+      // dashboard empty or stale for a full minute after recovery.
+      const cacheTtlMs = hasFreshLiveQuote ? FOREX_PAIRS_CACHE_TTL_MS : hasAnyAuthoritativePrice ? 15_000 : 5_000;
       forexPairsCache = {
         payload: pairsWithQuotes,
-        expiresAt: Date.now() + FOREX_PAIRS_CACHE_TTL_MS
+        expiresAt: Date.now() + cacheTtlMs
       };
       return pairsWithQuotes;
     })().finally(() => {
