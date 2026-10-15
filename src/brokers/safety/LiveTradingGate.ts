@@ -298,7 +298,7 @@ export class LiveTradingGate {
     return {
       passed,
       checks: {
-        liveEnvironmentSelected,
+        liveEnvironmentSelected: selectedEnvironmentMatches,
         liveBrokerConnected,
         accountValidated,
         tradingPermissionConfirmed,
