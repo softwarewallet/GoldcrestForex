@@ -29,9 +29,14 @@ export class LiveTradingGate {
   async evaluate(adapter: BrokerAdapter, params: LiveGateEvaluationParams): Promise<LiveTradingGateResult> {
     const failedReasons: string[] = [];
 
-    // Check 1: The broker adapter and registry must both resolve to LIVE.
-    // A cTrader DEMO API token must never pass the live execution gate.
-    const liveEnvironmentSelected = adapter.environment === 'LIVE' && brokerRegistry.getEnvironment() === 'LIVE';
+    // Check the configured cTrader API mode as well as registry metadata.
+    // CTraderLiveAdapter's adapter type can remain LIVE while its credentials
+    // are routed to DEMO by the UI-selected API mode.
+    const selectedBrokerEnvironment = adapter.broker === 'CTRADER'
+      ? String((adapter as any).getConfigStatus?.()?.environment || adapter.environment).toUpperCase()
+      : String(adapter.environment).toUpperCase();
+    const liveEnvironmentSelected = selectedBrokerEnvironment === 'LIVE'
+      && brokerRegistry.getEnvironment() === 'LIVE';
     if (!liveEnvironmentSelected) {
       failedReasons.push('Condition 1 Failed: Active environment is not LIVE.');
     }
@@ -201,7 +206,7 @@ export class LiveTradingGate {
     let tradeValue = NaN;
     let tradeValueUsd = NaN;
 
-    if (maximumTradeValueCheckPassed && isForex && adapter.environment === 'LIVE') {
+    if (maximumTradeValueCheckPassed && isForex && selectedBrokerEnvironment === 'LIVE') {
       // For cTrader LIVE Forex, maxTradeValueForexUsd is the broker protocol
       // volume itself. Do not multiply order quantity by price or perform
       // quote-currency conversion here. The configured value is also the
