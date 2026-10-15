@@ -40,8 +40,10 @@ export class BrokerRegistry {
   }
 
   setEnvironment(env: TradingEnvironment): void {
+    // The global environment setting is retained for legacy broker/UI flows.
+    // cTrader's actual DEMO/LIVE routing is controlled by cTraderApiMode.
     if (env !== 'LIVE') {
-      throw new Error('Goldcrest operates in LIVE_ONLY mode.');
+      throw new Error('Goldcrest global broker environment remains LIVE_ONLY.');
     }
     this.activeEnvironment = 'LIVE';
   }
@@ -61,10 +63,19 @@ export class BrokerRegistry {
   getAdapter(broker?: BrokerType, environment?: TradingEnvironment): BrokerAdapter {
     this.ensureInitialized();
     const targetBroker = broker || this.selectedBroker;
-    const targetEnv: TradingEnvironment = 'LIVE';
+    // cTrader has one adapter instance that dynamically follows the API mode
+    // selected in Settings. Its endpoint and credentials are resolved by
+    // CTraderLiveAdapter.syncConfig() for either DEMO or LIVE.
+    if (targetBroker === 'CTRADER') {
+      const adapter = this.adapters.get('CTRADER_LIVE');
+      if (!adapter) throw new BrokerError('UNKNOWN_ERROR', 'No cTrader adapter registered', 'CTRADER', getCTraderApiMode());
+      (adapter as CTraderLiveAdapter).syncConfig();
+      return adapter;
+    }
 
+    const targetEnv: TradingEnvironment = 'LIVE';
     if (environment !== undefined && environment !== 'LIVE') {
-      throw new Error('Goldcrest operates in LIVE_ONLY mode.');
+      throw new Error('Goldcrest operates in LIVE_ONLY mode for this broker.');
     }
 
     const key = `${targetBroker}_${targetEnv}`;
@@ -167,7 +178,7 @@ export class BrokerRegistry {
     return [
       {
         broker: 'CTRADER',
-        environment: (cLiveStatus.environment as any) || 'LIVE',
+        environment: (cLiveStatus.environment as any) || getCTraderApiMode(),
         configured: cLiveStatus.configured,
         maskedAccountId: cLiveStatus.maskedAccountId,
         maskedClientId: cLiveStatus.maskedClientId,
