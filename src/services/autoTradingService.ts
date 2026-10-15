@@ -12,6 +12,7 @@ import { getSystemConfig } from './configService';
 import { killSwitch } from '../brokers/safety/KillSwitch';
 import { BrokerAdapter, NormalizedQuote, OrderRequest } from '../brokers/types';
 import { liveRuntimeLog, tradeAuditLog } from './liveRuntimeLog';
+import { tradeContinuityService } from './tradeContinuityService';
 import { calculateForexPipTargets, normalizePriceToThreeDigits, sizeForexOrderToMaxTradeValue } from '../brokers/safety/TradeSizing';
 
 const LIVE_QUOTE_MAX_AGE_MS = 30_000;
@@ -312,6 +313,7 @@ class AutoTradingService {
       currentExecution: { ...this.currentExecution },
       lastExecution: this.lastExecution ? { ...this.lastExecution } : null,
       executionPausedByPositionLimit: this.executionPausedByPositionLimit,
+      continuity: tradeContinuityService.getStatus(),
       preOpenPreparation: {
         lastPreparedAt: this.lastPreOpenPreparedAt,
         trendPairsEvaluated: this.preOpenTrendPairsEvaluated,
