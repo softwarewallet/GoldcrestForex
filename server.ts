@@ -1582,7 +1582,11 @@ app.get('/api/forex/pairs', async (_req: Request, res: Response) => {
       forexPairsInFlight = null;
     });
 
-    return res.json(await forexPairsInFlight);
+    return res.json(await withApiTimeout(
+      forexPairsInFlight,
+      FOREX_PAIRS_SCANNER_TIMEOUT_MS + FOREX_PAIRS_INSTRUMENT_TIMEOUT_MS + FOREX_PAIRS_QUOTE_TIMEOUT_MS,
+      'Forex pairs response'
+    ));
   } catch (err: any) {
     res.status(503).json({
       error: err?.code || 'LIVE_MARKET_DATA_UNAVAILABLE',
