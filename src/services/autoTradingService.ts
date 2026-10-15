@@ -1031,9 +1031,21 @@ class AutoTradingService {
       });
       await withOperationTimeout(this.provider.refreshPair(pair), PREOPEN_PAIR_REFRESH_TIMEOUT_MS, `Auto Live market-data refresh for ${pair}`);
       liveRuntimeLog('INFO', 'LIVE_DATA_REFRESHED', { pair });
-      const signal = await this.signalEngine.generateSignal(pair);
+
+      // Never manufacture a price (for example 1.0) when broker quotes are
+      // absent. Predictions and signal entry plans must use real market data.
       const quote = this.provider.getQuote(pair);
-      const currentPrice = Number(quote?.bid || quote?.ask || 1.0);
+      const bid = Number(quote?.bid);
+      const ask = Number(quote?.ask);
+      if (!Number.isFinite(bid) || bid <= 0 || !Number.isFinite(ask) || ask <= 0 || ask < bid) {
+        const reason = `cTrader did not provide a valid bid/ask for ${pair}; signal generation skipped until market data recovers.`;
+        this.lastActions.push({ pair, result: 'BLOCKED', reason });
+        liveRuntimeLog('WARN', 'AUTO_TRADING_INVALID_MARKET_QUOTE', { pair, bid, ask, quoteTimestamp: quote?.timestamp, reason });
+        tradeAuditLog('AUTO_TRADING_INVALID_MARKET_QUOTE', { pair, bid, ask, reason });
+        return;
+      }
+      const currentPrice = (bid + ask) / 2;
+      const signal = await this.signalEngine.generateSignal(pair);
       const isDirectionalSignal = signal.direction.includes('BUY') || signal.direction.includes('SELL');
       const signalSide: 'BUY' | 'SELL' | null = signal.direction.includes('BUY')
         ? 'BUY'
@@ -1224,13 +1236,13 @@ return;
       }
 
       const plan = signal.tradePlan;
-      if (!signalSide) {
+      if (!directionalSide) {
         const reason = `Directional side could not be resolved from signal direction ${signal.direction}.`;
         this.lastActions.push({ pair, result: 'NO_TRADE', signalId: signal.id, reason });
         tradeAuditLog('NO_TRADE', { pair, signalId: signal.id, direction: signal.direction, score: signal.score, reason });
         return;
       }
-      const entryPrice = signalSide === 'BUY' ? quote.ask : quote.bid;
+      const entryPrice = directionalSide === 'BUY' ? quote.ask : quote.bid;
 
       // Auto Live submits a MARKET order using the authoritative broker quote
       // available at the dispatch boundary. The signal entry zone is an
@@ -1242,7 +1254,7 @@ return;
       liveRuntimeLog('INFO', 'MARKET_ENTRY_EXECUTION', {
         pair,
         signalId: signal.id,
-        side: signalSide,
+        side: directionalSide,
         entryPrice,
         entryMin: plan.entryMin,
         entryMax: plan.entryMax,
@@ -1252,7 +1264,7 @@ return;
         pair,
         signalId: signal.id,
         score: signal.score,
-        side: signalSide,
+        side: directionalSide,
         entryPrice,
         entryMin: plan.entryMin,
         entryMax: plan.entryMax
@@ -1344,7 +1356,7 @@ return;
         const shortTpDecision = ShortTpOptimizationEngine.evaluateShortTP({
           predictionId: signal.id,
           pair,
-          direction: signalSide === 'BUY' ? 'BUY' : 'SELL',
+          direction: directionalSide === 'BUY' ? 'BUY' : 'SELL',
           entryPrice: executionEntryPrice,
           riskBoundaryPips: stopLossPipsToUse,
           confidence: Number(signal.score || 70) / 100,
@@ -1356,7 +1368,7 @@ return;
         void ShortTpOptimizationEngine.recordShadowEvaluation(
           signal.id,
           pair,
-          signalSide,
+          directionalSide,
           executionEntryPrice,
           shortTpDecision
         );
@@ -1393,7 +1405,7 @@ return;
       let configuredTargets;
       try {
         configuredTargets = calculateForexPipTargets(
-          signalSide,
+          directionalSide,
           executionEntryPrice,
           instrument.pipSize,
           stopLossPipsToUse,
@@ -1467,7 +1479,7 @@ return;
       this.setExecutionStatus({
         stage: 'PREPARING_ORDER',
         pair,
-        side: signalSide,
+        side: directionalSide,
         signalId: signal.id,
         message: 'Preparing live order for ' + pair + '.'
       });
@@ -1475,7 +1487,7 @@ return;
       const order: OrderRequest = {
         market: 'FOREX',
         symbol: pair,
-        side: signalSide,
+        side: directionalSide,
         orderType: 'MARKET',
         quantity,
         price: executionEntryPrice,
