@@ -170,6 +170,7 @@ export interface AutoTradingStatus {
   currentExecution: AutoTradingExecutionStatus;
   lastExecution: AutoTradingExecutionStatus | null;
   executionPausedByPositionLimit: boolean;
+  continuity: ReturnType<typeof tradeContinuityService.getStatus>;
   preOpenPreparation: {
     lastPreparedAt: number | null;
     trendPairsEvaluated: number;
