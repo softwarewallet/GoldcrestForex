@@ -7,7 +7,7 @@ import { executeQuery } from '../../database/db';
 import { reconciliationService } from '../../services/reconciliationService';
 import { MartingaleRecoveryService } from '../../services/martingaleRecoveryService';
 
-const LIVE_QUOTE_MAX_AGE_MS = 1_800_000; // 30 minutes to prevent clock lag or tick latency issues
+const LIVE_QUOTE_MAX_AGE_MS = 30_000; // LIVE execution requires an authoritative quote no older than 30 seconds
 
 export type AutoTradeState = 'OFF' | 'ARMED' | 'BLOCKED';
 
