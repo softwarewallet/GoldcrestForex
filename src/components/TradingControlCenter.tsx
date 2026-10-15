@@ -300,25 +300,25 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
         }
       }
 
-      const [
-        brokerStatusRes,
-        positionsRes,
-        ordersRes,
-        auditLogsRes,
-        reconPositionsRes,
-        reconOrdersRes,
-        healthRes,
-        forexPairsRes,
-        signalsRes,
-        newsRes
-      ] = await Promise.all([
-        fetchWithTimeout('/api/brokers/status', { cache: 'no-store' }, 8_000).catch(() => null),
+      // Limit background telemetry concurrency so control requests and the
+      // Auto Live runtime are not starved by slow reconciliation endpoints.
+      const brokerStatusRes = await fetchWithTimeout(
+        '/api/brokers/status', { cache: 'no-store' }, 8_000
+      ).catch(() => null);
+
+      const [positionsRes, ordersRes] = await Promise.all([
         fetchWithTimeout('/api/brokers/positions', { cache: 'no-store' }, 8_000).catch(() => null),
-        fetchWithTimeout('/api/brokers/orders', { cache: 'no-store' }, 8_000).catch(() => null),
+        fetchWithTimeout('/api/brokers/orders', { cache: 'no-store' }, 8_000).catch(() => null)
+      ]);
+
+      const [auditLogsRes, reconPositionsRes, reconOrdersRes, healthRes] = await Promise.all([
         fetchWithTimeout('/api/governance/audit-logs?limit=100', { cache: 'no-store' }, 8_000).catch(() => null),
         fetchWithTimeout('/api/governance/reconciliation/positions', { cache: 'no-store' }, 8_000).catch(() => null),
         fetchWithTimeout('/api/governance/reconciliation/orders', { cache: 'no-store' }, 8_000).catch(() => null),
-        fetchWithTimeout('/api/governance/live-health', { cache: 'no-store' }, 8_000).catch(() => null),
+        fetchWithTimeout('/api/governance/live-health', { cache: 'no-store' }, 8_000).catch(() => null)
+      ]);
+
+      const [forexPairsRes, signalsRes, newsRes] = await Promise.all([
         fetchWithTimeout('/api/forex/pairs', { cache: 'no-store' }, 8_000).catch(() => null),
         fetchWithTimeout('/api/signals/all', { cache: 'no-store' }, 8_000).catch(() => null),
         fetchWithTimeout('/api/forex/news', { cache: 'no-store' }, 8_000).catch(() => null)
