@@ -97,7 +97,7 @@ class LiveForexSignalProvider implements ForexDataProvider {
       const now = Date.now();
       const cached = autoCandleCache.get(cacheKey);
       if (cached && now < cached.expiresAt && cached.candles.length >= 35) {
-        liveRuntimeLog('DEBUG', 'AUTO_LIVE_CANDLE_CACHE_HIT', {
+        liveRuntimeLog('INFO', 'AUTO_LIVE_CANDLE_CACHE_HIT', {
           pair, timeframe, candleCount: cached.candles.length,
           cacheAgeMs: now - (cached.expiresAt - AUTO_CANDLE_CACHE_TTL_MS[timeframe])
         });
@@ -105,7 +105,7 @@ class LiveForexSignalProvider implements ForexDataProvider {
       }
       const existingRequest = autoCandleInFlight.get(cacheKey);
       if (existingRequest) {
-        liveRuntimeLog('DEBUG', 'AUTO_LIVE_CANDLE_REQUEST_DEDUPED', { pair, timeframe });
+        liveRuntimeLog('INFO', 'AUTO_LIVE_CANDLE_REQUEST_DEDUPED', { pair, timeframe });
         return { timeframe, data: await existingRequest };
       }
       const startedAt = Date.now();
