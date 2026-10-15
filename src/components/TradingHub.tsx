@@ -312,24 +312,74 @@ export const TradingHub: React.FC<TradingHubProps> = ({
     }
   }, [addLog]);
 
-  // Poll the authoritative Auto Live lifecycle so the cockpit reflects the server-side execution state.
+  // Poll the lightweight Auto Live status endpoint. The former controls
+  // endpoint shares a broker-controls route with other cockpit operations and
+  // can fail independently; a failed poll must never leave the badge stuck at
+  // LOADING forever. Prevent overlapping requests and bound each request.
   useEffect(() => {
     let mounted = true;
+    let inFlight = false;
+    let consecutiveFailures = 0;
     const fetchAutoStatus = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 8000);
       try {
-        const res = await fetch('/api/brokers/controls', { cache: 'no-store' });
-        if (!res.ok) throw new Error('Auto Live status endpoint returned HTTP ' + res.status);
-        const data = await safeParseJson(res);
-        if (mounted && data?.autoTrading) {
-          setAutoStatus(data.autoTrading);
-          setAutoStatusError(null);
+        let status: any = null;
+        let lastError: Error | null = null;
+
+        // This route returns the AutoTradingStatus object directly.
+        try {
+          const res = await fetch('/api/auto-trading/status', {
+            cache: 'no-store',
+            signal: controller.signal
+          });
+          if (!res.ok) throw new Error('Auto Live status endpoint returned HTTP ' + res.status);
+          status = await safeParseJson(res);
+        } catch (error: any) {
+          lastError = error instanceof Error ? error : new Error(String(error));
         }
-      } catch (err: any) {
-        if (mounted) setAutoStatusError(err?.message || 'Auto Live status unavailable');
+
+        // Compatibility fallback for deployments where the direct route is
+        // unavailable, but do not start another request after timeout.
+        if (!status && !controller.signal.aborted) {
+          try {
+            const res = await fetch('/api/brokers/controls', {
+              cache: 'no-store',
+              signal: controller.signal
+            });
+            if (!res.ok) throw new Error('Auto Live controls endpoint returned HTTP ' + res.status);
+            const data = await safeParseJson(res);
+            status = data?.autoTrading || null;
+          } catch (error: any) {
+            lastError = error instanceof Error ? error : new Error(String(error));
+          }
+        }
+
+        if (!mounted) return;
+        if (status && typeof status === 'object' && typeof status.state === 'string') {
+          setAutoStatus(status);
+          setAutoStatusError(null);
+          consecutiveFailures = 0;
+        } else {
+          consecutiveFailures += 1;
+          setAutoStatusError(lastError?.message || 'Auto Live status response was empty or invalid.');
+        }
+      } catch (error: any) {
+        if (mounted) {
+          consecutiveFailures += 1;
+          setAutoStatusError(error?.name === 'AbortError'
+            ? 'Auto Live status request timed out after 8 seconds.'
+            : (error?.message || 'Auto Live status unavailable'));
+        }
+      } finally {
+        window.clearTimeout(timeout);
+        inFlight = false;
       }
     };
     void fetchAutoStatus();
-    const statusTimer = setInterval(fetchAutoStatus, 2000);
+    const statusTimer = setInterval(() => { void fetchAutoStatus(); }, 5000);
     return () => { mounted = false; clearInterval(statusTimer); };
   }, [safeParseJson]);
 
