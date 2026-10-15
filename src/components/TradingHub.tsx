@@ -312,24 +312,74 @@ export const TradingHub: React.FC<TradingHubProps> = ({
     }
   }, [addLog]);
 
-  // Poll the authoritative Auto Live lifecycle so the cockpit reflects the server-side execution state.
+  // Poll the lightweight Auto Live status endpoint. The former controls
+  // endpoint shares a broker-controls route with other cockpit operations and
+  // can fail independently; a failed poll must never leave the badge stuck at
+  // LOADING forever. Prevent overlapping requests and bound each request.
   useEffect(() => {
     let mounted = true;
+    let inFlight = false;
+    let consecutiveFailures = 0;
     const fetchAutoStatus = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 8000);
       try {
-        const res = await fetch('/api/brokers/controls', { cache: 'no-store' });
-        if (!res.ok) throw new Error('Auto Live status endpoint returned HTTP ' + res.status);
-        const data = await safeParseJson(res);
-        if (mounted && data?.autoTrading) {
-          setAutoStatus(data.autoTrading);
-          setAutoStatusError(null);
+        let status: any = null;
+        let lastError: Error | null = null;
+
+        // This route returns the AutoTradingStatus object directly.
+        try {
+          const res = await fetch('/api/auto-trading/status', {
+            cache: 'no-store',
+            signal: controller.signal
+          });
+          if (!res.ok) throw new Error('Auto Live status endpoint returned HTTP ' + res.status);
+          status = await safeParseJson(res);
+        } catch (error: any) {
+          lastError = error instanceof Error ? error : new Error(String(error));
         }
-      } catch (err: any) {
-        if (mounted) setAutoStatusError(err?.message || 'Auto Live status unavailable');
+
+        // Compatibility fallback for deployments where the direct route is
+        // unavailable, but do not start another request after timeout.
+        if (!status && !controller.signal.aborted) {
+          try {
+            const res = await fetch('/api/brokers/controls', {
+              cache: 'no-store',
+              signal: controller.signal
+            });
+            if (!res.ok) throw new Error('Auto Live controls endpoint returned HTTP ' + res.status);
+            const data = await safeParseJson(res);
+            status = data?.autoTrading || null;
+          } catch (error: any) {
+            lastError = error instanceof Error ? error : new Error(String(error));
+          }
+        }
+
+        if (!mounted) return;
+        if (status && typeof status === 'object' && typeof status.state === 'string') {
+          setAutoStatus(status);
+          setAutoStatusError(null);
+          consecutiveFailures = 0;
+        } else {
+          consecutiveFailures += 1;
+          setAutoStatusError(lastError?.message || 'Auto Live status response was empty or invalid.');
+        }
+      } catch (error: any) {
+        if (mounted) {
+          consecutiveFailures += 1;
+          setAutoStatusError(error?.name === 'AbortError'
+            ? 'Auto Live status request timed out after 8 seconds.'
+            : (error?.message || 'Auto Live status unavailable'));
+        }
+      } finally {
+        window.clearTimeout(timeout);
+        inFlight = false;
       }
     };
     void fetchAutoStatus();
-    const statusTimer = setInterval(fetchAutoStatus, 2000);
+    const statusTimer = setInterval(() => { void fetchAutoStatus(); }, 5000);
     return () => { mounted = false; clearInterval(statusTimer); };
   }, [safeParseJson]);
 
@@ -869,15 +919,17 @@ export const TradingHub: React.FC<TradingHubProps> = ({
             <div className="text-slate-500 text-xs font-mono mt-1">Operational view for live execution only.</div>
           </div>
           <div className="flex flex-wrap gap-2 font-mono text-[11px]">
-            <span className={"px-3 py-1 rounded-lg border font-bold " +
-              (autoStatus?.continuity?.isContinuityPaused ? "text-rose-300 bg-rose-950/80 border-rose-600 animate-pulse" :
-               autoStatus?.state === 'PAUSED_SCHEDULE' ? "text-amber-300 bg-amber-950/90 border-amber-500 animate-pulse" :
-               autoStatus?.state === 'RUNNING' ? "text-emerald-300 bg-emerald-950/60 border-emerald-800" :
-               autoStatus?.state === 'BLOCKED' ? "text-rose-300 bg-rose-950/60 border-rose-800" :
-               "text-amber-300 bg-amber-950/60 border-amber-800")}>
+            <span
+              title={autoStatusError || 'Auto Live lifecycle status'}
+              className={"px-3 py-1 rounded-lg border font-bold " +
+                (autoStatus?.continuity?.isContinuityPaused ? "text-rose-300 bg-rose-950/80 border-rose-600 animate-pulse" :
+                 autoStatus?.state === 'PAUSED_SCHEDULE' ? "text-amber-300 bg-amber-950/90 border-amber-500 animate-pulse" :
+                 autoStatus?.state === 'RUNNING' ? "text-emerald-300 bg-emerald-950/60 border-emerald-800" :
+                 autoStatus?.state === 'BLOCKED' || (!autoStatus && Boolean(autoStatusError)) ? "text-rose-300 bg-rose-950/60 border-rose-800" :
+                 "text-amber-300 bg-amber-950/60 border-amber-800")}>
               {autoStatus?.continuity?.isContinuityPaused ? 'AUTO LIVE: PAUSED (20 LOSSES)' :
                autoStatus?.state === 'PAUSED_SCHEDULE' ? 'AUTO LIVE: PAUSED (RISK WINDOW)' :
-               `AUTO LIVE: ${autoStatus?.state || 'LOADING'}`}
+               `AUTO LIVE: ${autoStatus?.state || (autoStatusError ? 'UNAVAILABLE' : 'LOADING')}`}
             </span>
             {autoStatus?.scheduler?.enabled && (
               <span className={"px-3 py-1 rounded-lg border font-bold " +
