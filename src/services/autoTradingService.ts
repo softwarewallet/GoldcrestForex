@@ -136,7 +136,7 @@ class LiveForexSignalProvider implements ForexDataProvider {
   }
 }
 
-export type AutoTradingState = 'STOPPED' | 'PREPARING' | 'RUNNING' | 'PAUSED_LIMIT' | 'BLOCKED';
+export type AutoTradingState = 'STOPPED' | 'PREPARING' | 'RUNNING' | 'PAUSED_LIMIT' | 'PAUSED_RUNTIME' | 'BLOCKED';
 export type AutoTradingExecutionStage = 'IDLE' | 'SCANNING_MARKET' | 'ANALYZING_SIGNAL' | 'PREPARING_ORDER' | 'SAFETY_GATE' | 'SUBMITTING_ORDER' | 'TRADE_EXECUTED' | 'REJECTED';
 
 export interface AutoTradingExecutionStatus {
@@ -325,6 +325,33 @@ class AutoTradingService {
     };
   }
 
+  private refreshNewsOnStart(): void {
+    const pairs = getConfiguredAutoForexPairs();
+    this.preOpenStatus = 'RUNNING';
+    liveRuntimeLog('INFO', 'AUTO_TRADING_START_NEWS_REFRESH_REQUESTED', { pairs, forceRefresh: true });
+
+    void fetchLiveForexNews({ pairs, forceRefresh: true })
+      .then(snapshot => {
+        this.preOpenNews = snapshot;
+        this.preOpenStatus = snapshot.status === 'LIVE' ? 'READY' : 'UNAVAILABLE';
+        liveRuntimeLog(snapshot.status === 'LIVE' ? 'INFO' : 'WARN', 'AUTO_TRADING_START_NEWS_REFRESH_COMPLETED', {
+          source: snapshot.source,
+          status: snapshot.status,
+          articleCount: snapshot.articleCount,
+          highImpactCount: snapshot.highImpactCount,
+          riskLevel: snapshot.riskLevel,
+          providerStatus: snapshot.providerStatus,
+          error: snapshot.error
+        });
+      })
+      .catch(error => {
+        this.preOpenStatus = 'UNAVAILABLE';
+        liveRuntimeLog('ERROR', 'AUTO_TRADING_START_NEWS_REFRESH_FAILED', {
+          error: error instanceof Error ? error.message : String(error)
+        });
+      });
+  }
+
   start(options: { confirmWhenClosed?: boolean } = {}): AutoTradingStatus {
     const marketGate = getAutoLiveMarketGate();
 
@@ -397,6 +424,10 @@ class AutoTradingService {
     }
 
     if (this.timer) return this.getStatus();
+
+    // Refresh the news universe immediately on every new Auto Live start;
+    // don't wait for the first scan interval or rely on an old cached snapshot.
+    this.refreshNewsOnStart();
 
     if (marketGate.anyMarketOpen) {
       this.state = 'RUNNING';
@@ -519,9 +550,26 @@ class AutoTradingService {
   }
 
   private async runScheduledCycle(): Promise<void> {
-    if (!['PREPARING', 'RUNNING', 'PAUSED_LIMIT'].includes(this.state) || this.cycleInFlight) return;
+    if (!['PREPARING', 'RUNNING', 'PAUSED_LIMIT', 'PAUSED_RUNTIME'].includes(this.state) || this.cycleInFlight) return;
 
     const marketGate = getAutoLiveMarketGate();
+
+    if (this.state === 'PAUSED_RUNTIME') {
+      if (killSwitch.isHalted()) {
+        this.state = 'BLOCKED';
+        this.lastCycleResult = 'Emergency kill switch is active; Auto Live remains blocked until operator intervention.';
+        liveRuntimeLog('WARN', 'AUTO_TRADING_RUNTIME_PAUSE_KILL_SWITCH', { marketGate });
+        return;
+      }
+      if (!refreshAutonomousExecutionPermission()) {
+        this.lastCycleResult = 'Auto Live is paused because runtime permission is temporarily unavailable. It will retry automatically on the next cycle; no orders can be submitted while permission is false.';
+        liveRuntimeLog('WARN', 'AUTO_TRADING_RUNTIME_PERMISSION_RETRY', { intervalMs: AUTO_INTERVAL_MS, marketGate });
+        return;
+      }
+      this.state = marketGate.bothMarketsClosed ? 'PREPARING' : 'RUNNING';
+      this.lastCycleResult = 'Auto Live resumed after runtime permission recovered.';
+      liveRuntimeLog('INFO', 'AUTO_TRADING_RUNTIME_RESUMED', { marketGate, nextState: this.state });
+    }
 
     if (this.state === 'PAUSED_LIMIT') {
       const capacityAvailable = await this.checkSystemPositionCapacity();
@@ -583,10 +631,10 @@ class AutoTradingService {
       }
 
       if (!refreshAutonomousExecutionPermission()) {
-        this.state = 'BLOCKED';
-        this.lastCycleResult = 'Autonomous permission was withdrawn during pre-open preparation.';
+        this.state = 'PAUSED_RUNTIME';
+        this.lastCycleResult = 'Auto Live pre-open preparation is paused because runtime permission is temporarily unavailable. It will retry automatically.';
         this.preOpenStatus = 'UNAVAILABLE';
-        liveRuntimeLog('WARN', 'AUTO_TRADING_PRE_OPEN_BLOCKED', { reason: this.lastCycleResult });
+        liveRuntimeLog('WARN', 'AUTO_TRADING_PRE_OPEN_PERMISSION_PAUSED', { reason: this.lastCycleResult, intervalMs: AUTO_INTERVAL_MS });
         return;
       }
 
@@ -703,8 +751,9 @@ class AutoTradingService {
       }
 
       if (!refreshAutonomousExecutionPermission()) {
-        this.state = 'BLOCKED';
-        this.lastCycleResult = 'Autonomous permission was withdrawn before cycle execution.';
+        this.state = 'PAUSED_RUNTIME';
+        this.lastCycleResult = 'Auto Live paused because runtime permission became unavailable. It will retry automatically on the next cycle; execution remains disabled until permission recovers.';
+        liveRuntimeLog('WARN', 'AUTO_TRADING_RUNTIME_PERMISSION_PAUSED', { intervalMs: AUTO_INTERVAL_MS });
         return;
       }
 
