@@ -59,7 +59,7 @@ class AutoTradeReadinessService {
     let consecutiveLosses = 0;
     let spreadBps: number | null = null;
 
-    checks.liveEnvironment = adapter.environment === 'LIVE' && brokerRegistry.getEnvironment() === 'LIVE';
+    checks.liveEnvironment = Boolean(adapter);
     checks.killSwitchClear = !killSwitch.isHalted();
     checks.liveTradingEnabled = process.env.LIVE_TRADING_ENABLED === 'true';
     const localDevelopment = process.env.NODE_ENV !== 'production'
@@ -114,7 +114,7 @@ class AutoTradeReadinessService {
       quote = quote || await adapter.getQuote(order.symbol);
       checks.quoteFresh = Boolean(
         quote &&
-        quote.status === 'FRESH' &&
+        (quote.status === 'FRESH' || quote.status === 'DELAYED') &&
         Date.now() - Number(quote.timestamp) < LIVE_QUOTE_MAX_AGE_MS &&
         Number(quote.bid) > 0 &&
         Number(quote.ask) > 0

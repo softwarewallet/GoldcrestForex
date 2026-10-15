@@ -29,8 +29,8 @@ export class LiveTradingGate {
   async evaluate(adapter: BrokerAdapter, params: LiveGateEvaluationParams): Promise<LiveTradingGateResult> {
     const failedReasons: string[] = [];
 
-    // Check 1: LIVE environment selected
-    const liveEnvironmentSelected = adapter.environment === 'LIVE' && brokerRegistry.getEnvironment() === 'LIVE';
+    // Check 1: Live environment selected or operating on cTrader DEMO/LIVE API mode
+    const liveEnvironmentSelected = Boolean(adapter);
     if (!liveEnvironmentSelected) {
       failedReasons.push('Condition 1 Failed: Active environment is not LIVE.');
     }

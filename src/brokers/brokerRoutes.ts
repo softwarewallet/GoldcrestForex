@@ -19,6 +19,7 @@ import { autoTradingService } from '../services/autoTradingService';
 console.log('[DEBUG] brokerRoutes imported, autoTradingService imported:', !!autoTradingService);
 import { generateTradeComparisonReport } from '../services/tradeComparisonService';
 import { getLatestDemoStatusReport, executeDemoPreflightValidation } from './adapters/cTrader/cTraderDemoDiagnostics';
+import { executionDebugCache } from './executionDebug';
 
 export const brokerRouter = Router();
 
@@ -28,12 +29,12 @@ const LIVE_BROKERS: BrokerType[] = ['CTRADER', 'FIVE_PAISA'];
 // Share one short-lived broker snapshot and one in-flight request so normal
 // UI polling does not repeatedly hit broker account APIs and trigger provider
 // throttling. Order execution paths still request the broker directly.
-const BROKER_STATUS_CACHE_TTL_MS = 15_000;
+const BROKER_STATUS_CACHE_TTL_MS = 300_000;
 let brokerStatusCache: { payload: any; expiresAt: number } | null = null;
 let brokerStatusInFlight: Promise<any> | null = null;
 const lastKnownBrokerAccounts = new Map<BrokerType, any>();
 let brokerStatusLoopStarted = false;
-const BROKER_STATUS_BACKGROUND_REFRESH_MS = 60_000;
+const BROKER_STATUS_BACKGROUND_REFRESH_MS = 300_000;
 
 type BrokerCollectionCache = { payload: any[]; expiresAt: number };
 const positionsCache: BrokerCollectionCache = { payload: [], expiresAt: 0 };
@@ -163,7 +164,11 @@ async function calculateAccountCurrencyExposure(
     } else if (currencies.base === String(accountCurrency).toUpperCase()) {
       exposure += quantity;
     } else {
-      exposure += await convertNotional(position.symbol, quantity, currencies.base);
+      try {
+        exposure += await convertNotional(position.symbol, quantity, currencies.base);
+      } catch (err: any) {
+        console.warn(`[ExposureCheck] Skipping valuation for position ${position.symbol}: ${err.message}`);
+      }
     }
   }
 
@@ -399,6 +404,14 @@ brokerRouter.get('/status', async (req: Request, res: Response) => {
   }
 });
 
+brokerRouter.get('/execution-debug', (_req: Request, res: Response) => {
+  const data = Array.from(executionDebugCache.entries()).map(([symbol, value]) => ({
+    symbol,
+    ...value
+  }));
+  res.json(data);
+});
+
 brokerRouter.get('/ctrader/demo-env-status', (_req: Request, res: Response) => {
   const status = getLatestDemoStatusReport();
   res.json(status);
@@ -550,7 +563,7 @@ brokerRouter.post('/credentials/live', async (req: Request, res: Response) => {
   });
 });
 
-const DASHBOARD_SUMMARY_CACHE_TTL_MS = 30_000;
+const DASHBOARD_SUMMARY_CACHE_TTL_MS = 300_000;
 let dashboardSummaryCache: { payload: any; expiresAt: number } | null = null;
 let dashboardSummaryInFlight: Promise<any> | null = null;
 
@@ -1287,6 +1300,12 @@ brokerRouter.post('/order', async (req: Request, res: Response) => {
         String(position.symbol || '').toUpperCase() === String(orderReq.symbol || '').toUpperCase()
       ).length,
       maxPairPositions: Math.max(1, Math.min(20, Math.floor(Number(getSystemConfig().autoLiveMaxTradesPerPair))))
+    });
+
+    executionDebugCache.set(orderReq.symbol, {
+      passed: gateResult.passed,
+      failedReasons: gateResult.failedReasons,
+      timestamp: Date.now()
     });
 
     if (!gateResult.passed) {

@@ -2446,12 +2446,14 @@ async function startServer() {
     });
     // Delay initial broker reconciliation by 10s so server boot completes smoothly without blocking
     setTimeout(() => void captureLiveBrokerReconciliation(), 10_000).unref?.();
-    void reconcileInFlightExecutionIntents();
+    setTimeout(() => void reconcileInFlightExecutionIntents(), 15_000).unref?.();
     const reconciliationTimer = setInterval(() => void captureLiveBrokerReconciliation(), 5 * 60_000);
     const executionLifecycleTimer = setInterval(() => void reconcileInFlightExecutionIntents(), 15_000);
     if (process.env.GOLDCREST_AUTO_TRADING_START_ON_BOOT === 'true') {
-      const autoStatus = autoTradingService.start();
-      console.log(`Goldcrest auto-trading startup: ${autoStatus.state} - ${autoStatus.lastCycleResult || ''}`);
+      setTimeout(() => {
+        const autoStatus = autoTradingService.start();
+        console.log(`Goldcrest auto-trading startup: ${autoStatus.state} - ${autoStatus.lastCycleResult || ''}`);
+      }, 20_000).unref?.();
     }
     reconciliationTimer.unref?.();
     executionLifecycleTimer.unref?.();
