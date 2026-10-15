@@ -76,7 +76,7 @@ class LiveForexSignalProvider implements ForexDataProvider {
   private quotes = new Map<string, ForexQuote>();
 
   async refreshPair(pair: string): Promise<void> {
-    const adapter = brokerRegistry.getAdapter('CTRADER', 'LIVE');
+    const adapter = brokerRegistry.getAdapter('CTRADER', getCTraderApiMode());
     if (!adapter.getHistoricalCandles) {
       throw new Error('Authoritative cTrader historical market-data capability is unavailable.');
     }
@@ -253,7 +253,7 @@ class AutoTradingService {
   }
 
   private async getAuthoritativePositionCapacity(): Promise<{ current: number; max: number; available: number }> {
-    const adapter = brokerRegistry.getAdapter('CTRADER', 'LIVE');
+    const adapter = brokerRegistry.getAdapter('CTRADER', getCTraderApiMode());
     const positions = await adapter.getPositions();
     const current = Array.isArray(positions) ? positions.length : 0;
     const max = this.getConfiguredMaxOpenPositions();
@@ -351,21 +351,8 @@ class AutoTradingService {
       };
     }
 
-    // This Auto Live implementation is sourced from Goldcrest-FX-Live,
-    // which routes autonomous orders exclusively through cTrader LIVE. The
-    // target app had a DEMO default that silently reconfigured the adapter
-    // registered as CTRADER_LIVE, so readiness would reject every order.
-    if (getCTraderApiMode() !== 'LIVE') {
-      this.state = 'BLOCKED';
-      this.lastCycleResult = 'Auto Live requires cTrader API mode LIVE. The current cTrader API mode is DEMO; switch the API mode to LIVE and verify LIVE credentials before starting.';
-      liveRuntimeLog('WARN', 'AUTO_TRADING_START_BLOCKED', {
-        stage: 'CTRADER_API_MODE',
-        configuredMode: getCTraderApiMode(),
-        reason: this.lastCycleResult
-      });
-      return this.getStatus();
-    }
-
+    // Auto Live is mode-agnostic: the cTrader adapter resolves the selected
+    // DEMO/LIVE endpoint and matching credentials from system configuration.
     if (!this.isRequested()) {
       this.state = 'BLOCKED';
       this.lastCycleResult = 'Autonomous execution is not enabled. Both GOLDCREST_AUTO_TRADING_ENABLED and GOLDCREST_AUTONOMOUS_LIVE_EXECUTION must be true.';
@@ -478,7 +465,7 @@ class AutoTradingService {
     );
 
     try {
-      const adapter = brokerRegistry.getAdapter('CTRADER', 'LIVE');
+      const adapter = brokerRegistry.getAdapter('CTRADER', getCTraderApiMode());
       const positions = await adapter.getPositions();
       const activePositionsCount = Array.isArray(positions) ? positions.length : 0;
 
@@ -948,7 +935,7 @@ return;
 return;
       }
 
-      const adapter = brokerRegistry.getAdapter('CTRADER', 'LIVE');
+      const adapter = brokerRegistry.getAdapter('CTRADER', getCTraderApiMode());
 
       // Re-check the authoritative account position count inside the serialized
       // execution lock. Another pair may have filled the final available slot
@@ -1229,7 +1216,7 @@ return;
           takeProfit: configuredTargets.takeProfit,
           spread: quote.spread,
           broker: 'CTRADER',
-          environment: 'LIVE'
+          environment: getCTraderApiMode()
         },
         order,
         {
@@ -1241,7 +1228,7 @@ return;
             spread: quote.spread,
             timestamp: quote.timestamp,
             source: quote.source,
-            environment: 'LIVE',
+            environment: getCTraderApiMode(),
             status: quote.status
           } satisfies NormalizedQuote,
           isMarketOpen: true,
