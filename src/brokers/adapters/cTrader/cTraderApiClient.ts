@@ -695,7 +695,7 @@ function sendAndAwaitUnqueued(
           resolve(msg.payload || {});
         } else if (
           (msg.payloadType === MSG_ERROR_RES || msg.payloadType === MSG_ORDER_ERROR_EVENT)
-          && (msg.clientMsgId === clientMsgId || !msg.clientMsgId && ws.listenerCount('message') <= 1)
+          && (msg.clientMsgId === clientMsgId || !msg.clientMsgId)
         ) {
           clearTimeout(timer);
           ws.removeEventListener('message', handler);
