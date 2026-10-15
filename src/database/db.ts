@@ -845,6 +845,72 @@ function seedInitialData(db: Database) {
   `);
 }
 
+
+export interface HistoricalCandleInput {
+  symbol: string;
+  timeframe: string;
+  timestamp: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+/**
+ * Persist broker-confirmed candle bars in a single SQLite transaction.
+ * The deterministic key makes repeated refreshes idempotent and avoids
+ * exporting the entire database once per candle.
+ */
+export async function persistHistoricalCandles(candles: HistoricalCandleInput[]): Promise<number> {
+  if (!candles.length) return 0;
+  const db = await getDatabase();
+  let written = 0;
+  db.run('BEGIN IMMEDIATE TRANSACTION');
+  try {
+    const stmt = db.prepare(
+      `INSERT OR REPLACE INTO candles
+       (id, symbol, timeframe, timestamp, open, high, low, close, volume)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    try {
+      for (const c of candles) {
+        if (
+          !c.symbol || !c.timeframe ||
+          !Number.isFinite(c.timestamp) ||
+          !Number.isFinite(c.open) || !Number.isFinite(c.high) ||
+          !Number.isFinite(c.low) || !Number.isFinite(c.close) ||
+          !Number.isFinite(c.volume) ||
+          c.open <= 0 || c.high <= 0 || c.low <= 0 || c.close <= 0 ||
+          c.high < Math.max(c.open, c.close, c.low) ||
+          c.low > Math.min(c.open, c.close, c.high)
+        ) continue;
+        const id = `FXCANDLE:${c.symbol.toUpperCase()}:${c.timeframe}:${Math.trunc(c.timestamp)}`;
+        stmt.run([
+          id,
+          c.symbol.toUpperCase(),
+          c.timeframe,
+          Math.trunc(c.timestamp),
+          c.open,
+          c.high,
+          c.low,
+          c.close,
+          Math.max(0, c.volume)
+        ]);
+        written++;
+      }
+    } finally {
+      stmt.free();
+    }
+    db.run('COMMIT');
+    persistDatabase();
+    return written;
+  } catch (error) {
+    try { db.run('ROLLBACK'); } catch {}
+    throw error;
+  }
+}
+
 export async function executeQuery<T = any>(sql: string, params: any[] = []): Promise<T[]> {
   const db = await getDatabase();
   const stmt = db.prepare(sql);
