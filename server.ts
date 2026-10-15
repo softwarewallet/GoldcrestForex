@@ -1409,9 +1409,9 @@ app.get('/api/markets', (req: Request, res: Response) => {
 // 4. Forex Endpoints (Phase 2A Full Analysis Engine)
 const FOREX_PAIRS_CACHE_TTL_MS = 60_000;
 
-const FOREX_PAIRS_SCANNER_TIMEOUT_MS = 4_000;
-const FOREX_PAIRS_INSTRUMENT_TIMEOUT_MS = 3_000;
-const FOREX_PAIRS_QUOTE_TIMEOUT_MS = 2_500;
+const FOREX_PAIRS_SCANNER_TIMEOUT_MS = 3_000;
+const FOREX_PAIRS_INSTRUMENT_TIMEOUT_MS = 2_000;
+const FOREX_PAIRS_QUOTE_TIMEOUT_MS = 2_000;
 
 async function withApiTimeout<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
@@ -1496,7 +1496,11 @@ app.get('/api/forex/pairs', async (_req: Request, res: Response) => {
         try {
           c5m = liveForexProvider.getCandles(inst.symbol, '5M', 25);
           if (!c5m || c5m.length < 5) {
-            c5m = await getLiveAnchoredCandles(inst.symbol, '5M', 25).catch(() => []);
+            c5m = await withApiTimeout(
+              getLiveAnchoredCandles(inst.symbol, '5M', 25),
+              2_000,
+              `5M candle fallback ${inst.symbol}`
+            ).catch(() => []);
           }
           if (c5m && c5m.length >= 5) {
             const atrArr = calculateATR(c5m, Math.min(14, c5m.length - 1));
