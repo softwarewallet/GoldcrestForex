@@ -21,10 +21,11 @@ const LIVE_QUOTE_MAX_AGE_MS = 30_000;
 // Short-lived candle cache avoids repeated history calls on every cycle.
 // This does not replace the separate live-quote freshness check at execution.
 const AUTO_CANDLE_CACHE_TTL_MS: Record<ForexTimeframe, number> = {
-  '5M': 10_000, '15M': 20_000, '1H': 45_000, '4H': 120_000, 'Daily': 300_000
+  '1M': 5_000, '5M': 10_000, '15M': 20_000, '30M': 30_000,
+  '1H': 45_000, '4H': 120_000, 'Daily': 300_000
 };
-const autoCandleCache = new Map<string, { candles: ForexCandle[]; expiresAt: number }>();
-const autoCandleInFlight = new Map<string, Promise<ForexCandle[]>>();
+const autoCandleCache = new Map<string, { candles: any[]; expiresAt: number }>();
+const autoCandleInFlight = new Map<string, Promise<any[]>>();
 
 const AUTO_INTERVAL_MS = Math.max(
   15_000,
