@@ -1,5 +1,12 @@
 import { BrokerAdapter, OrderRequest, NormalizedQuote } from '../types';
 
+import { brokerRegistry } from '../registry';
+import { killSwitch } from './KillSwitch';
+import { getForexSessionState, getIndianSessionState } from '../../markets/common/session';
+import { getSystemConfig } from '../../services/configService';
+import { executeQuery } from '../../database/db';
+import { reconciliationService } from '../../services/reconciliationService';
+import { MartingaleRecoveryService } from '../../services/martingaleRecoveryService';
 
 const READINESS_REQUEST_TIMEOUT_MS = Math.max(
   2_000,
@@ -24,13 +31,6 @@ async function withReadinessTimeout<T>(operation: Promise<T>, label: string): Pr
     if (timer) clearTimeout(timer);
   }
 }
-import { brokerRegistry } from '../registry';
-import { killSwitch } from './KillSwitch';
-import { getForexSessionState, getIndianSessionState } from '../../markets/common/session';
-import { getSystemConfig } from '../../services/configService';
-import { executeQuery } from '../../database/db';
-import { reconciliationService } from '../../services/reconciliationService';
-import { MartingaleRecoveryService } from '../../services/martingaleRecoveryService';
 
 const LIVE_QUOTE_MAX_AGE_MS = 30_000; // LIVE execution requires an authoritative quote no older than 30 seconds
 
