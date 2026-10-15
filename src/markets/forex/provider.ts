@@ -230,10 +230,11 @@ export class LiveForexProvider implements LiveForexDataProvider {
     this.quotes.set(symbol, quote);
     sharedForexSnapshots.set(symbol, {
       candles: new Map<string, ForexCandle[]>(
-        requestedTimeframes.flatMap(item => {
+        requestedTimeframes.reduce<Array<[string, ForexCandle[]]>>((entries, item) => {
           const rows = this.candles.get(`${symbol}:${item.timeframe}`);
-          return rows ? [[`${symbol}:${item.timeframe}`, rows] as [string, ForexCandle[]]] : [];
-        })
+          if (rows) entries.push([`${symbol}:${item.timeframe}`, rows]);
+          return entries;
+        }, [])
       ),
       quote,
       candleFetchedAt: fetchedAt,
