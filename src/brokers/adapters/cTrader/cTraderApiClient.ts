@@ -818,7 +818,16 @@ async function submitLiveCTraderExecutionAction(
         } catch {}
       };
       ws.addEventListener('message', handler);
-      ws.send(JSON.stringify({ clientMsgId, payloadType, payload }));
+      // Serialize the outbound order action with all other cTrader requests.
+      // There is deliberately no automatic retry here because an order
+      // submission with a missing acknowledgement is ambiguous.
+      void queueWsRequest(ws, async () => {
+        ws.send(JSON.stringify({ clientMsgId, payloadType, payload }));
+      }).catch((error: any) => {
+        clearTimeout(timer);
+        ws.removeEventListener('message', handler);
+        reject(error);
+      });
     });
   });
 }
