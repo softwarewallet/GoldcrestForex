@@ -1,4 +1,4 @@
-import { ForexDataProvider } from '../markets/forex/provider';
+import { ForexDataProvider, LiveForexProvider } from '../markets/forex/provider';
 import { ForexCandle, ForexMarketStatus, ForexQuote, ForexTimeframe } from '../markets/forex/types';
 import { FOREX_PAIRS, getForexPairConfig } from '../markets/forex/instruments';
 import { ForexSignalEngine } from '../markets/forex/signalEngine';
@@ -69,213 +69,7 @@ async function mapWithConcurrency<T, R>(
   await Promise.all(
     Array.from({ length: Math.min(concurrency, items.length) }, () => runWorker())
   );
-  return results;
-}
-
-class LiveForexSignalProvider implements ForexDataProvider {
-  readonly providerName = 'CTRADER_LIVE_PROVIDER';
-  readonly status = 'LIVE' as const;
-  readonly isDemo = false;
-
-  private candles = new Map<string, ForexCandle[]>();
-  private quotes = new Map<string, ForexQuote>();
-
-  async refreshPair(pair: string): Promise<void> {
-    const config = getForexPairConfig(pair);
-    const adapter = brokerRegistry.getAdapter('CTRADER', 'LIVE');
-
-    let rows: any[] = [];
-    let liveQuote: any = null;
-    let quoteDataStatus: ForexCandle['dataStatus'] = 'DELAYED';
-
-    const configStatus = (adapter as any).getConfigStatus?.();
-    const isConfigured = configStatus ? configStatus.configured : false;
-
-    try {
-      if (!isConfigured) {
-        throw new Error('cTrader LIVE credentials missing. Required: Client ID, Client Secret, and Access Token.');
-      }
-      if (!adapter.getHistoricalCandles) {
-        throw new Error('Authoritative cTrader historical market-data capability is unavailable.');
-      }
-
-      const timeframes: ForexTimeframe[] = ['5M', '15M', '1H', '4H', 'Daily'];
-      rows = await Promise.all(
-        timeframes.map(async timeframe => ({
-          timeframe,
-          data: await adapter.getHistoricalCandles!(config.symbol, timeframe, 80)
-        }))
-      );
-
-      try {
-        const quote = await adapter.getQuote(config.symbol);
-        if (
-          quote.status === 'FRESH'
-          && Date.now() - quote.timestamp < 10_000
-          && quote.bid > 0
-          && quote.ask > 0
-        ) {
-          liveQuote = quote;
-          quoteDataStatus = 'LIVE';
-        }
-      } catch {}
-    } catch (err: any) {
-      if (isConfigured) {
-        console.warn(`[LiveForexSignalProvider] cTrader WebSocket connection failed for ${config.symbol} (${err?.message || err}). Using robust fallback market feed to maintain signal prediction.`);
-      }
-      const basePrices: Record<string, number> = {
-        'EUR/USD': 1.0850,
-        'GBP/USD': 1.2750,
-        'USD/JPY': 152.00,
-        'USD/CHF': 0.9000,
-        'AUD/USD': 0.6550,
-        'USD/CAD': 1.3650,
-        'NZD/USD': 0.6050,
-        'EUR/GBP': 0.8500,
-        'EUR/JPY': 164.50,
-        'GBP/JPY': 193.80,
-        'AUD/JPY': 99.50,
-      };
-      const mid = basePrices[config.symbol] || 1.0000;
-      const spread = config.typicalSpreadPips * config.pipSize;
-      const timeframes: ForexTimeframe[] = ['5M', '15M', '1H', '4H', 'Daily'];
-      const now = Date.now();
-      const tfIntervals: Record<string, number> = {
-        '1M': 60 * 1000,
-        '5M': 5 * 60 * 1000,
-        '15M': 15 * 60 * 1000,
-        '30M': 30 * 60 * 1000,
-        '1H': 60 * 60 * 1000,
-        '4H': 4 * 60 * 60 * 1000,
-        'Daily': 24 * 60 * 60 * 1000,
-      };
-
-      rows = timeframes.map(timeframe => {
-        const interval = tfIntervals[timeframe];
-        const data: any[] = [];
-        let currentPrice = mid;
-        for (let i = 0; i < 80; i++) {
-          const t = now - (80 - i) * interval;
-          const noise = (Math.sin(i * 0.3) * 0.0015 + (Math.random() - 0.48) * 0.001) * mid;
-          const open = currentPrice;
-          const close = open + noise;
-          const high = Math.max(open, close) + Math.abs(noise) * 0.5;
-          const low = Math.min(open, close) - Math.abs(noise) * 0.5;
-          currentPrice = close;
-          data.push({
-            timestamp: t,
-            open,
-            high,
-            low,
-            close,
-            volume: 1000 + Math.floor(Math.random() * 5000)
-          });
-        }
-        return { timeframe, data };
-      });
-
-      liveQuote = {
-        pair: config.symbol,
-        timestamp: now,
-        bid: mid,
-        ask: mid + spread,
-        spread: config.typicalSpreadPips,
-        status: 'FRESH'
-      };
-      quoteDataStatus = 'LIVE';
-    }
-
-    for (const row of rows) {
-      if (!Array.isArray(row.data) || row.data.length < 35) {
-        throw new Error(`Insufficient live ${row.timeframe} candle history for ${pair}.`);
-      }
-      this.candles.set(`${pair}:${row.timeframe}`, row.data as ForexCandle[]);
-      this.candles.set(`${config.symbol}:${row.timeframe}`, row.data as ForexCandle[]);
-    }
-
-    const m15Candles = this.candles.get(`${pair}:15M`) || this.candles.get(`${config.symbol}:15M`) || this.candles.get(`${pair}:5M`) || [];
-    const latestCandle = m15Candles[m15Candles.length - 1];
-    const firstCandle = m15Candles[0];
-    const closePrice = latestCandle?.close || 1.0;
-    const change = latestCandle && firstCandle ? latestCandle.close - firstCandle.open : 0;
-    const changePips = change / (config.pipSize || 0.0001);
-    const changePct = firstCandle?.open ? (change / firstCandle.open) * 100 : 0;
-
-    const quoteObj: ForexQuote = {
-      pair: config.symbol,
-      timestamp: liveQuote?.timestamp ?? Number(latestCandle?.timestamp || Date.now()),
-      bid: liveQuote?.bid ?? closePrice,
-      ask: liveQuote?.ask ?? closePrice,
-      spreadPips: liveQuote?.spreadPips ?? config.typicalSpreadPips,
-      digits: config.digits,
-      pipSize: config.pipSize,
-      changePips24h: Number(changePips.toFixed(1)),
-      changePercent24h: Number(changePct.toFixed(2)),
-      high24h: m15Candles.length ? Math.max(...m15Candles.map(c => c.high)) : closePrice,
-      low24h: m15Candles.length ? Math.min(...m15Candles.map(c => c.low)) : closePrice,
-      provider: liveQuote ? this.providerName : 'CTRADER_HISTORICAL_CLOSE',
-      dataStatus: liveQuote?.status || quoteDataStatus
-    };
-
-    this.quotes.set(pair, quoteObj);
-    this.quotes.set(config.symbol, quoteObj);
-  }
-
-  getQuote(pair: string): ForexQuote {
-    const config = getForexPairConfig(pair);
-    let quote = this.quotes.get(config.symbol) || this.quotes.get(pair);
-    if (!quote) {
-      const m15 = this.candles.get(`${config.symbol}:15M`) || this.candles.get(`${pair}:15M`) || this.candles.get(`${pair}:5M`);
-      const latest = m15?.[m15.length - 1];
-      if (latest) {
-        quote = {
-          pair: config.symbol,
-          timestamp: Number(latest.timestamp || Date.now()),
-          bid: latest.close,
-          ask: latest.close,
-          spreadPips: 1.2,
-          digits: config.digits,
-          pipSize: config.pipSize,
-          changePips24h: 0,
-          changePercent24h: 0,
-          high24h: latest.high,
-          low24h: latest.low,
-          provider: 'CTRADER_HISTORICAL_CLOSE',
-          dataStatus: 'LIVE'
-        };
-        this.quotes.set(config.symbol, quote);
-        this.quotes.set(pair, quote);
-      }
-    }
-    if (!quote) throw new Error(`Live quote cache is empty for ${pair}.`);
-    return quote;
-  }
-
-  getCandles(pair: string, timeframe: ForexTimeframe = '15M', limit = 80): ForexCandle[] {
-    const rows = this.candles.get(`${pair}:${timeframe}`) || [];
-    return rows.slice(Math.max(0, rows.length - limit));
-  }
-
-  getLatestCandle(pair: string, timeframe: ForexTimeframe = '15M'): ForexCandle {
-    const rows = this.getCandles(pair, timeframe, 2);
-    if (!rows.length) throw new Error(`Live candle cache is empty for ${pair} ${timeframe}.`);
-    return rows[rows.length - 1];
-  }
-
-  getAvailablePairs() {
-    return FOREX_PAIRS;
-  }
-
-  getMarketStatus(): ForexMarketStatus {
-    const session = getForexSessionState();
-    const isOpen = !session.activeSessions.includes('CLOSED (WEEKEND)');
-    return {
-      isOpen,
-      status: isOpen ? 'OPEN' : 'WEEKEND',
-      activeSessions: session.activeSessions,
-      currentSession: session.activeSessions.join(' / ') || 'Interbank Electronic Off-Peak',
-      isLondonNyOverlap: session.isLondonNyOverlap,
-      serverUtcTime: new Date().toISOString()
+  ng()
     };
   }
 }
@@ -332,7 +126,7 @@ export interface AutoTradingStatus {
 }
 
 class AutoTradingService {
-  private provider = new LiveForexSignalProvider();
+  private provider = new LiveForexProvider();
   private signalEngine = new ForexSignalEngine(undefined, this.provider);
   private timer: NodeJS.Timeout | null = null;
   private state: AutoTradingState = 'STOPPED';
@@ -1219,9 +1013,21 @@ class AutoTradingService {
       });
 
       // Multi-factor prediction decision gate (Phase 14 & 18)
+      const predictionCandles = this.provider.getCandles(pair, '15M', 500)
+        .filter(candle => Number.isFinite(candle.timestamp) && candle.timestamp <= Date.now())
+        .map(candle => ({
+          timestamp: candle.timestamp,
+          open: candle.open,
+          high: candle.high,
+          low: candle.low,
+          close: candle.close,
+          volume: candle.volume
+        }));
       const gateEvaluation = await PredictionDecisionGate.evaluateTradeOpportunity({
         pair,
+        horizon: '15M',
         currentClose: signal.tradePlan?.entryPreferred || currentPrice,
+        candles: predictionCandles,
         currentTechnicalSignal: {
           direction: signal.direction,
           score: signal.score,
