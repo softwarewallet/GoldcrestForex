@@ -1409,7 +1409,6 @@ app.get('/api/markets', (req: Request, res: Response) => {
 // 4. Forex Endpoints (Phase 2A Full Analysis Engine)
 const FOREX_PAIRS_CACHE_TTL_MS = 60_000;
 
-const FOREX_PAIRS_SCANNER_TIMEOUT_MS = 3_000;
 const FOREX_PAIRS_INSTRUMENT_TIMEOUT_MS = 2_000;
 const FOREX_PAIRS_QUOTE_TIMEOUT_MS = 2_000;
 
@@ -1446,23 +1445,15 @@ app.get('/api/forex/pairs', async (_req: Request, res: Response) => {
       return res.json(forexPairsCache.payload);
     }
     if (forexPairsInFlight) {
-      return res.json(await withApiTimeout(forexPairsInFlight, FOREX_PAIRS_SCANNER_TIMEOUT_MS + FOREX_PAIRS_INSTRUMENT_TIMEOUT_MS + FOREX_PAIRS_QUOTE_TIMEOUT_MS, 'Forex pairs refresh'));
+      return res.json(await withApiTimeout(forexPairsInFlight, FOREX_PAIRS_INSTRUMENT_TIMEOUT_MS + FOREX_PAIRS_QUOTE_TIMEOUT_MS + 2_500, 'Forex pairs refresh'));
     }
 
     forexPairsInFlight = (async () => {
-      try {
-        const scanned = await withApiTimeout(scannerService.getForexScanner(), FOREX_PAIRS_SCANNER_TIMEOUT_MS, 'Forex scanner');
-        if (Array.isArray(scanned) && scanned.length > 0) {
-          forexPairsCache = {
-            payload: scanned,
-            expiresAt: Date.now() + FOREX_PAIRS_CACHE_TTL_MS
-          };
-          return scanned;
-        }
-      } catch (err) {
-        console.warn('ScannerService getForexScanner failed in /api/forex/pairs, using fallback:', err);
-      }
-
+      // This endpoint serves lightweight market-data rows, not strategy analysis.
+      // ScannerService refreshes every pair and runs prediction work; Promise.race
+      // cannot cancel that work after a timeout, so repeated dashboard requests
+      // could leave many background scans competing for the broker request queue.
+      // Strategy generation remains in /api/signals/all and the Auto Live engine.
       let adapter: any = null;
       let instruments: any[] = [];
       try {
@@ -1612,7 +1603,7 @@ app.get('/api/forex/pairs', async (_req: Request, res: Response) => {
 
     return res.json(await withApiTimeout(
       forexPairsInFlight,
-      FOREX_PAIRS_SCANNER_TIMEOUT_MS + FOREX_PAIRS_INSTRUMENT_TIMEOUT_MS + FOREX_PAIRS_QUOTE_TIMEOUT_MS,
+      FOREX_PAIRS_INSTRUMENT_TIMEOUT_MS + FOREX_PAIRS_QUOTE_TIMEOUT_MS + 2_500,
       'Forex pairs response'
     ));
   } catch (err: any) {
