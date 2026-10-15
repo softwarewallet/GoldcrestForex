@@ -22,6 +22,12 @@ export default defineConfig(() => {
               if (id.includes('lucide-react')) {
                 return 'vendor-lucide';
               }
+              if (id.includes('/node_modules/recharts/')) {
+                return 'vendor-charts';
+              }
+              if (id.includes('/node_modules/motion/')) {
+                return 'vendor-motion';
+              }
             }
           }
         }
