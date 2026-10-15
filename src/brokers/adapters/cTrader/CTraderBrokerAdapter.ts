@@ -1103,8 +1103,8 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
     this.syncConfig();
     this.validateCredentials();
 
-    if (!this.isLive) {
-      throw new BrokerError('ENVIRONMENT_MISMATCH', 'Autonomous execution is available only for cTrader LIVE.', 'CTRADER', this.environment);
+    if (String(this.environment) !== getCTraderApiMode()) {
+      throw new BrokerError('ENVIRONMENT_MISMATCH', 'Autonomous execution requires the adapter environment to match the selected cTrader API mode.', 'CTRADER', this.environment);
     }
     this.validateOrderTypeSupport(order.orderType, ['MARKET', 'LIMIT', 'STOP']);
 
@@ -1204,7 +1204,7 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
   async modifyOrder(orderId: string, modifications: OrderModification): Promise<NormalizedOrder> {
     this.syncConfig();
     this.validateCredentials();
-    if (!this.isLive) throw new BrokerError('ENVIRONMENT_MISMATCH', 'cTrader lifecycle actions require LIVE.', 'CTRADER', this.environment);
+    if (!this.isLive) throw new BrokerError('ENVIRONMENT_MISMATCH', 'cTrader lifecycle actions require the adapter environment to match the selected API mode.', 'CTRADER', this.environment);
     const raw = await this.resolveRawAccount();
     const brokerId = Number(String(orderId).replace(/^ctrader-/, ''));
     if (!Number.isSafeInteger(brokerId) || brokerId <= 0) throw new BrokerError('ORDER_REJECTED', 'Invalid cTrader broker order ID.', 'CTRADER', this.environment);
@@ -1243,7 +1243,7 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
   async modifyPosition(positionId: string, modifications: { stopLoss?: number; takeProfit?: number }): Promise<boolean> {
     this.syncConfig();
     this.validateCredentials();
-    if (!this.isLive) throw new BrokerError('ENVIRONMENT_MISMATCH', 'cTrader lifecycle actions require LIVE.', 'CTRADER', this.environment);
+    if (!this.isLive) throw new BrokerError('ENVIRONMENT_MISMATCH', 'cTrader lifecycle actions require the adapter environment to match the selected API mode.', 'CTRADER', this.environment);
     const raw = await this.resolveRawAccount();
     const brokerId = Number(String(positionId).replace(/^ctrader-/, ''));
     if (!Number.isSafeInteger(brokerId) || brokerId <= 0) throw new BrokerError('ORDER_REJECTED', 'Invalid cTrader position ID.', 'CTRADER', this.environment);
@@ -1268,7 +1268,7 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
   async cancelOrder(orderId: string): Promise<boolean> {
     this.syncConfig();
     this.validateCredentials();
-    if (!this.isLive) throw new BrokerError('ENVIRONMENT_MISMATCH', 'cTrader lifecycle actions require LIVE.', 'CTRADER', this.environment);
+    if (!this.isLive) throw new BrokerError('ENVIRONMENT_MISMATCH', 'cTrader lifecycle actions require the adapter environment to match the selected API mode.', 'CTRADER', this.environment);
     const raw = await this.resolveRawAccount();
     const brokerId = Number(String(orderId).replace(/^ctrader-/, ''));
     if (!Number.isSafeInteger(brokerId) || brokerId <= 0) throw new BrokerError('ORDER_REJECTED', 'Invalid cTrader broker order ID.', 'CTRADER', this.environment);
@@ -1284,7 +1284,7 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
   async closePosition(positionId: string, quantity?: number): Promise<boolean> {
     this.syncConfig();
     this.validateCredentials();
-    if (!this.isLive) throw new BrokerError('ENVIRONMENT_MISMATCH', 'cTrader lifecycle actions require LIVE.', 'CTRADER', this.environment);
+    if (!this.isLive) throw new BrokerError('ENVIRONMENT_MISMATCH', 'cTrader lifecycle actions require the adapter environment to match the selected API mode.', 'CTRADER', this.environment);
     const raw = await this.resolveRawAccount();
     const brokerId = Number(String(positionId).replace(/^ctrader-/, ''));
     if (!Number.isSafeInteger(brokerId) || brokerId <= 0) throw new BrokerError('ORDER_REJECTED', 'Invalid cTrader position ID.', 'CTRADER', this.environment);
