@@ -184,9 +184,21 @@ export class ScannerService {
 
           let prediction: any = null;
           try {
+            const predictionCandles = this.forexProvider.getCandles(pair.symbol, '15M', 500)
+              .filter(candle => Number.isFinite(candle.timestamp) && candle.timestamp <= Date.now())
+              .map(candle => ({
+                timestamp: candle.timestamp,
+                open: candle.open,
+                high: candle.high,
+                low: candle.low,
+                close: candle.close,
+                volume: candle.volume
+              }));
             prediction = await CombinedPredictionEngine.predict({
               pair: pair.symbol,
+              horizon: '15M',
               currentClose: quote?.bid,
+              candles: predictionCandles,
               cutoffTimestamp: Date.now()
             });
           } catch {}
