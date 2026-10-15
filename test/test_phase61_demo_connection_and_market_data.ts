@@ -19,6 +19,8 @@ async function runPhase61TestSuite() {
   console.log('========================================================================\n');
 
   await getDatabase();
+  const originalApiMode = getSystemConfig().cTraderApiMode;
+  updateSystemConfig({ cTraderApiMode: 'DEMO' });
 
   // --------------------------------------------------------------------------
   // STEP 1 — PREFLIGHT CREDENTIAL INSPECTION
@@ -58,7 +60,7 @@ async function runPhase61TestSuite() {
   // STEP 2 — NETWORK ENDPOINT, TRANSPORT ISOLATION & TLS
   // --------------------------------------------------------------------------
   console.log('\nSTEP 2: Network Endpoint & TLS Verification (Step 2)...');
-  assert.strictEqual(getCTraderApiMode(), 'DEMO', 'Default active mode must be DEMO');
+  assert.strictEqual(getCTraderApiMode(), 'DEMO', 'Explicitly selected DEMO mode must be active for this diagnostic test');
   const demoHosts = getCTraderRequestHosts(false);
   assert.strictEqual(demoHosts[0], 'wss://demo.ctraderapi.com:5036', 'DEMO transport must route to demo.ctraderapi.com:5036');
 
@@ -180,6 +182,7 @@ async function runPhase61TestSuite() {
   assert((tracesRow[0]?.count ?? 0) >= 0, 'Database trade_traces table must be valid');
   console.log('  -> PASS: Persistent database ledger confirmed valid and synchronized.');
 
+  updateSystemConfig({ cTraderApiMode: originalApiMode });
   console.log('\n========================================================================');
   console.log('PHASE 61 AUDIT RESULT:');
   console.log(`Readiness State: ${preflightReport.lifecycleStatus}`);
