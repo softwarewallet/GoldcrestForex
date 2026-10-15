@@ -13,6 +13,8 @@ async function runPhase59TestSuite() {
   console.log('============================================================\n');
 
   await getDatabase();
+  const originalApiMode = getSystemConfig().cTraderApiMode;
+  updateSystemConfig({ cTraderApiMode: 'DEMO' });
 
   // --------------------------------------------------------------------------
   // STEP 1 & 2: Credential Availability & Sanitized Status Inspection
@@ -46,7 +48,7 @@ async function runPhase59TestSuite() {
   // STEP 3: DEMO Authentication & Transport Endpoint Evaluation
   // --------------------------------------------------------------------------
   console.log('\nSTEP 3: Evaluating DEMO Authentication Flow & Transport Routing...');
-  assert.strictEqual(getCTraderApiMode(), 'DEMO', 'Default environment must be DEMO');
+  assert.strictEqual(getCTraderApiMode(), 'DEMO', 'Explicit DEMO mode must be selected for this diagnostic test');
   
   const demoHosts = getCTraderRequestHosts(false);
   assert.strictEqual(demoHosts[0], 'wss://demo.ctraderapi.com:5036', 'DEMO transport must route to demo.ctraderapi.com:5036');
@@ -152,6 +154,7 @@ async function runPhase59TestSuite() {
   // --------------------------------------------------------------------------
   // SUMMARY
   // --------------------------------------------------------------------------
+  updateSystemConfig({ cTraderApiMode: originalApiMode });
   console.log('\n============================================================');
   console.log('PHASE 59 AUDIT CONCLUSION:');
   console.log(`Status: ${allPresent ? 'AUTHENTICATED_READY' : 'CREDENTIALS_MISSING'}`);

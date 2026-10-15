@@ -98,13 +98,14 @@ function syncAutonomousPermission(): boolean {
   const requestedByEnvironment = process.env.GOLDCREST_AUTO_TRADING_ENABLED === 'true'
     && process.env.GOLDCREST_AUTONOMOUS_LIVE_EXECUTION === 'true';
   const requested = requestedByEnvironment || (isLocalDevelopment() && localExplicitAutoArm);
-  const approvedStrategyId = String(process.env.GOLDCREST_PRODUCTION_STRATEGY_ID || '*').trim();
-  const approvedByEnvironment = process.env.GOLDCREST_PRODUCTION_STRATEGY_APPROVED !== 'false';
+  const approvedStrategyId = String(process.env.GOLDCREST_PRODUCTION_STRATEGY_ID || 'fx_structure_v2a').trim();
+  const approvedByEnvironment = process.env.GOLDCREST_PRODUCTION_STRATEGY_APPROVED === 'true'
+    && approvedStrategyId === 'fx_structure_v2a';
   const approved = approvedByEnvironment || (isLocalDevelopment() && localExplicitAutoArm);
   let ctraderConfigured = false;
   try {
     const status = brokerRegistry.getCredentialStatuses().find(
-      item => item.broker === 'CTRADER'
+      item => item.broker === 'CTRADER' && item.environment === 'LIVE'
     );
     ctraderConfigured = Boolean(status?.configured);
   } catch {
@@ -189,7 +190,7 @@ class AutoExecutionEngine {
         try {
           return Boolean(
             brokerRegistry.getCredentialStatuses().find(
-              item => item.broker === 'CTRADER'
+              item => item.broker === 'CTRADER' && item.environment === 'LIVE'
             )?.configured
           );
         } catch {
@@ -199,8 +200,9 @@ class AutoExecutionEngine {
 
       if (!this.permissions.autoExecutionEnabled) blockers.push('AUTO_TRADING_FLAGS');
       if (!config.liveTradingEnabled) blockers.push('LIVE_TRADING_ENABLED');
-      const approvedStrategyId = String(process.env.GOLDCREST_PRODUCTION_STRATEGY_ID || '*').trim();
-      const strategyApproved = process.env.GOLDCREST_PRODUCTION_STRATEGY_APPROVED !== 'false';
+      const approvedStrategyId = String(process.env.GOLDCREST_PRODUCTION_STRATEGY_ID || 'fx_structure_v2a').trim();
+      const strategyApproved = process.env.GOLDCREST_PRODUCTION_STRATEGY_APPROVED === 'true'
+        && approvedStrategyId === 'fx_structure_v2a';
       if (!strategyApproved) blockers.push('PRODUCTION_STRATEGY_APPROVAL');
       if (!ctraderConfigured) blockers.push('CTRADER_CREDENTIALS');
       if (killSwitch.isHalted()) blockers.push('KILL_SWITCH');
