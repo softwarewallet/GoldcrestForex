@@ -90,7 +90,7 @@ export class LiveTradingGate {
       && (Date.now() - params.currentQuote.timestamp < quoteMaxAgeMs);
     if (!marketDataFresh) {
       failedReasons.push(
-        `Condition 7 Failed: Market data quote is stale or delayed (>${Math.round(quoteMaxAgeMs / 1000)}s old).`
+        `Condition 7 Failed: Market data quote is stale or delayed (>${Math.round(quoteMaxAgeMs / 1000)}s old; policy limit 30s).`
       );
     }
 
