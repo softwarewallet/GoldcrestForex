@@ -587,10 +587,9 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
       setAutoTradingStatus(data);
       onAutoTradingStatusChange?.(data);
       if (!res.ok) {
-        console.warn(
-          'Auto trading control rejected:',
-          data?.lastCycleResult || data?.message || data?.error || res.statusText
-        );
+        const reason = data?.lastCycleResult || data?.message || data?.error || res.statusText || 'Auto Live request was rejected.';
+        setAutoTradingControlError(String(reason));
+        console.warn('Auto trading control rejected:', reason);
       }
     } catch (err: any) {
       const message = err?.name === 'AbortError'
@@ -629,10 +628,9 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
       setAutoTradingStatus(data);
       onAutoTradingStatusChange?.(data);
       if (!res.ok) {
-        console.warn(
-          'Confirmed auto trading start rejected:',
-          data?.lastCycleResult || data?.message || data?.error || res.statusText
-        );
+        const reason = data?.lastCycleResult || data?.message || data?.error || res.statusText || 'Confirmed Auto Live request was rejected.';
+        setAutoTradingControlError(String(reason));
+        console.warn('Confirmed auto trading start rejected:', reason);
       }
     } catch (err) {
       console.warn('Confirmed auto trading start failed:', err);
