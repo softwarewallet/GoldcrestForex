@@ -1429,6 +1429,9 @@ async function withApiTimeout<T>(operation: Promise<T>, timeoutMs: number, label
 
 let forexPairsCache: { payload: any[]; expiresAt: number } | null = null;
 let forexPairsInFlight: Promise<any[]> | null = null;
+const SIGNALS_CACHE_TTL_MS = 15_000;
+let signalsCache: { payload: any[]; expiresAt: number } | null = null;
+let signalsInFlight: Promise<any[]> | null = null;
 
 const INDIA_UNDERLYINGS_CACHE_TTL_MS = 60_000;
 let indiaUnderlyingsCache: { payload: any[]; expiresAt: number } | null = null;
@@ -2164,20 +2167,26 @@ app.post('/api/options/payoff', (req: Request, res: Response) => {
 });
 
 // 7. Unified Signals
-app.get(['/api/signals', '/api/signals/all'], async (req: Request, res: Response) => {
+// Keep strategy analysis separate from /api/forex/pairs, which intentionally
+// serves lightweight market-data rows without generated signals.
+app.get(['/api/signals', '/api/signals/all'], async (_req: Request, res: Response) => {
   try {
     const now = Date.now();
-    if (forexPairsCache && now < forexPairsCache.expiresAt) {
-      const signals = forexPairsCache.payload.map((item: any) => item?.signal).filter(Boolean);
-      return res.json(signals);
+    if (signalsCache && now < signalsCache.expiresAt) {
+      return res.json(signalsCache.payload);
     }
-    if (forexPairsInFlight) {
-      const pairs = await forexPairsInFlight;
-      const signals = pairs.map((item: any) => item?.signal).filter(Boolean);
-      return res.json(signals);
+    if (signalsInFlight) {
+      return res.json(await withApiTimeout(signalsInFlight, 30_000, 'Signal analysis'));
     }
-    const signals = await scannerService.getAllSignals();
-    res.json(signals);
+
+    signalsInFlight = scannerService.getAllSignals();
+    try {
+      const signals = await withApiTimeout(signalsInFlight, 30_000, 'Signal analysis');
+      signalsCache = { payload: signals, expiresAt: Date.now() + SIGNALS_CACHE_TTL_MS };
+      return res.json(signals);
+    } finally {
+      signalsInFlight = null;
+    }
   } catch (err: any) {
     res.status(503).json({
       error: err?.code || 'LIVE_SIGNAL_DATA_UNAVAILABLE',
