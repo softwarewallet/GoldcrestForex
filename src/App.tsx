@@ -1,27 +1,27 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { lazy, Suspense, useState, useEffect, useCallback, useRef } from 'react';
 import { Header } from './components/Header';
-import { Dashboard } from './components/Dashboard';
-import { SignalsView } from './components/SignalsView';
-import { TradingHub } from './components/TradingHub';
-import { ShadowModeDashboard } from './components/ShadowModeDashboard';
-import { PredictionForensicsPage } from './components/PredictionForensicsPage';
-import { DirectionAnalysisPage } from './components/DirectionAnalysisPage';
-import { NativeIndicatorsReportPage } from './components/NativeIndicatorsReportPage';
-import { DynamicExitAnalysisPage } from './components/DynamicExitAnalysisPage';
-import { ShortTPOptimizationPage } from './components/ShortTPOptimizationPage';
+const Dashboard = lazy(() => import('./components/Dashboard').then(module => ({ default: module.Dashboard })));
+const SignalsView = lazy(() => import('./components/SignalsView').then(module => ({ default: module.SignalsView })));
+const TradingHub = lazy(() => import('./components/TradingHub').then(module => ({ default: module.TradingHub })));
+const ShadowModeDashboard = lazy(() => import('./components/ShadowModeDashboard').then(module => ({ default: module.ShadowModeDashboard })));
+const PredictionForensicsPage = lazy(() => import('./components/PredictionForensicsPage').then(module => ({ default: module.PredictionForensicsPage })));
+const DirectionAnalysisPage = lazy(() => import('./components/DirectionAnalysisPage').then(module => ({ default: module.DirectionAnalysisPage })));
+const NativeIndicatorsReportPage = lazy(() => import('./components/NativeIndicatorsReportPage').then(module => ({ default: module.NativeIndicatorsReportPage })));
+const DynamicExitAnalysisPage = lazy(() => import('./components/DynamicExitAnalysisPage').then(module => ({ default: module.DynamicExitAnalysisPage })));
+const ShortTPOptimizationPage = lazy(() => import('./components/ShortTPOptimizationPage').then(module => ({ default: module.ShortTPOptimizationPage })));
 import { TradingOperationsDashboard } from './components/TradingOperationsDashboard';
-import { TradingControlCenter } from './components/TradingControlCenter';
-import { HistoryPage } from './components/HistoryPage';
-import { DatabaseExplorerPage } from './components/DatabaseExplorerPage';
-import { ConnectionMonitorPage } from './components/ConnectionMonitorPage';
-import { AlertsPage } from './components/AlertsPage';
-import { PnLAccountingPage } from './components/PnLAccountingPage';
-import { SettingsHub } from './components/SettingsHub';
-import { MarketSessionsWidget } from './components/MarketSessionsWidget';
+const TradingControlCenter = lazy(() => import('./components/TradingControlCenter').then(module => ({ default: module.TradingControlCenter })));
+const HistoryPage = lazy(() => import('./components/HistoryPage').then(module => ({ default: module.HistoryPage })));
+const DatabaseExplorerPage = lazy(() => import('./components/DatabaseExplorerPage').then(module => ({ default: module.DatabaseExplorerPage })));
+const ConnectionMonitorPage = lazy(() => import('./components/ConnectionMonitorPage').then(module => ({ default: module.ConnectionMonitorPage })));
+const AlertsPage = lazy(() => import('./components/AlertsPage').then(module => ({ default: module.AlertsPage })));
+const PnLAccountingPage = lazy(() => import('./components/PnLAccountingPage').then(module => ({ default: module.PnLAccountingPage })));
+const SettingsHub = lazy(() => import('./components/SettingsHub').then(module => ({ default: module.SettingsHub })));
+const MarketSessionsWidget = lazy(() => import('./components/MarketSessionsWidget').then(module => ({ default: module.MarketSessionsWidget })));
 import { GlobalAppShell } from './components/GlobalAppShell';
-import { SignalModal } from './components/SignalModal';
-import { DiagnosticsModal } from './components/DiagnosticsModal';
-import { OrderConfirmationModal } from './components/OrderConfirmationModal';
+const SignalModal = lazy(() => import('./components/SignalModal').then(module => ({ default: module.SignalModal })));
+const DiagnosticsModal = lazy(() => import('./components/DiagnosticsModal').then(module => ({ default: module.DiagnosticsModal })));
+const OrderConfirmationModal = lazy(() => import('./components/OrderConfirmationModal').then(module => ({ default: module.OrderConfirmationModal })));
 import { TradingSignal, Candle, ForexSessionState, IndianSessionState } from './markets/common/types';
 import { getForexSessionState, getIndianSessionState } from './markets/common/session';
 import { BrokerType, TradingEnvironment, OrderRequest } from './brokers/types';
@@ -314,6 +314,7 @@ export default function App() {
     >
       {/* Fixed global shell content outlet: view components render here. */}
       <main id="global_app_content" className="min-h-[calc(100vh-162px)] w-full space-y-4 bg-[#03070d] text-slate-100" style={{ paddingLeft: '10px', paddingRight: '10px', paddingTop: '10px', paddingBottom: '10px' }}>
+        <Suspense fallback={<div className="min-h-40 p-6 text-sm text-slate-400">Loading view…</div>}>
         {/* Market Watch / scanners */}
         {loadingInitial && activeTab === 'market_watch' ? (
           <div className="space-y-6 p-6 animate-pulse">
@@ -444,8 +445,10 @@ export default function App() {
             onRefreshGlobal={refreshBrokerStatus}
           />
         )}
+        </Suspense>
       </main>
  
+      <Suspense fallback={null}>
       {/* Signal Quantitative Inspection Modal */}
       {selectedSignal && (
         <SignalModal
@@ -474,6 +477,7 @@ export default function App() {
           currentPrice={pendingOrder.price || 0}
         />
       )}
+      </Suspense>
     </GlobalAppShell>
   );
 }

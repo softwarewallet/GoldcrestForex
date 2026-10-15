@@ -153,7 +153,9 @@ export const GlobalAppShell: React.FC<GlobalAppShellProps> = ({
     };
 
     void fetchTodaySummary();
-    const interval = window.setInterval(() => void fetchTodaySummary(), 4000);
+    // Daily summary is non-critical telemetry; polling every 4 seconds creates
+    // repeated DB/API work across every page. Refresh at a calmer cadence.
+    const interval = window.setInterval(() => void fetchTodaySummary(), 30000);
     return () => {
       mounted = false;
       window.clearInterval(interval);

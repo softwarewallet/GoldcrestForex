@@ -8,6 +8,7 @@ import {
   stopLiveRuntimeLog,
   getLiveRuntimeLogStatus,
   liveRuntimeLog,
+  flushLiveRuntimeLog,
   listLiveRuntimeLogFiles
 } from '../src/services/liveRuntimeLog';
 
@@ -22,6 +23,7 @@ liveRuntimeLog('INFO', 'TEST_EVENT', {
   accessToken: 'super-secret-access-token-value-that-must-not-appear',
   clientSecret: 'super-secret-client-secret-value-that-must-not-appear'
 });
+await flushLiveRuntimeLog();
 
 const contentText = fs.readFileSync(status.file, 'utf8');
 assert.match(contentText, /TEST_EVENT/);
@@ -31,9 +33,11 @@ assert.match(contentText, /\[REDACTED(?:_TOKEN)?\]/);
 
 const stopped = stopLiveRuntimeLog('TEST');
 assert.equal(stopped.enabled, true);
+await flushLiveRuntimeLog();
 const sizeBefore = fs.statSync(stopped.file).size;
 
 liveRuntimeLog('INFO', 'SHOULD_BE_WRITTEN_AFTER_STOP_REQUEST');
+await flushLiveRuntimeLog();
 const sizeAfter = fs.statSync(stopped.file).size;
 assert.ok(sizeAfter > sizeBefore);
 assert.match(fs.readFileSync(stopped.file, 'utf8'), /LIVE_LOG_STOP_REQUEST_IGNORED/);
