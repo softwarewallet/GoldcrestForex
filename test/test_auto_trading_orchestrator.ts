@@ -47,6 +47,12 @@ try {
     cTraderApiMode: originalConfig.cTraderApiMode,
     liveTradingEnabled: originalConfig.liveTradingEnabled
   });
+  if (originalAuto === undefined) delete process.env.GOLDCREST_AUTO_TRADING_ENABLED;
+  else process.env.GOLDCREST_AUTO_TRADING_ENABLED = originalAuto;
+  if (originalLiveAuto === undefined) delete process.env.GOLDCREST_AUTONOMOUS_LIVE_EXECUTION;
+  else process.env.GOLDCREST_AUTONOMOUS_LIVE_EXECUTION = originalLiveAuto;
+  if (originalLocalDevelopment === undefined) delete process.env.GOLDCREST_LOCAL_DEVELOPMENT;
+  else process.env.GOLDCREST_LOCAL_DEVELOPMENT = originalLocalDevelopment;
 }
 
 console.log('AUTO-TRADING ORCHESTRATOR SAFETY TEST PASSED');
