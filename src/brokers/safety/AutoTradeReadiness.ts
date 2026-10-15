@@ -3,7 +3,7 @@ import { BrokerAdapter, OrderRequest, NormalizedQuote } from '../types';
 import { brokerRegistry } from '../registry';
 import { killSwitch } from './KillSwitch';
 import { getForexSessionState, getIndianSessionState } from '../../markets/common/session';
-import { getSystemConfig } from '../../services/configService';
+import { getCTraderApiMode, getSystemConfig } from '../../services/configService';
 import { executeQuery } from '../../database/db';
 import { reconciliationService } from '../../services/reconciliationService';
 import { MartingaleRecoveryService } from '../../services/martingaleRecoveryService';
@@ -87,8 +87,8 @@ class AutoTradeReadinessService {
     const selectedBrokerEnvironment = adapter.broker === 'CTRADER'
       ? String((adapter as any).getConfigStatus?.()?.environment || adapter.environment).toUpperCase()
       : String(adapter.environment).toUpperCase();
-    checks.liveEnvironment = selectedBrokerEnvironment === 'LIVE'
-      && brokerRegistry.getEnvironment() === 'LIVE';
+    const expectedBrokerEnvironment = adapter.broker === 'CTRADER' ? getCTraderApiMode() : 'LIVE';
+    checks.liveEnvironment = selectedBrokerEnvironment === expectedBrokerEnvironment;
     checks.killSwitchClear = !killSwitch.isHalted();
     checks.liveTradingEnabled = process.env.LIVE_TRADING_ENABLED === 'true';
     const localDevelopment = process.env.NODE_ENV !== 'production'
