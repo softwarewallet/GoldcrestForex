@@ -149,22 +149,26 @@ class TradeContinuityService {
 
       // In the event of continuity of 10 profit trades, automatically continue executing trades
       if (this.consecutiveProfitCount >= PROFIT_STREAK_AUTO_CONTINUE_THRESHOLD) {
+        const continuityWasActive = this.isProfitContinuityActive;
+        const wasPaused = this.isContinuityPaused || this.requiresContinuityAuthorization;
         this.isProfitContinuityActive = true;
-        // Auto-clear any pause or pending authorization
-        if (this.isContinuityPaused || this.requiresContinuityAuthorization) {
+        // Auto-clear any pause or pending authorization.
+        if (wasPaused) {
           this.isContinuityPaused = false;
           this.requiresContinuityAuthorization = false;
         }
-
-        liveRuntimeLog('INFO', 'TRADE_CONTINUITY_PROFIT_STREAK_AUTO_CONTINUE', {
-          consecutiveProfitCount: this.consecutiveProfitCount,
-          threshold: PROFIT_STREAK_AUTO_CONTINUE_THRESHOLD,
-          message: '10 consecutive profit trades reached. Continuing automatic trade execution.'
-        });
-        tradeAuditLog('PROFIT_STREAK_AUTO_CONTINUE', {
-          consecutiveProfitCount: this.consecutiveProfitCount,
-          threshold: PROFIT_STREAK_AUTO_CONTINUE_THRESHOLD
-        });
+        // Log state transitions, not every trade while the same state persists.
+        if (!continuityWasActive || wasPaused) {
+          liveRuntimeLog('INFO', 'TRADE_CONTINUITY_PROFIT_STREAK_AUTO_CONTINUE', {
+            consecutiveProfitCount: this.consecutiveProfitCount,
+            threshold: PROFIT_STREAK_AUTO_CONTINUE_THRESHOLD,
+            message: 'Profit-streak continuity activated; automatic trade execution may continue.'
+          });
+          tradeAuditLog('PROFIT_STREAK_AUTO_CONTINUE', {
+            consecutiveProfitCount: this.consecutiveProfitCount,
+            threshold: PROFIT_STREAK_AUTO_CONTINUE_THRESHOLD
+          });
+        }
       }
     }
 

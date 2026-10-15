@@ -2170,28 +2170,42 @@ app.post('/api/options/payoff', (req: Request, res: Response) => {
 // Keep strategy analysis separate from /api/forex/pairs, which intentionally
 // serves lightweight market-data rows without generated signals.
 app.get(['/api/signals', '/api/signals/all'], async (_req: Request, res: Response) => {
-  try {
-    const now = Date.now();
-    if (signalsCache && now < signalsCache.expiresAt) {
+  const now = Date.now();
+  if (signalsCache && now < signalsCache.expiresAt) return res.json(signalsCache.payload);
+
+  // HTTP timeouts do not cancel scanner work. Keep a single shared scan alive
+  // until it settles, and serve stale known signals while refreshing.
+  if (signalsInFlight) {
+    if (signalsCache) {
+      res.setHeader('X-Goldcrest-Signals-Cache', 'stale');
       return res.json(signalsCache.payload);
     }
-    if (signalsInFlight) {
-      return res.json(await withApiTimeout(signalsInFlight, 30_000, 'Signal analysis'));
-    }
-
-    signalsInFlight = scannerService.getAllSignals();
     try {
-      const signals = await withApiTimeout(signalsInFlight, 30_000, 'Signal analysis');
-      signalsCache = { payload: signals, expiresAt: Date.now() + SIGNALS_CACHE_TTL_MS };
-      return res.json(signals);
-    } finally {
-      signalsInFlight = null;
+      return res.json(await withApiTimeout(signalsInFlight, 8_000, 'Signal analysis'));
+    } catch (err: any) {
+      return res.status(503).json({ error: err?.code || 'LIVE_SIGNAL_DATA_UNAVAILABLE', message: err?.message || 'Live signal analysis is still running.' });
     }
+  }
+
+  const scan = scannerService.getAllSignals();
+  signalsInFlight = scan;
+  void scan.then((signals) => {
+    signalsCache = { payload: signals, expiresAt: Date.now() + SIGNALS_CACHE_TTL_MS };
+    liveRuntimeLog('INFO', 'SIGNALS_SCAN_REFRESH_COMPLETED', { signalCount: signals.length });
+  }).catch((err: any) => {
+    liveRuntimeLog('ERROR', 'SIGNALS_SCAN_REFRESH_FAILED', { error: err?.message || String(err) });
+  }).finally(() => {
+    if (signalsInFlight === scan) signalsInFlight = null;
+  });
+
+  try {
+    return res.json(await withApiTimeout(scan, 8_000, 'Signal analysis'));
   } catch (err: any) {
-    res.status(503).json({
-      error: err?.code || 'LIVE_SIGNAL_DATA_UNAVAILABLE',
-      message: err?.message || 'Live signal data is unavailable from the configured brokers.'
-    });
+    if (signalsCache) {
+      res.setHeader('X-Goldcrest-Signals-Cache', 'stale');
+      return res.json(signalsCache.payload);
+    }
+    return res.status(503).json({ error: err?.code || 'LIVE_SIGNAL_DATA_UNAVAILABLE', message: err?.message || 'Live signal analysis is still running.' });
   }
 });
 

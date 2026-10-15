@@ -413,11 +413,16 @@ export default function App() {
         )}
 
         {(activeTab === 'control_center' || activeTab === 'operations' || activeTab === 'reconciliation' || activeTab === 'reconcile') && (
-          <TradingControlCenter
-          onSelectSignalModal={(sig) => setSelectedSignal(sig)}
-          autoTradingStatus={autoTradingStatus}
-          onAutoTradingStatusChange={setAutoTradingStatus}
-        />
+          <div className="space-y-4">
+            {/* Render the operations cockpit and control center in the same route;
+                neither panel waits for the other to mount. */}
+            <TradingOperationsDashboard />
+            <TradingControlCenter
+              onSelectSignalModal={(sig) => setSelectedSignal(sig)}
+              autoTradingStatus={autoTradingStatus}
+              onAutoTradingStatusChange={setAutoTradingStatus}
+            />
+          </div>
         )}
 
         {activeTab === 'alerts' && (

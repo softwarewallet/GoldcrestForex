@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   Activity,
   AlertOctagon,
@@ -277,7 +277,11 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
   }, []);
 
   // Fetch live operational data from authoritative broker and runtime APIs.
+  // Do not start another refresh while a previous broker/API batch is pending.
+  const operationalRefreshInFlight = useRef(false);
   const fetchAllOperationalData = useCallback(async () => {
+    if (operationalRefreshInFlight.current) return;
+    operationalRefreshInFlight.current = true;
     setIsRefreshing(true);
     try {
       const [
@@ -534,6 +538,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
     } catch (err) {
       console.warn('Control Center live refresh failed:', err);
     } finally {
+      operationalRefreshInFlight.current = false;
       setIsRefreshing(false);
     }
   }, []);
