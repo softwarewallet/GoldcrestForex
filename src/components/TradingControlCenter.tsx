@@ -263,7 +263,6 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
         healthRes,
         autoTradingRes,
         forexPairsRes,
-        indiaUnderlyingsRes,
         signalsRes,
         newsRes
       ] = await Promise.all([
@@ -276,7 +275,6 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
         fetch('/api/governance/live-health', { cache: 'no-store' }).catch(() => null),
         fetch('/api/auto-trading/status', { cache: 'no-store' }).catch(() => null),
         fetch('/api/forex/pairs', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/india/underlyings', { cache: 'no-store' }).catch(() => null),
         fetch('/api/signals/all', { cache: 'no-store' }).catch(() => null),
         fetch('/api/forex/news', { cache: 'no-store' }).catch(() => null)
       ]);
@@ -374,11 +372,8 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
           .filter((o: any) => o.internalOrderId && Number.isFinite(o.quantity)));
       }
 
-      if (forexPairsRes?.ok || indiaUnderlyingsRes?.ok) {
-        const [fxRows, inRows] = await Promise.all([
-          forexPairsRes?.ok ? forexPairsRes.json() : [],
-          indiaUnderlyingsRes?.ok ? indiaUnderlyingsRes.json() : []
-        ]);
+      if (forexPairsRes?.ok) {
+        const fxRows = await forexPairsRes.json();
         const liveQuotes: MarketQuoteItem[] = [];
         if (Array.isArray(fxRows)) {
           for (const q of fxRows) {
@@ -395,26 +390,6 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
               spreadPipsOrPts: Number(q.spreadPips ?? q.spreadPipsOrPts ?? 0),
               change24h: Number(q.changePips24h ?? q.changePips ?? 0),
               changePercent24h: Number(q.changePercent24h ?? 0),
-              timestamp: Date.now(),
-              timeframe: 'LIVE',
-              status: 'OPEN',
-              freshness: 'LIVE'
-            });
-          }
-        }
-        if (Array.isArray(inRows)) {
-          for (const q of inRows) {
-            const spot = Number(q?.spot);
-            if (!(spot > 0)) continue;
-            liveQuotes.push({
-              market: 'INDIA_EQUITY',
-              symbol: q.symbol,
-              bid: null as unknown as number,
-              ask: null as unknown as number,
-              ltp: spot,
-              spreadPipsOrPts: Number(q.spreadPoints ?? 0),
-              change24h: Number(q.change ?? 0),
-              changePercent24h: Number(q.changePercent ?? 0),
               timestamp: Date.now(),
               timeframe: 'LIVE',
               status: 'OPEN',

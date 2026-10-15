@@ -66,6 +66,7 @@ export class RuntimeErrorBoundary extends Component<RuntimeErrorBoundaryProps, R
     const filename = event.filename || '';
 
     if (this.isIgnoredError(message, stack, filename)) {
+      event.preventDefault();
       console.warn('[Benign Dev/Browser Error Ignored]:', message);
       return;
     }
@@ -86,6 +87,7 @@ export class RuntimeErrorBoundary extends Component<RuntimeErrorBoundaryProps, R
     const stack = reason.stack || '';
 
     if (this.isIgnoredError(message, stack)) {
+      event.preventDefault();
       console.warn('[Benign Rejection Ignored]:', message);
       return;
     }

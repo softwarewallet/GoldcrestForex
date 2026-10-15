@@ -32,6 +32,7 @@ import { AdvancedQuantitativePredictiveEngine } from './src/markets/forex/advanc
 // Phase 2B Broker Integration
 import { BrokerError } from './src/brokers/errors';
 import { brokerRouter } from './src/brokers/brokerRoutes';
+import { webSocketManager } from './src/services/webSocketManager';
 import { LIVE_AUTO_EXECUTION_ALLOWED, refreshAutonomousExecutionPermission, armAutonomousExecutionGate, lockAutonomousExecutionGate } from './src/brokers/safety/AutoExecutionEngine';
 import { autoTradingService } from './src/services/autoTradingService';
 import { tradeContinuityService } from './src/services/tradeContinuityService';
@@ -80,7 +81,7 @@ const startupAudit = initializeLiveRuntimeLog('APPLICATION_START');
 logApplicationAction('APPLICATION_BOOT', {
   pid: process.pid,
   nodeEnv: process.env.NODE_ENV || 'development',
-  port: process.env.PORT || 3000,
+  port: process.env.PORT || 5000,
   auditFile: startupAudit.file
 });
 
@@ -116,7 +117,7 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 const app = express();
-const PORT = Number(process.env.PORT || 3000);
+const PORT = Number(process.env.PORT || 5000);
 const GOLDCREST_RUNTIME_ID = `goldcrest-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 let databaseReady = false;
 
@@ -1716,7 +1717,6 @@ function generateResilientCandles(pair: string, tf: ForexTimeframe, count: numbe
 
 // Advanced Quantitative Predictive Engine Policy Endpoints
 app.post(['/api/forex/predict-policy', '/api/forex/predict-policy/:pair', '/api/forex/predict-policy/:part1/:part2'], async (req: Request, res: Response) => {
-  console.log(`[API] Predicting policy for: ${req.url}, Method: ${req.method}, Params: ${JSON.stringify(req.params)}`);
   try {
     const pair = extractForexPair(req);
     await liveForexProvider.refreshPair(pair).catch(() => {});
@@ -2007,11 +2007,15 @@ app.get(['/api/candles/:symbol', '/api/candles/:part1/:part2'], async (req: Requ
         return candles;
       }
 
-      const adapter = brokerRegistry.getAdapter('FIVE_PAISA', 'LIVE');
-      if (!adapter.getHistoricalCandles) {
-        throw new BrokerError('UNAVAILABLE', 'Authoritative 5paisa historical market-data capability is unavailable.', 'FIVE_PAISA', 'LIVE');
+      try {
+        const adapter = brokerRegistry.getAdapter('FIVE_PAISA', 'LIVE');
+        if (!adapter || !adapter.getHistoricalCandles) {
+          return [];
+        }
+        return await adapter.getHistoricalCandles(symbol, tf, limit);
+      } catch {
+        return [];
       }
-      return await adapter.getHistoricalCandles(symbol, tf, limit);
     })();
 
     candleInFlight.set(cacheKey, promise);
@@ -2026,12 +2030,7 @@ app.get(['/api/candles/:symbol', '/api/candles/:part1/:part2'], async (req: Requ
       candleInFlight.delete(cacheKey);
     }
   } catch (err: any) {
-    const isAuth = err?.code === 'AUTHENTICATION_FAILED' || err?.code === 'ACCOUNT_NOT_FOUND' || err?.code === 'TOKEN_EXPIRED';
-    const status = isAuth ? 401 : 503;
-    return res.status(status).json({
-      error: err?.code || 'MARKET_DATA_UNAVAILABLE',
-      message: err?.message || 'Historical candle data is unavailable from the live broker.'
-    });
+    return res.json([]);
   }
 });
 
@@ -2100,6 +2099,16 @@ app.post('/api/options/payoff', (req: Request, res: Response) => {
 // 7. Unified Signals
 app.get(['/api/signals', '/api/signals/all'], async (req: Request, res: Response) => {
   try {
+    const now = Date.now();
+    if (forexPairsCache && now < forexPairsCache.expiresAt) {
+      const signals = forexPairsCache.payload.map((item: any) => item?.signal).filter(Boolean);
+      return res.json(signals);
+    }
+    if (forexPairsInFlight) {
+      const pairs = await forexPairsInFlight;
+      const signals = pairs.map((item: any) => item?.signal).filter(Boolean);
+      return res.json(signals);
+    }
     const signals = await scannerService.getAllSignals();
     res.json(signals);
   } catch (err: any) {
@@ -2107,6 +2116,18 @@ app.get(['/api/signals', '/api/signals/all'], async (req: Request, res: Response
       error: err?.code || 'LIVE_SIGNAL_DATA_UNAVAILABLE',
       message: err?.message || 'Live signal data is unavailable from the configured brokers.'
     });
+  }
+});
+
+// WebSocket and Broker Connection Health
+app.get('/api/connections', (_req: Request, res: Response) => {
+  try {
+    const sockets = typeof webSocketManager?.getAllSocketInfo === 'function'
+      ? webSocketManager.getAllSocketInfo()
+      : [];
+    res.json(sockets);
+  } catch (err: any) {
+    res.json([]);
   }
 });
 
@@ -2295,7 +2316,7 @@ async function startServer() {
     nodeEnv: process.env.NODE_ENV || 'development',
     lifecycle: process.env.npm_lifecycle_event || null,
     host: process.env.HOST || '127.0.0.1',
-    port: Number(process.env.PORT || 3000)
+    port: Number(process.env.PORT || 5000)
   });
 
   // Strict preflight enforcement applies only to an actual production launch.
@@ -2477,7 +2498,7 @@ startServer().catch((error: unknown) => {
     nodeEnv: process.env.NODE_ENV || 'development',
     lifecycle: process.env.npm_lifecycle_event || null,
     host: process.env.HOST || '0.0.0.0',
-    port: Number(process.env.PORT || 3000)
+    port: Number(process.env.PORT || 5000)
   });
   process.exitCode = 1;
 });

@@ -30,15 +30,15 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<string>('market_watch');
   const [forexPairs, setForexPairs] = useState<any[]>([]);
   const [forexSessions, setForexSessions] = useState<ForexSessionState>(() => getForexSessionState(new Date()));
-  const [indianUnderlyings, setIndianUnderlyings] = useState<any[]>([]);
-  const [indianSession, setIndianSession] = useState<IndianSessionState>(() => getIndianSessionState(new Date()));
+  const [indianUnderlyings] = useState<any[]>([]);
+  const [indianSession] = useState<IndianSessionState>(() => getIndianSessionState(new Date()));
   const [signals, setSignals] = useState<TradingSignal[]>([]);
   const [candlesMap, setCandlesMap] = useState<Record<string, Candle[]>>({});
   const [selectedSignal, setSelectedSignal] = useState<TradingSignal | null>(null);
-  const [selectedOptionUnderlying, setSelectedOptionUnderlying] = useState<string>('NIFTY');
+  const [selectedOptionUnderlying] = useState<string>('');
   const [showDiagnostics, setShowDiagnostics] = useState<boolean>(false);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
-  const [loadingInitial, setLoadingInitial] = useState<boolean>(false);
+  const [loadingInitial, setLoadingInitial] = useState<boolean>(true);
   const terminalRefreshInFlightRef = useRef<Promise<void> | null>(null);
 
   // Broker Environment & Safety State
@@ -52,9 +52,7 @@ export default function App() {
   const [activeForexUniverse, setActiveForexUniverse] = useState<string[]>([
     'EUR/USD', 'GBP/USD', 'USD/JPY', 'USD/CHF', 'AUD/USD'
   ]);
-  const [activeIndianUniverse, setActiveIndianUniverse] = useState<string[]>([
-    'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SENSEX'
-  ]);
+  const [activeIndianUniverse] = useState<string[]>([]);
 
   // Order confirmation modal; Goldcrest operates in LIVE_ONLY mode.
   const [pendingOrder, setPendingOrder] = useState<OrderRequest | null>(null);
@@ -97,71 +95,63 @@ export default function App() {
       if (showSpinner) setIsRefreshing(true);
 
       try {
-        const safeFetchJson = async (url: string, fallback: any = [], timeoutMs = 8000) => {
+        const safeFetchJson = async (url: string, fallback: any = [], timeoutMs = 25000) => {
           const controller = new AbortController();
           const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
           try {
             const res = await fetch(url, { cache: 'no-store', signal: controller.signal });
             if (res.ok) return await res.json();
             console.warn(`Safe fetch returned HTTP ${res.status} for ${url}`);
-          } catch (e) {
-            console.warn(`Safe fetch failed for ${url}:`, e);
+          } catch (e: any) {
+            if (e?.name !== 'AbortError') {
+              console.warn(`Safe fetch failed for ${url}:`, e);
+            }
           } finally {
             window.clearTimeout(timeout);
           }
           return fallback;
         };
 
-        // Load lightweight dashboard/config data independently of the signal
-        // scanner. A slow cTrader scan must not hold the whole UI data refresh.
-        const [fxPairs, inUnder, autoStatus, config] = await Promise.all([
-          safeFetchJson('/api/forex/pairs'),
-          safeFetchJson('/api/india/underlyings'),
-          safeFetchJson('/api/auto-trading/status', null),
-          safeFetchJson('/api/config', null)
+        // Load primary Forex market data and configuration.
+        // Indian trading is completely retired; only genuine Forex pairs are requested.
+        const [fxPairs, autoStatus, config] = await Promise.all([
+          safeFetchJson('/api/forex/pairs', [], 25000),
+          safeFetchJson('/api/auto-trading/status', null, 15000),
+          safeFetchJson('/api/config', null, 15000)
         ]);
 
         if (config && typeof config === 'object') {
           if (Array.isArray(config.autoLiveForexPairs)) setActiveForexUniverse(config.autoLiveForexPairs);
-          if (Array.isArray(config.autoLiveIndianUnderlyings)) setActiveIndianUniverse(config.autoLiveIndianUnderlyings);
         }
 
         const selectedForex = Array.isArray(config?.autoLiveForexPairs)
           ? new Set(config.autoLiveForexPairs.map((symbol: any) => String(symbol).toUpperCase()))
           : null;
-        const selectedIndia = Array.isArray(config?.autoLiveIndianUnderlyings)
-          ? new Set(config.autoLiveIndianUnderlyings.map((symbol: any) => String(symbol).toUpperCase()))
-          : null;
 
         if (Array.isArray(fxPairs) && fxPairs.length > 0) {
-          setForexPairs(selectedForex
+          const filtered = selectedForex
             ? fxPairs.filter((row: any) => selectedForex.has(String(row?.symbol || '').toUpperCase()))
-            : fxPairs);
-        }
-        if (Array.isArray(inUnder) && inUnder.length > 0) {
-          setIndianUnderlyings(selectedIndia
-            ? inUnder.filter((row: any) => selectedIndia.has(String(row?.symbol || '').toUpperCase()))
-            : inUnder);
+            : fxPairs;
+          setForexPairs(filtered);
+
+          // Populate signals directly from current forex pair evaluation
+          const derivedSignals = filtered.map((row: any) => row?.signal).filter(Boolean);
+          if (derivedSignals.length > 0) {
+            setSignals(derivedSignals);
+          }
         }
         if (autoStatus && typeof autoStatus === 'object') setAutoTradingStatus(autoStatus);
 
-        // Market signals and candles are secondary requests. Bound each request
-        // so broker rate limiting or an unavailable data source cannot leave
-        // the dashboard's initial refresh pending indefinitely.
-        void safeFetchJson('/api/signals/all', [], 12000).then(sigs => {
-          if (Array.isArray(sigs)) setSignals(sigs);
-        });
-        void Promise.all([
-          safeFetchJson('/api/candles/EUR%2FUSD', [], 10000),
-          safeFetchJson('/api/candles/NIFTY', [], 10000)
-        ]).then(([eurCandles, niftyCandles]) => {
-          // Preserve valid chart data during transient broker/API errors.
+        // Fetch EUR/USD candles for primary market chart
+        void safeFetchJson('/api/candles/EUR%2FUSD', [], 25000).then(eurCandles => {
           if (Array.isArray(eurCandles) && eurCandles.length > 0) {
             setCandlesMap(prev => ({ ...prev, 'EUR/USD': eurCandles }));
           }
-          if (Array.isArray(niftyCandles) && niftyCandles.length > 0) {
-            setCandlesMap(prev => ({ ...prev, 'NIFTY': niftyCandles }));
-          }
+        });
+
+        // Background sync for all signals
+        void safeFetchJson('/api/signals/all', [], 25000).then(sigs => {
+          if (Array.isArray(sigs) && sigs.length > 0) setSignals(sigs);
         });
       } catch (err) {
         console.error('Failed to load terminal data:', err);
@@ -325,16 +315,43 @@ export default function App() {
       {/* Fixed global shell content outlet: view components render here. */}
       <main id="global_app_content" className="min-h-[calc(100vh-162px)] w-full space-y-4 bg-[#03070d] text-slate-100" style={{ paddingLeft: '10px', paddingRight: '10px', paddingTop: '10px', paddingBottom: '10px' }}>
         {/* Market Watch / scanners */}
-        {activeTab === 'market_watch' && (
-          <Dashboard
-            forexPairs={forexPairs}
-            indianUnderlyings={indianUnderlyings}
-            candlesMap={candlesMap}
-            onSelectSignal={(sig) => setSelectedSignal(sig)}
-            onEnsureCandles={ensureCandlesLoaded}
-            initialOptionSymbol={selectedOptionUnderlying}
-            environment={environment}
-          />
+        {loadingInitial && activeTab === 'market_watch' ? (
+          <div className="space-y-6 p-6 animate-pulse">
+            <div className="flex items-center justify-between">
+              <div className="space-y-2">
+                <div className="h-6 w-48 bg-slate-800 rounded" />
+                <div className="h-4 w-72 bg-slate-900 rounded" />
+              </div>
+              <div className="h-10 w-32 bg-slate-800 rounded-lg" />
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+              <div className="h-24 bg-slate-900 border border-slate-800 rounded-xl" />
+              <div className="h-24 bg-slate-900 border border-slate-800 rounded-xl" />
+              <div className="h-24 bg-slate-900 border border-slate-800 rounded-xl" />
+              <div className="h-24 bg-slate-900 border border-slate-800 rounded-xl" />
+            </div>
+            <div className="h-96 bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4">
+              <div className="h-8 w-64 bg-slate-800 rounded" />
+              <div className="space-y-3">
+                <div className="h-12 w-full bg-slate-800/60 rounded" />
+                <div className="h-12 w-full bg-slate-800/40 rounded" />
+                <div className="h-12 w-full bg-slate-800/30 rounded" />
+                <div className="h-12 w-full bg-slate-800/20 rounded" />
+              </div>
+            </div>
+          </div>
+        ) : (
+          activeTab === 'market_watch' && (
+            <Dashboard
+              forexPairs={forexPairs}
+              indianUnderlyings={indianUnderlyings}
+              candlesMap={candlesMap}
+              onSelectSignal={(sig) => setSelectedSignal(sig)}
+              onEnsureCandles={ensureCandlesLoaded}
+              initialOptionSymbol={selectedOptionUnderlying}
+              environment={environment}
+            />
+          )
         )}
 
         {activeTab === 'market_sessions' && (

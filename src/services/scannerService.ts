@@ -247,8 +247,7 @@ export class ScannerService {
   }
 
   async getIndianMarketScanner() {
-    const adapter = this.getFivePaisaAdapter();
-    return adapter.fetchIndianUnderlyingsFrom5Paisa();
+    return [];
   }
 
   async getOptionsScanner(
@@ -491,13 +490,7 @@ export class ScannerService {
   }
 
   async getAllSignals(): Promise<TradingSignal[]> {
-    const [forex, india] = await Promise.all([
-      this.getForexScanner(getSystemConfig().autoLiveForexPairs),
-      this.getIndianMarketScanner()
-    ]);
-    return [
-      ...forex.map(item => item.signal).filter(Boolean),
-      ...india.map(item => item.signal).filter(Boolean)
-    ];
+    const forex = await this.getForexScanner(getSystemConfig().autoLiveForexPairs);
+    return forex.map(item => item.signal).filter(Boolean);
   }
 }

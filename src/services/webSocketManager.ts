@@ -230,6 +230,12 @@ class WebSocketManager {
     connectionTime: number;
     retryCount: number;
     pingLatency: number;
+    broker: string;
+    endpoint: string;
+    accountId: number;
+    isLive: boolean;
+    lastHeartbeat: number;
+    readyState: number;
   }[] {
     return Array.from(this.activeSockets.entries()).map(([id, meta]) => ({
       id,
@@ -237,6 +243,12 @@ class WebSocketManager {
       connectionTime: meta.connectionTime,
       retryCount: meta.retryCount,
       pingLatency: meta.pingLatency,
+      broker: meta.key.broker,
+      endpoint: meta.key.endpoint,
+      accountId: meta.key.accountId,
+      isLive: meta.key.isLive,
+      lastHeartbeat: meta.lastHeartbeat,
+      readyState: meta.ws ? meta.ws.readyState : 0
     }));
   }
 }
