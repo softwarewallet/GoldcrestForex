@@ -59,7 +59,11 @@ class AutoTradeReadinessService {
     let consecutiveLosses = 0;
     let spreadBps: number | null = null;
 
-    checks.liveEnvironment = adapter.environment === 'LIVE' && brokerRegistry.getEnvironment() === 'LIVE';
+    const selectedBrokerEnvironment = adapter.broker === 'CTRADER'
+      ? String((adapter as any).getConfigStatus?.()?.environment || adapter.environment).toUpperCase()
+      : String(adapter.environment).toUpperCase();
+    checks.liveEnvironment = selectedBrokerEnvironment === 'LIVE'
+      && brokerRegistry.getEnvironment() === 'LIVE';
     checks.killSwitchClear = !killSwitch.isHalted();
     checks.liveTradingEnabled = process.env.LIVE_TRADING_ENABLED === 'true';
     const localDevelopment = process.env.NODE_ENV !== 'production'
