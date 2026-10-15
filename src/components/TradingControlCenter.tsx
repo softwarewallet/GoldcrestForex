@@ -284,6 +284,22 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
     operationalRefreshInFlight.current = true;
     setIsRefreshing(true);
     try {
+      // Resolve Auto Live status first, separately from slower telemetry calls.
+      // This keeps the control-plane request from competing with reconciliation,
+      // signal scanning, and news requests during dashboard refresh.
+      const autoTradingRes = await fetchWithTimeout(
+        '/api/auto-trading/status',
+        { cache: 'no-store' },
+        5_000
+      ).catch(() => null);
+      if (autoTradingRes?.ok) {
+        const priorityStatus = await autoTradingRes.clone().json().catch(() => null);
+        if (priorityStatus) {
+          setAutoTradingStatus(priorityStatus);
+          onAutoTradingStatusChange?.(priorityStatus);
+        }
+      }
+
       const [
         brokerStatusRes,
         positionsRes,
@@ -292,7 +308,6 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
         reconPositionsRes,
         reconOrdersRes,
         healthRes,
-        autoTradingRes,
         forexPairsRes,
         signalsRes,
         newsRes
@@ -304,7 +319,6 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
         fetchWithTimeout('/api/governance/reconciliation/positions', { cache: 'no-store' }, 8_000).catch(() => null),
         fetchWithTimeout('/api/governance/reconciliation/orders', { cache: 'no-store' }, 8_000).catch(() => null),
         fetchWithTimeout('/api/governance/live-health', { cache: 'no-store' }, 8_000).catch(() => null),
-        fetchWithTimeout('/api/auto-trading/status', { cache: 'no-store' }, 8_000).catch(() => null),
         fetchWithTimeout('/api/forex/pairs', { cache: 'no-store' }, 8_000).catch(() => null),
         fetchWithTimeout('/api/signals/all', { cache: 'no-store' }, 8_000).catch(() => null),
         fetchWithTimeout('/api/forex/news', { cache: 'no-store' }, 8_000).catch(() => null)
@@ -740,7 +754,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
 
     const interval = setInterval(() => {
       fetchAllOperationalData();
-    }, 30000);
+    }, 60000);
 
     return () => clearInterval(interval);
   }, [fetchAllOperationalData, fetchOptionsChain, optionsUnderlying, optionsExpiry, optionsStrikeRange]);
