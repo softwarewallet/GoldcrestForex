@@ -24,9 +24,8 @@ const AUTO_CANDLE_CACHE_TTL_MS: Record<ForexTimeframe, number> = {
   '1M': 5_000, '5M': 10_000, '15M': 20_000, '30M': 30_000,
   '1H': 45_000, '4H': 120_000, 'Daily': 300_000
 };
-type AutoHistoricalCandle = Awaited<ReturnType<NonNullable<ReturnType<typeof brokerRegistry.getAdapter>['getHistoricalCandles']>>>[number];
-const autoCandleCache = new Map<string, { candles: AutoHistoricalCandle[]; expiresAt: number }>();
-const autoCandleInFlight = new Map<string, Promise<AutoHistoricalCandle[]>>();
+const autoCandleCache = new Map<string, { candles: any[]; expiresAt: number }>();
+const autoCandleInFlight = new Map<string, Promise<any[]>>();
 
 const AUTO_INTERVAL_MS = Math.max(
   15_000,
