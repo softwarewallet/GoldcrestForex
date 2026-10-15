@@ -273,8 +273,23 @@ app.use('/api/ml', operatorAuthRequired, (_req: Request, res: Response) => {
 app.use('/api/governance', operatorAuthRequired, governanceRouter);
 
 app.get('/api/auto-trading/status', operatorAuthRequired, async (_req: Request, res: Response) => {
-  await tradeContinuityService.syncFromHistoricalTrades().catch(() => {});
-  res.json(autoTradingService.getStatus());
+  // Status polling must remain responsive even if historical reconciliation or
+  // the database is slow; status is observational and must never gate trading.
+  let syncTimer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      tradeContinuityService.syncFromHistoricalTrades(),
+      new Promise<void>(resolve => {
+        syncTimer = setTimeout(resolve, 2_000);
+        syncTimer.unref?.();
+      })
+    ]);
+  } catch {
+    // Continue returning the latest in-memory Auto Live status.
+  } finally {
+    if (syncTimer) clearTimeout(syncTimer);
+  }
+  return res.json(autoTradingService.getStatus());
 });
 
 app.post('/api/auto-trading/start', operatorAuthRequired, (req: Request, res: Response) => {
