@@ -1,6 +1,6 @@
 import { LiveForexProvider } from '../markets/forex/provider';
 import { ForexMarketStatus } from '../markets/forex/types';
-import { FOREX_PAIRS } from '../markets/forex/instruments';
+import { FOREX_PAIRS, getForexPairConfig } from '../markets/forex/instruments';
 import { ForexSignalEngine } from '../markets/forex/signalEngine';
 import { getForexSessionState } from '../markets/common/session';
 import { getAutoLiveMarketGate, AutoLiveMarketGate } from './marketOpenGate';
