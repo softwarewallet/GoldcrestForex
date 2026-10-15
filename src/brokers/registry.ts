@@ -9,6 +9,7 @@ import { CTraderLiveAdapter } from './adapters/cTrader/CTraderLiveAdapter';
 import { FivePaisaLiveAdapter } from './adapters/fivepaisa/FivePaisaLiveAdapter';
 import { FivePaisaBrokerAdapter } from './adapters/fivepaisa/FivePaisaBrokerAdapter';
 import { BrokerError } from './errors';
+import { getCTraderApiMode } from '../services/configService';
 
 export class BrokerRegistry {
   private activeEnvironment: TradingEnvironment = 'LIVE';
