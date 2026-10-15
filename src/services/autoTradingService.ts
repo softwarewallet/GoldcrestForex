@@ -18,6 +18,14 @@ import { calculateForexPipTargets, normalizePriceToThreeDigits, sizeForexOrderTo
 
 const LIVE_QUOTE_MAX_AGE_MS = 30_000;
 
+// Short-lived candle cache avoids repeated history calls on every cycle.
+// This does not replace the separate live-quote freshness check at execution.
+const AUTO_CANDLE_CACHE_TTL_MS: Record<ForexTimeframe, number> = {
+  '5M': 10_000, '15M': 20_000, '1H': 45_000, '4H': 120_000, 'Daily': 300_000
+};
+const autoCandleCache = new Map<string, { candles: ForexCandle[]; expiresAt: number }>();
+const autoCandleInFlight = new Map<string, Promise<ForexCandle[]>>();
+
 const AUTO_INTERVAL_MS = Math.max(
   15_000,
   Number(process.env.GOLDCREST_AUTO_TRADING_INTERVAL_MS || 60_000)
@@ -85,16 +93,45 @@ class LiveForexSignalProvider implements ForexDataProvider {
     const refreshStartedAt = Date.now();
     liveRuntimeLog('INFO', 'AUTO_LIVE_MARKET_DATA_REFRESH_STARTED', { pair, mode: getCTraderApiMode(), timeframes });
     const rows = await Promise.all(timeframes.map(async timeframe => {
+      const cacheKey = `${getCTraderApiMode()}:${pair}:${timeframe}`;
+      const now = Date.now();
+      const cached = autoCandleCache.get(cacheKey);
+      if (cached && now < cached.expiresAt && cached.candles.length >= 35) {
+        liveRuntimeLog('DEBUG', 'AUTO_LIVE_CANDLE_CACHE_HIT', {
+          pair, timeframe, candleCount: cached.candles.length,
+          cacheAgeMs: now - (cached.expiresAt - AUTO_CANDLE_CACHE_TTL_MS[timeframe])
+        });
+        return { timeframe, data: cached.candles };
+      }
+      const existingRequest = autoCandleInFlight.get(cacheKey);
+      if (existingRequest) {
+        liveRuntimeLog('DEBUG', 'AUTO_LIVE_CANDLE_REQUEST_DEDUPED', { pair, timeframe });
+        return { timeframe, data: await existingRequest };
+      }
       const startedAt = Date.now();
       liveRuntimeLog('INFO', 'AUTO_LIVE_CANDLE_REQUEST_STARTED', { pair, timeframe, limit: 80 });
-      try {
-        const data = await adapter.getHistoricalCandles(pair, timeframe, 80);
-        liveRuntimeLog('INFO', 'AUTO_LIVE_CANDLE_REQUEST_COMPLETED', { pair, timeframe, candleCount: Array.isArray(data) ? data.length : null, durationMs: Date.now() - startedAt });
-        return { timeframe, data };
-      } catch (error: any) {
-        liveRuntimeLog('ERROR', 'AUTO_LIVE_CANDLE_REQUEST_FAILED', { pair, timeframe, durationMs: Date.now() - startedAt, error: error?.message || String(error) });
-        throw error;
-      }
+      const request = (async () => {
+        try {
+          const data = await adapter.getHistoricalCandles(pair, timeframe, 80);
+          if (Array.isArray(data) && data.length >= 35) {
+            autoCandleCache.set(cacheKey, { candles: data, expiresAt: Date.now() + AUTO_CANDLE_CACHE_TTL_MS[timeframe] });
+          }
+          liveRuntimeLog('INFO', 'AUTO_LIVE_CANDLE_REQUEST_COMPLETED', {
+            pair, timeframe, candleCount: Array.isArray(data) ? data.length : null,
+            durationMs: Date.now() - startedAt
+          });
+          return data;
+        } catch (error: any) {
+          liveRuntimeLog('ERROR', 'AUTO_LIVE_CANDLE_REQUEST_FAILED', {
+            pair, timeframe, durationMs: Date.now() - startedAt, error: error?.message || String(error)
+          });
+          throw error;
+        } finally {
+          autoCandleInFlight.delete(cacheKey);
+        }
+      })();
+      autoCandleInFlight.set(cacheKey, request);
+      return { timeframe, data: await request };
     }));
 
     for (const row of rows) {
