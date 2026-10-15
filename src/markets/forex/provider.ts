@@ -6,6 +6,18 @@ import { brokerRegistry } from '../../brokers/registry';
 import { persistHistoricalCandles } from '../../database/db';
 import { liveRuntimeLog } from '../../services/liveRuntimeLog';
 
+interface SharedForexPairSnapshot {
+  expiresAt: number;
+  candles: Map<string, ForexCandle[]>;
+  quote: ForexQuote;
+}
+
+// Shared across the scanner and Auto Live provider instances in this process.
+// A simultaneous dashboard scan must reuse the same broker snapshot rather
+// than creating another wave of WebSocket history requests.
+const sharedForexSnapshots = new Map<string, SharedForexPairSnapshot>();
+const sharedForexRefreshes = new Map<string, Promise<void>>();
+
 export interface ForexDataProvider {
   getQuote(pair: string): Promise<ForexQuote> | ForexQuote;
   getCandles(pair: string, timeframe: ForexTimeframe, limit?: number): Promise<ForexCandle[]> | ForexCandle[];
@@ -32,28 +44,47 @@ export class LiveForexProvider implements LiveForexDataProvider {
 
   private candles = new Map<string, ForexCandle[]>();
   private quotes = new Map<string, ForexQuote>();
-  private readonly refreshCacheTtlMs = Math.max(5_000, Number(process.env.GOLDCREST_FOREX_MARKET_CACHE_MS || 15_000));
-  private readonly refreshInFlight = new Map<string, Promise<void>>();
-  private readonly lastRefreshAt = new Map<string, number>();
+  private readonly refreshCacheTtlMs = Math.max(10_000, Number(process.env.GOLDCREST_FOREX_MARKET_CACHE_MS || 30_000));
+
+  private hydrateSharedSnapshot(symbol: string): boolean {
+    const snapshot = sharedForexSnapshots.get(symbol);
+    if (!snapshot || Date.now() >= snapshot.expiresAt) return false;
+    for (const [key, candles] of snapshot.candles) this.candles.set(key, candles);
+    this.quotes.set(symbol, snapshot.quote);
+    return true;
+  }
 
   async refreshPair(pair: string): Promise<void> {
-    const config = getForexPairConfig(pair);
-    const key = config.symbol;
-    const previous = this.refreshInFlight.get(key);
-    if (previous) return previous;
-    if (Date.now() - (this.lastRefreshAt.get(key) || 0) < this.refreshCacheTtlMs
-      && this.candles.has(`${key}:15M`)
-      && this.quotes.has(key)) {
+    const symbol = getForexPairConfig(pair).symbol;
+    if (this.hydrateSharedSnapshot(symbol)) return;
+
+    const inFlight = sharedForexRefreshes.get(symbol);
+    if (inFlight) {
+      await inFlight;
+      if (!this.hydrateSharedSnapshot(symbol)) {
+        throw new Error(`Shared authoritative market-data refresh for ${symbol} completed without a reusable snapshot.`);
+      }
       return;
     }
 
-    const work = this.refreshPairFromBroker(key);
-    this.refreshInFlight.set(key, work);
+    const work = this.refreshPairFromBroker(symbol);
+    sharedForexRefreshes.set(symbol, work);
     try {
       await work;
-      this.lastRefreshAt.set(key, Date.now());
+      const quote = this.quotes.get(symbol);
+      if (!quote) throw new Error(`No broker-confirmed quote was produced for ${symbol}.`);
+      const candles = new Map<string, ForexCandle[]>();
+      for (const timeframe of ['5M', '15M', '1H', '4H', 'Daily'] as ForexTimeframe[]) {
+        const rows = this.candles.get(`${symbol}:${timeframe}`);
+        if (rows) candles.set(`${symbol}:${timeframe}`, rows);
+      }
+      sharedForexSnapshots.set(symbol, {
+        expiresAt: Date.now() + this.refreshCacheTtlMs,
+        candles,
+        quote
+      });
     } finally {
-      if (this.refreshInFlight.get(key) === work) this.refreshInFlight.delete(key);
+      if (sharedForexRefreshes.get(symbol) === work) sharedForexRefreshes.delete(symbol);
     }
   }
 
@@ -153,7 +184,9 @@ export class LiveForexProvider implements LiveForexDataProvider {
       timestamp: liveQuote?.timestamp ?? Number(latest?.timestamp || 0),
       bid: liveQuote?.bid ?? latestHistoricalClose,
       ask: liveQuote?.ask ?? latestHistoricalClose,
-      spreadPips: liveQuote ? Number(liveQuote.spread) : 0,
+      spreadPips: liveQuote
+        ? Number(liveQuote.spread) * (config.symbol.includes('JPY') ? 100 : 10000)
+        : 0,
       digits: config.digits,
       pipSize: config.pipSize,
       changePips24h: Number(changePips.toFixed(1)),
