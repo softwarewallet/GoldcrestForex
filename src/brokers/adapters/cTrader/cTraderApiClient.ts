@@ -656,10 +656,25 @@ function sendAndAwait(
   payloadType: number,
   payload: Record<string, unknown>,
   expectedPayloadType: number,
-  timeoutMs = 60000,
-  attempt = 1
+  timeoutMs = 60000
 ): Promise<any> {
-  return queueWsRequest(ws, () => new Promise((resolve, reject) => {
+  return queueWsRequest(ws, () =>
+    sendAndAwaitUnqueued(ws, payloadType, payload, expectedPayloadType, timeoutMs, 1)
+  );
+}
+
+// Retries run inside the already-acquired connection queue slot. Enqueuing a
+// nested sendAndAwait here would deadlock: the first queued request cannot
+// finish until the retry finishes, while the retry waits behind the first.
+function sendAndAwaitUnqueued(
+  ws: WebSocket,
+  payloadType: number,
+  payload: Record<string, unknown>,
+  expectedPayloadType: number,
+  timeoutMs: number,
+  attempt: number
+): Promise<any> {
+  return new Promise((resolve, reject) => {
     const clientMsgId = `gc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const timer = setTimeout(
       () => {
@@ -704,7 +719,7 @@ function sendAndAwait(
             const retryAfter = Math.max(1500, baseRetry) * Math.pow(2, attempt - 1) + Math.random() * 500;
             console.warn(`[cTrader] Rate limited (${msg.payloadType} / ${errorCode || '2142'}). Cooling down ${Math.round(retryAfter)}ms before retry ${attempt + 1}/4.`);
             setTimeout(() => {
-              sendAndAwait(ws, payloadType, payload, expectedPayloadType, timeoutMs, attempt + 1).then(resolve).catch(reject);
+              sendAndAwaitUnqueued(ws, payloadType, payload, expectedPayloadType, timeoutMs, attempt + 1).then(resolve).catch(reject);
             }, retryAfter);
           } else {
             reject(new Error(`cTrader API error (${msg.payloadType}): ${JSON.stringify(msg.payload)}`));
@@ -721,7 +736,7 @@ function sendAndAwait(
     ws.addEventListener('message', handler);
     ws.addEventListener('error', errorHandler);
     ws.send(JSON.stringify({ clientMsgId, payloadType, payload }));
-  }));
+  });
 }
 
 
