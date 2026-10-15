@@ -1408,6 +1408,26 @@ app.get('/api/markets', (req: Request, res: Response) => {
 
 // 4. Forex Endpoints (Phase 2A Full Analysis Engine)
 const FOREX_PAIRS_CACHE_TTL_MS = 60_000;
+
+const FOREX_PAIRS_SCANNER_TIMEOUT_MS = 4_000;
+const FOREX_PAIRS_INSTRUMENT_TIMEOUT_MS = 3_000;
+const FOREX_PAIRS_QUOTE_TIMEOUT_MS = 2_500;
+
+async function withApiTimeout<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+        timer.unref?.();
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 let forexPairsCache: { payload: any[]; expiresAt: number } | null = null;
 let forexPairsInFlight: Promise<any[]> | null = null;
 
@@ -1426,12 +1446,12 @@ app.get('/api/forex/pairs', async (_req: Request, res: Response) => {
       return res.json(forexPairsCache.payload);
     }
     if (forexPairsInFlight) {
-      return res.json(await forexPairsInFlight);
+      return res.json(await withApiTimeout(forexPairsInFlight, FOREX_PAIRS_SCANNER_TIMEOUT_MS + FOREX_PAIRS_INSTRUMENT_TIMEOUT_MS + FOREX_PAIRS_QUOTE_TIMEOUT_MS, 'Forex pairs refresh'));
     }
 
     forexPairsInFlight = (async () => {
       try {
-        const scanned = await scannerService.getForexScanner();
+        const scanned = await withApiTimeout(scannerService.getForexScanner(), FOREX_PAIRS_SCANNER_TIMEOUT_MS, 'Forex scanner');
         if (Array.isArray(scanned) && scanned.length > 0) {
           forexPairsCache = {
             payload: scanned,
@@ -1447,7 +1467,7 @@ app.get('/api/forex/pairs', async (_req: Request, res: Response) => {
       let instruments: any[] = [];
       try {
         adapter = brokerRegistry.getAdapter('CTRADER', 'LIVE');
-        instruments = await adapter.getInstruments();
+        instruments = await withApiTimeout(adapter.getInstruments(), FOREX_PAIRS_INSTRUMENT_TIMEOUT_MS, 'cTrader instrument discovery');
       } catch {
         instruments = [];
       }
@@ -1464,7 +1484,10 @@ app.get('/api/forex/pairs', async (_req: Request, res: Response) => {
         }));
       }
 
-      const pairsWithQuotes = await Promise.all(instruments.map(async inst => {
+      // Keep fallback discovery bounded; scanning hundreds of instruments in
+      // parallel can trigger broker rate limits and starve the dashboard.
+      const fallbackInstruments = instruments.slice(0, 8);
+      const pairsWithQuotes = await Promise.all(fallbackInstruments.map(async inst => {
         const pipSize = inst.symbol.includes('JPY') ? 0.01 : 0.0001;
         let atr5mPips = inst.symbol.includes('JPY') ? 8.4 : inst.symbol.includes('GBP') ? 7.6 : 5.8;
         let atr5mVal = Number((atr5mPips * pipSize).toFixed(5));
@@ -1491,7 +1514,7 @@ app.get('/api/forex/pairs', async (_req: Request, res: Response) => {
         let quote: any = null;
         if (adapter) {
           try {
-            quote = await adapter.getQuote(inst.symbol);
+            quote = await withApiTimeout(adapter.getQuote(inst.symbol), FOREX_PAIRS_QUOTE_TIMEOUT_MS, `cTrader quote ${inst.symbol}`);
           } catch {}
         }
 
@@ -1519,7 +1542,9 @@ app.get('/api/forex/pairs', async (_req: Request, res: Response) => {
         // Resilient fallback using live anchored candles
         const lastCandle = c5m?.[c5m.length - 1];
         const prevCandle = c5m?.[c5m.length - 2] || lastCandle;
-        const close = Number(lastCandle?.close || (inst.symbol.includes('JPY') ? 152.45 : 1.085));
+        // Never manufacture a plausible-looking price when both live quotes
+        // and real candles are unavailable. Null prices render as unavailable.
+        const close = Number(lastCandle?.close || 0);
         const prevClose = Number(prevCandle?.close || close);
         const change = close - prevClose;
         const divisor = inst.symbol.includes('JPY') ? 100 : 10000;
@@ -1528,8 +1553,8 @@ app.get('/api/forex/pairs', async (_req: Request, res: Response) => {
           ...inst,
           baseCurrency: inst.symbol.split('/')[0],
           quoteCurrency: inst.symbol.split('/')[1] || '',
-          bid: close,
-          ask: Number((close + (inst.pipSize || pipSize) * 1.0).toFixed(5)),
+          bid: close > 0 ? close : null,
+          ask: close > 0 ? Number((close + (inst.pipSize || pipSize) * 1.0).toFixed(5)) : null,
           spreadPips: 1.0,
           atr5m: atr5mVal,
           atr5mPips,
@@ -1539,8 +1564,8 @@ app.get('/api/forex/pairs', async (_req: Request, res: Response) => {
           changePercent24h: prevClose > 0 ? Number(((change / prevClose) * 100).toFixed(2)) : 0,
           high24h: Number(lastCandle?.high || close),
           low24h: Number(lastCandle?.low || close),
-          dataStatus: 'DELAYED',
-          dataSource: 'LIVE_FEED_READY'
+          dataStatus: close > 0 ? 'DELAYED' : 'UNAVAILABLE',
+          dataSource: close > 0 ? 'HISTORICAL_CANDLES' : 'NO_VALID_MARKET_DATA'
         };
       }));
 
