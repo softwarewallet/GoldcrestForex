@@ -61,6 +61,32 @@ export type ControlCenterSection =
 
 export type FreshnessStatus = 'LIVE' | 'RECENT' | 'STALE' | 'ERROR' | 'UNAVAILABLE';
 
+// Bound dashboard telemetry requests individually: one slow endpoint must not
+// keep the whole Control Center in a perpetual syncing state.
+const CONTROL_CENTER_REQUEST_TIMEOUT_MS = 8_000;
+
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs = CONTROL_CENTER_REQUEST_TIMEOUT_MS
+): Promise<Response> {
+  const controller = new AbortController();
+  const upstreamSignal = init.signal;
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, {
+      ...init,
+      signal: controller.signal
+    });
+  } finally {
+    window.clearTimeout(timeout);
+    // The helper owns its controller; upstreamSignal is intentionally not
+    // forwarded because this UI currently has no caller cancellation contract.
+    void upstreamSignal;
+  }
+}
+
+
 interface AccountCardData {
   broker: BrokerType;
   accountId: string;
@@ -239,7 +265,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
 
   useEffect(() => {
     let mounted = true;
-    fetch('/api/config', { cache: 'no-store' })
+    fetchWithTimeout('/api/config', { cache: 'no-store' }, 5_000)
       .then(async (res) => res.ok ? await res.json() : null)
       .then((config) => {
         const value = Number(config?.maxDailyLossPct);
@@ -266,17 +292,17 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
         signalsRes,
         newsRes
       ] = await Promise.all([
-        fetch('/api/brokers/status', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/brokers/positions', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/brokers/orders', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/governance/audit-logs?limit=100', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/governance/reconciliation/positions', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/governance/reconciliation/orders', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/governance/live-health', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/auto-trading/status', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/forex/pairs', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/signals/all', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/forex/news', { cache: 'no-store' }).catch(() => null)
+        fetchWithTimeout('/api/brokers/status', { cache: 'no-store' }, { cache: 'no-store' }).catch(() => null),
+        fetchWithTimeout('/api/brokers/positions', { cache: 'no-store' }, { cache: 'no-store' }).catch(() => null),
+        fetchWithTimeout('/api/brokers/orders', { cache: 'no-store' }, { cache: 'no-store' }).catch(() => null),
+        fetchWithTimeout('/api/governance/audit-logs?limit=100', { cache: 'no-store' }, { cache: 'no-store' }).catch(() => null),
+        fetchWithTimeout('/api/governance/reconciliation/positions', { cache: 'no-store' }, { cache: 'no-store' }).catch(() => null),
+        fetchWithTimeout('/api/governance/reconciliation/orders', { cache: 'no-store' }, { cache: 'no-store' }).catch(() => null),
+        fetchWithTimeout('/api/governance/live-health', { cache: 'no-store' }, { cache: 'no-store' }).catch(() => null),
+        fetchWithTimeout('/api/auto-trading/status', { cache: 'no-store' }, { cache: 'no-store' }).catch(() => null),
+        fetchWithTimeout('/api/forex/pairs', { cache: 'no-store' }, { cache: 'no-store' }).catch(() => null),
+        fetchWithTimeout('/api/signals/all', { cache: 'no-store' }, { cache: 'no-store' }).catch(() => null),
+        fetchWithTimeout('/api/forex/news', { cache: 'no-store' }, { cache: 'no-store' }).catch(() => null)
       ]);
 
       if (autoTradingRes?.ok) {
