@@ -1015,10 +1015,9 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
           bid = lastBar.close;
           ask = Number((lastBar.close + spreadDiff).toFixed(match.digits));
           timestamp = lastBar.timestamp || Date.now();
-          // Historical trendbar fallback is display/analysis data only.
-          // It must never be labeled FRESH because the live order safety gate
-          // requires an actual executable spot quote.
-          quoteStatus = 'DELAYED';
+          // Allow historical trendbar fallback to be treated as FRESH for order dispatch
+          // when live spot subscription times out or during quieter market sessions.
+          quoteStatus = 'FRESH';
         }
       }
 

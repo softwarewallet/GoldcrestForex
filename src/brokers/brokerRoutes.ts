@@ -33,7 +33,7 @@ let brokerStatusCache: { payload: any; expiresAt: number } | null = null;
 let brokerStatusInFlight: Promise<any> | null = null;
 const lastKnownBrokerAccounts = new Map<BrokerType, any>();
 let brokerStatusLoopStarted = false;
-const BROKER_STATUS_BACKGROUND_REFRESH_MS = 15_000;
+const BROKER_STATUS_BACKGROUND_REFRESH_MS = 60_000;
 
 type BrokerCollectionCache = { payload: any[]; expiresAt: number };
 const positionsCache: BrokerCollectionCache = { payload: [], expiresAt: 0 };
