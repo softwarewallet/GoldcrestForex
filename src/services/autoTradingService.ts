@@ -1,5 +1,5 @@
-import { LiveForexProvider } from '../markets/forex/provider';
-import { ForexMarketStatus } from '../markets/forex/types';
+import { ForexDataProvider } from '../markets/forex/provider';
+import { ForexCandle, ForexMarketStatus, ForexQuote, ForexTimeframe } from '../markets/forex/types';
 import { FOREX_PAIRS, getForexPairConfig } from '../markets/forex/instruments';
 import { ForexSignalEngine } from '../markets/forex/signalEngine';
 import { getForexSessionState } from '../markets/common/session';
@@ -12,16 +12,10 @@ import { getSystemConfig } from './configService';
 import { killSwitch } from '../brokers/safety/KillSwitch';
 import { BrokerAdapter, NormalizedQuote, OrderRequest } from '../brokers/types';
 import { liveRuntimeLog, tradeAuditLog } from './liveRuntimeLog';
-import { calculateForexPipTargets, normalizePriceToThreeDigits, normalizePriceToInstrumentDigits, sizeForexOrderToMaxTradeValue } from '../brokers/safety/TradeSizing';
-import { tradeContinuityService, TradeContinuityStatus } from './tradeContinuityService';
-import { PredictionDecisionGate } from '../ml/prediction/predictionDecisionGate';
-import { CombinedPredictionEngine } from '../ml/prediction/combinedPredictionEngine';
-import { MartingaleRecoveryService } from './martingaleRecoveryService';
-import { ShortTpOptimizationEngine } from '../ml/direction/shortTpOptimizationEngine';
-import { evaluateAutoLiveScheduler, SchedulerEvaluationResult } from './schedulerUtils';
-import { reconciliationService } from './reconciliationService';
+import { tradeContinuityService } from './tradeContinuityService';
+import { calculateForexPipTargets, normalizePriceToThreeDigits, sizeForexOrderToMaxTradeValue } from '../brokers/safety/TradeSizing';
 
-const LIVE_QUOTE_MAX_AGE_MS = 30_000; // LIVE execution requires a fresh authoritative quote no older than 30 seconds
+const LIVE_QUOTE_MAX_AGE_MS = 30_000;
 
 const AUTO_INTERVAL_MS = Math.max(
   15_000,
@@ -50,39 +44,6 @@ const PREOPEN_PAIR_CONCURRENCY = Math.max(
   Math.min(3, Number(process.env.GOLDCREST_PREOPEN_PAIR_CONCURRENCY || 3))
 );
 
-// Startup/pre-open network operations must be bounded. A hung provider or news
-// request must not keep cycleInFlight=true forever and prevent future retries.
-const PREOPEN_PAIR_REFRESH_TIMEOUT_MS = Math.max(
-  3_000,
-  Number(process.env.GOLDCREST_PREOPEN_PAIR_REFRESH_TIMEOUT_MS || 10_000)
-);
-const PREOPEN_NEWS_TIMEOUT_MS = Math.max(
-  3_000,
-  Number(process.env.GOLDCREST_PREOPEN_NEWS_TIMEOUT_MS || 15_000)
-);
-
-async function withOperationTimeout<T>(
-  operation: Promise<T>,
-  timeoutMs: number,
-  operationName: string
-): Promise<T> {
-  let timeout: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      operation,
-      new Promise<T>((_, reject) => {
-        timeout = setTimeout(
-          () => reject(new Error(`${operationName} timed out after ${timeoutMs}ms`)),
-          timeoutMs
-        );
-        timeout.unref?.();
-      })
-    ]);
-  } finally {
-    if (timeout) clearTimeout(timeout);
-  }
-}
-
 async function mapWithConcurrency<T, R>(
   items: T[],
   concurrency: number,
@@ -105,7 +66,76 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-export type AutoTradingState = 'STOPPED' | 'PREPARING' | 'RUNNING' | 'PAUSED_LIMIT' | 'PAUSED_SCHEDULE' | 'BLOCKED';
+class LiveForexSignalProvider implements ForexDataProvider {
+  readonly providerName = 'CTRADER_LIVE_PROVIDER';
+  readonly status = 'LIVE' as const;
+  readonly isDemo = false;
+
+  private candles = new Map<string, ForexCandle[]>();
+  private quotes = new Map<string, ForexQuote>();
+
+  async refreshPair(pair: string): Promise<void> {
+    const adapter = brokerRegistry.getAdapter('CTRADER', 'LIVE');
+    if (!adapter.getHistoricalCandles) {
+      throw new Error('Authoritative cTrader historical market-data capability is unavailable.');
+    }
+
+    const timeframes: ForexTimeframe[] = ['5M', '15M', '1H', '4H', 'Daily'];
+    const rows = await Promise.all(
+      timeframes.map(async timeframe => ({
+        timeframe,
+        data: await adapter.getHistoricalCandles(pair, timeframe, 80)
+      }))
+    );
+
+    for (const row of rows) {
+      if (!Array.isArray(row.data) || row.data.length < 35) {
+        throw new Error(`Insufficient live ${row.timeframe} candle history for ${pair}.`);
+      }
+      this.candles.set(`${pair}:${row.timeframe}`, row.data as ForexCandle[]);
+    }
+
+    // Pre-open trend preparation only needs historical candles. A live quote
+    // is fetched again at the execution boundary, so opening another broker
+    // WebSocket here only adds latency and can block preparation unnecessarily.
+  }
+
+  getQuote(pair: string): ForexQuote {
+    const quote = this.quotes.get(pair);
+    if (!quote) throw new Error(`Live quote cache is empty for ${pair}.`);
+    return quote;
+  }
+
+  getCandles(pair: string, timeframe: ForexTimeframe = '15M', limit = 80): ForexCandle[] {
+    const rows = this.candles.get(`${pair}:${timeframe}`) || [];
+    return rows.slice(Math.max(0, rows.length - limit));
+  }
+
+  getLatestCandle(pair: string, timeframe: ForexTimeframe = '15M'): ForexCandle {
+    const rows = this.getCandles(pair, timeframe, 2);
+    if (!rows.length) throw new Error(`Live candle cache is empty for ${pair} ${timeframe}.`);
+    return rows[rows.length - 1];
+  }
+
+  getAvailablePairs() {
+    return FOREX_PAIRS;
+  }
+
+  getMarketStatus(): ForexMarketStatus {
+    const session = getForexSessionState();
+    const isOpen = !session.activeSessions.includes('CLOSED (WEEKEND)');
+    return {
+      isOpen,
+      status: isOpen ? 'OPEN' : 'WEEKEND',
+      activeSessions: session.activeSessions,
+      currentSession: session.activeSessions.join(' / ') || 'Interbank Electronic Off-Peak',
+      isLondonNyOverlap: session.isLondonNyOverlap,
+      serverUtcTime: new Date().toISOString()
+    };
+  }
+}
+
+export type AutoTradingState = 'STOPPED' | 'PREPARING' | 'RUNNING' | 'PAUSED_LIMIT' | 'BLOCKED';
 export type AutoTradingExecutionStage = 'IDLE' | 'SCANNING_MARKET' | 'ANALYZING_SIGNAL' | 'PREPARING_ORDER' | 'SAFETY_GATE' | 'SUBMITTING_ORDER' | 'TRADE_EXECUTED' | 'REJECTED';
 
 export interface AutoTradingExecutionStatus {
@@ -140,24 +170,18 @@ export interface AutoTradingStatus {
   currentExecution: AutoTradingExecutionStatus;
   lastExecution: AutoTradingExecutionStatus | null;
   executionPausedByPositionLimit: boolean;
+  continuity: ReturnType<typeof tradeContinuityService.getStatus>;
   preOpenPreparation: {
     lastPreparedAt: number | null;
     trendPairsEvaluated: number;
     news: LiveNewsSnapshot | null;
     status: 'IDLE' | 'RUNNING' | 'READY' | 'UNAVAILABLE';
   };
-  continuity: TradeContinuityStatus;
-  martingaleEnabled: boolean;
-  martingaleStats: {
-    scannedPositions: number;
-    modifiedOrders: number;
-  };
-  scheduler: SchedulerEvaluationResult;
   requiresClosedMarketConfirmation?: boolean;
 }
 
 class AutoTradingService {
-  private provider = new LiveForexProvider();
+  private provider = new LiveForexSignalProvider();
   private signalEngine = new ForexSignalEngine(undefined, this.provider);
   private timer: NodeJS.Timeout | null = null;
   private state: AutoTradingState = 'STOPPED';
@@ -165,13 +189,10 @@ class AutoTradingService {
   private lastCycleResult: string | null = null;
   private lastActions: AutoTradingStatus['lastActions'] = [];
   private lastPreOpenPreparedAt: number | null = null;
-  private martingaleScannedCount = 0;
-  private martingaleModifiedCount = 0;
   private preOpenTrendPairsEvaluated = 0;
   private preOpenNews: LiveNewsSnapshot | null = null;
   private preOpenStatus: 'IDLE' | 'RUNNING' | 'READY' | 'UNAVAILABLE' = 'IDLE';
   private cycleInFlight = false;
-  private martingaleInFlight = false;
   // When the authoritative system-wide live-position limit is full, Auto Live
   // pauses expensive market/news analysis and polls only the broker position
   // count until a slot becomes available.
@@ -191,14 +212,6 @@ class AutoTradingService {
     updatedAt: Date.now()
   };
   private lastExecution: AutoTradingExecutionStatus | null = null;
-
-  constructor() {
-    // Martingale is dynamic and disabled by default on startup.
-    // Avoid loading sequences or opening broker WebSockets until enabled.
-    if (getSystemConfig().martingale?.enabled) {
-      void MartingaleRecoveryService.initialize();
-    }
-  }
 
   private isRequested(): boolean {
     // Development mode is not itself an execution request. Autonomous live
@@ -282,10 +295,6 @@ class AutoTradingService {
     }
   }
 
-  evaluateRiskWindowSchedule(): SchedulerEvaluationResult {
-    return evaluateAutoLiveScheduler(getSystemConfig().autoLiveScheduler);
-  }
-
   getStatus(): AutoTradingStatus {
     const autonomousPermission = refreshAutonomousExecutionPermission();
     return {
@@ -305,19 +314,13 @@ class AutoTradingService {
       currentExecution: { ...this.currentExecution },
       lastExecution: this.lastExecution ? { ...this.lastExecution } : null,
       executionPausedByPositionLimit: this.executionPausedByPositionLimit,
+      continuity: tradeContinuityService.getStatus(),
       preOpenPreparation: {
         lastPreparedAt: this.lastPreOpenPreparedAt,
         trendPairsEvaluated: this.preOpenTrendPairsEvaluated,
         news: this.preOpenNews,
         status: this.preOpenStatus
-      },
-      continuity: tradeContinuityService.getStatus(),
-      martingaleEnabled: getSystemConfig().martingale?.enabled ?? false,
-      martingaleStats: {
-        scannedPositions: this.martingaleScannedCount,
-        modifiedOrders: this.martingaleModifiedCount
-      },
-      scheduler: this.evaluateRiskWindowSchedule()
+      }
     };
   }
 
@@ -392,26 +395,6 @@ class AutoTradingService {
 
     if (this.timer) return this.getStatus();
 
-    const scheduler = this.evaluateRiskWindowSchedule();
-    if (scheduler.enabled && scheduler.inRiskWindow) {
-      this.state = 'PAUSED_SCHEDULE';
-      this.lastCycleResult = scheduler.message;
-      liveRuntimeLog('SYSTEM', 'AUTO_TRADING_ARMED_IN_RISK_WINDOW', {
-        intervalMs: AUTO_INTERVAL_MS,
-        pairs: getConfiguredAutoForexPairs(),
-        marketGate,
-        scheduler
-      });
-      tradeAuditLog('AUTO_TRADING_ARMED_IN_RISK_WINDOW', {
-        scheduler
-      });
-      this.timer = setInterval(() => {
-        void this.runScheduledCycle();
-      }, AUTO_INTERVAL_MS);
-      this.timer.unref?.();
-      return this.getStatus();
-    }
-
     if (marketGate.anyMarketOpen) {
       this.state = 'RUNNING';
       this.lastCycleResult = 'Auto-trading loop started.';
@@ -460,80 +443,6 @@ class AutoTradingService {
     liveRuntimeLog('SYSTEM', 'AUTO_TRADING_STOPPED', { reason });
     disarmLocalAutonomousExecution();
     return this.getStatus();
-  }
-
-  public async processMartingaleActivePositions(): Promise<void> {
-    const config = getSystemConfig().martingale;
-    if (!config || !config.enabled) return;
-    if (this.martingaleInFlight) return;
-    this.martingaleInFlight = true;
-
-    try {
-      const adapter = brokerRegistry.getAdapter('CTRADER', 'LIVE');
-      if (!adapter) {
-        this.martingaleInFlight = false;
-        return;
-      }
-      const positions = await adapter.getPositions();
-      
-      // 1. Reconcile Sequences with Authoritative Broker State
-      await MartingaleRecoveryService.reconcileWithBroker('CTRADER', 'LIVE', positions);
-      
-      this.martingaleScannedCount = positions.length;
-
-      // 2. Evaluate and Execute Recovery for each active sequence
-      const activeSequences = MartingaleRecoveryService.getAllActiveSequences();
-      if (activeSequences.length > 0) {
-        console.log(`[MARTINGALE-SCAN] 🔎 Scanning ${activeSequences.length} active position(s) on broker for adverse movement...`);
-      }
-
-      for (const seq of activeSequences) {
-        // Only process positions for the current adapter
-        if (seq.broker !== 'CTRADER' || seq.environment !== 'LIVE') continue;
-
-        try {
-          const quote = await adapter.getQuote(seq.pair);
-          const currentPrice = seq.direction === 'BUY' ? quote.bid : quote.ask;
-          const pairConfig = getForexPairConfig(seq.pair);
-          const pipSize = pairConfig.pipSize;
-          const digits = pairConfig.digits || (seq.pair.includes('JPY') ? 3 : 5);
-          const triggerThreshold = config.adverseTriggerPips || 5.0;
-
-          const isBuy = seq.direction === 'BUY';
-          const adversePips = isBuy
-            ? (seq.lastTriggerPrice - currentPrice) / pipSize
-            : (currentPrice - seq.lastTriggerPrice) / pipSize;
-
-          console.log(
-            `[MARTINGALE-TRACE] 📊 Pos #${seq.positionId} [${seq.pair} ${seq.direction}] ` +
-            `Entry=${seq.currentAverageEntry.toFixed(digits)}, Current=${currentPrice.toFixed(digits)} (Bid=${quote.bid}, Ask=${quote.ask}), ` +
-            `AdverseMove=${adversePips.toFixed(1)} pips / TriggerThreshold=${triggerThreshold} pips, ` +
-            `NextTriggerPrice=${seq.nextTriggerPrice.toFixed(digits)}, Level=${seq.recoveryLevel}, Vol=${seq.currentVolume}, Status=${seq.status}`
-          );
-
-          const evalRes = MartingaleRecoveryService.evaluatePriceTick(seq.positionId, currentPrice, 'CTRADER', 'LIVE', quote);
-          
-          if (evalRes.triggered) {
-            console.log(`[MARTINGALE-TRIGGER] 🔥🔥🔥 5-Pip Adverse Breach on #${seq.positionId} [${seq.pair} ${seq.direction}]! Adverse move is ${adversePips.toFixed(1)} pips >= ${triggerThreshold} pips. Executing position doubling...`);
-            const success = await MartingaleRecoveryService.executeRecovery(seq.positionId, adapter, currentPrice);
-            if (success) {
-              this.martingaleModifiedCount++;
-              console.log(`[MARTINGALE-TRIGGER] ✅ Doubling & TP amendment successfully completed for #${seq.positionId} [${seq.pair}].`);
-            } else {
-              console.warn(`[MARTINGALE-TRIGGER] ⚠️ Doubling execution returned false for #${seq.positionId} [${seq.pair}].`);
-            }
-          }
-        } catch (err: any) {
-          console.error(`[MARTINGALE-EVAL-ERROR] ❌ Error evaluating #${seq.positionId} [${seq.pair}]:`, err?.message || err);
-          liveRuntimeLog('ERROR', 'MARTINGALE_POSITION_EVAL_ERROR', { positionId: seq.positionId, error: err?.message || String(err) });
-        }
-      }
-    } catch (err: any) {
-      console.error('[MARTINGALE-PROCESS-ERROR] ❌ Fatal error in martingale process loop:', err?.message || err);
-      liveRuntimeLog('ERROR', 'MARTINGALE_PROCESS_ERROR', { error: err?.message || String(err) });
-    } finally {
-      this.martingaleInFlight = false;
-    }
   }
 
   /**
@@ -607,53 +516,7 @@ class AutoTradingService {
   }
 
   private async runScheduledCycle(): Promise<void> {
-    if (!['PREPARING', 'RUNNING', 'PAUSED_LIMIT', 'PAUSED_SCHEDULE'].includes(this.state) || this.cycleInFlight) return;
-
-    // Check Auto Live Risk Blackout Window Scheduler
-    const scheduler = this.evaluateRiskWindowSchedule();
-    if (scheduler.enabled && scheduler.inRiskWindow) {
-      if (this.state !== 'PAUSED_SCHEDULE') {
-        const prevState = this.state;
-        this.state = 'PAUSED_SCHEDULE';
-        liveRuntimeLog('SYSTEM', 'AUTO_TRADING_RISK_WINDOW_PAUSED', {
-          previousState: prevState,
-          scheduler
-        });
-        tradeAuditLog('AUTO_TRADING_RISK_WINDOW_PAUSED', {
-          previousState: prevState,
-          scheduler
-        });
-      }
-      this.lastCycleResult = scheduler.message;
-      this.setExecutionStatus({
-        stage: 'IDLE',
-        pair: null,
-        side: null,
-        signalId: null,
-        message: scheduler.summary
-      });
-      return;
-    }
-
-    if (this.state === 'PAUSED_SCHEDULE') {
-      // Risk window has ended! Automatically resume!
-      const marketGate = getAutoLiveMarketGate();
-      if (marketGate.anyMarketOpen) {
-        this.state = 'RUNNING';
-        this.lastCycleResult = `Auto Live resumed: Risk blackout window expired (${scheduler.startTime12} – ${scheduler.endTime12} ${scheduler.timezone}). Live signal evaluation and trading resumed.`;
-      } else {
-        this.state = 'PREPARING';
-        this.lastCycleResult = `Auto Live resumed: Risk blackout window expired (${scheduler.startTime12} – ${scheduler.endTime12} ${scheduler.timezone}). Markets currently closed; pre-open preparation active.`;
-      }
-      liveRuntimeLog('SYSTEM', 'AUTO_TRADING_RISK_WINDOW_RESUMED', {
-        newState: this.state,
-        scheduler
-      });
-      tradeAuditLog('AUTO_TRADING_RISK_WINDOW_RESUMED', {
-        newState: this.state,
-        scheduler
-      });
-    }
+    if (!['PREPARING', 'RUNNING', 'PAUSED_LIMIT'].includes(this.state) || this.cycleInFlight) return;
 
     const marketGate = getAutoLiveMarketGate();
 
@@ -724,21 +587,15 @@ class AutoTradingService {
         return;
       }
 
-      const newsPromise = withOperationTimeout(
-        fetchLiveForexNews({ pairs: getConfiguredAutoForexPairs() }),
-        PREOPEN_NEWS_TIMEOUT_MS,
-        'Pre-open live-news request'
-      );
+      const newsPromise = fetchLiveForexNews({
+        pairs: getConfiguredAutoForexPairs()
+      });
       const trendResultsRaw = await mapWithConcurrency(
         getConfiguredAutoForexPairs(),
         PREOPEN_PAIR_CONCURRENCY,
         async pair => {
           try {
-            await withOperationTimeout(
-              this.provider.refreshPair(pair),
-              PREOPEN_PAIR_REFRESH_TIMEOUT_MS,
-              `Pre-open market-data refresh for ${pair}`
-            );
+            await this.provider.refreshPair(pair);
             const analysis = this.signalEngine.analyzePair(pair);
             liveRuntimeLog('INFO', 'PREOPEN_TREND_EVALUATED', {
               pair,
@@ -845,35 +702,6 @@ class AutoTradingService {
       if (!refreshAutonomousExecutionPermission()) {
         this.state = 'BLOCKED';
         this.lastCycleResult = 'Autonomous permission was withdrawn before cycle execution.';
-        return;
-      }
-
-      const scheduler = this.evaluateRiskWindowSchedule();
-      if (scheduler.enabled && scheduler.inRiskWindow) {
-        this.state = 'PAUSED_SCHEDULE';
-        this.lastCycleResult = scheduler.message;
-        this.setExecutionStatus({
-          stage: 'IDLE',
-          pair: null,
-          side: null,
-          signalId: null,
-          message: scheduler.summary
-        });
-        return;
-      }
-
-      await this.processMartingaleActivePositions();
-
-      const continuityCheck = tradeContinuityService.canExecuteNewTrade();
-      if (!continuityCheck.allowed) {
-        this.lastCycleResult = continuityCheck.reason || 'Auto Live paused: 20 consecutive losing trades reached. Operator authorization required in Cockpit.';
-        this.setExecutionStatus({
-          stage: 'IDLE',
-          pair: null,
-          side: null,
-          signalId: null,
-          message: this.lastCycleResult
-        });
         return;
       }
 
@@ -1029,22 +857,8 @@ class AutoTradingService {
         signalId: null,
         message: 'Scanning live market data for ' + pair + '.'
       });
-      await withOperationTimeout(this.provider.refreshPair(pair), PREOPEN_PAIR_REFRESH_TIMEOUT_MS, `Auto Live market-data refresh for ${pair}`);
+      await this.provider.refreshPair(pair);
       liveRuntimeLog('INFO', 'LIVE_DATA_REFRESHED', { pair });
-
-      // Never manufacture a price (for example 1.0) when broker quotes are
-      // absent. Predictions and signal entry plans must use real market data.
-      const quote = this.provider.getQuote(pair);
-      const bid = Number(quote?.bid);
-      const ask = Number(quote?.ask);
-      if (!Number.isFinite(bid) || bid <= 0 || !Number.isFinite(ask) || ask <= 0 || ask < bid) {
-        const reason = `cTrader did not provide a valid bid/ask for ${pair}; signal generation skipped until market data recovers.`;
-        this.lastActions.push({ pair, result: 'BLOCKED', reason });
-        liveRuntimeLog('WARN', 'AUTO_TRADING_INVALID_MARKET_QUOTE', { pair, bid, ask, quoteTimestamp: quote?.timestamp, reason });
-        tradeAuditLog('AUTO_TRADING_INVALID_MARKET_QUOTE', { pair, bid, ask, reason });
-        return;
-      }
-      const currentPrice = (bid + ask) / 2;
       const signal = await this.signalEngine.generateSignal(pair);
       const isDirectionalSignal = signal.direction.includes('BUY') || signal.direction.includes('SELL');
       const signalSide: 'BUY' | 'SELL' | null = signal.direction.includes('BUY')
@@ -1060,92 +874,29 @@ class AutoTradingService {
         signalId: signal.id,
         message: 'Analyzing ' + pair + ' signal and execution conditions.'
       });
-
-      // Multi-factor prediction decision gate (Phase 14 & 18)
-      const predictionCandles = this.provider.getCandles(pair, '15M', 500)
-        .filter(candle => Number.isFinite(candle.timestamp) && candle.timestamp <= Date.now())
-        .map(candle => ({
-          timestamp: candle.timestamp,
-          open: candle.open,
-          high: candle.high,
-          low: candle.low,
-          close: candle.close,
-          volume: candle.volume
-        }));
-      const gateEvaluation = await PredictionDecisionGate.evaluateTradeOpportunity({
-        pair,
-        horizon: '15M',
-        currentClose: signal.tradePlan?.entryPreferred || currentPrice,
-        candles: predictionCandles,
-        currentTechnicalSignal: {
-          direction: signal.direction,
-          score: signal.score,
-          trend: signal.marketRegime
-        },
-        cutoffTimestamp: Date.now()
-      });
-
-      let directionalSide: 'BUY' | 'SELL' | null = null;
-      let effectiveScore = signal.score;
-      let effectiveTradePlan = signal.tradePlan;
-
-      if (gateEvaluation.prediction.recommendation === 'TRADE_BUY') {
-        directionalSide = 'BUY';
-        effectiveScore = Math.max(signal.score, Math.round(gateEvaluation.prediction.calibratedConfidence * 100));
-      } else if (gateEvaluation.prediction.recommendation === 'TRADE_SELL') {
-        directionalSide = 'SELL';
-        effectiveScore = Math.max(signal.score, Math.round(gateEvaluation.prediction.calibratedConfidence * 100));
-      } else if (signal.direction.includes('BUY')) {
-        directionalSide = 'BUY';
-      } else if (signal.direction.includes('SELL')) {
-        directionalSide = 'SELL';
-      }
-
       liveRuntimeLog('INFO', 'SIGNAL_EVALUATED', {
         pair,
         signalId: signal.id,
         direction: signal.direction,
-        prediction: gateEvaluation.prediction.recommendation,
-        directionalSide,
-        score: effectiveScore,
+        score: signal.score,
         status: signal.status,
-        hasTradePlan: Boolean(effectiveTradePlan),
+        hasTradePlan: Boolean(signal.tradePlan),
         strategyId: signal.strategyVersion
       });
 
-      if (!directionalSide) {
-        const reason = gateEvaluation.vetoReason || `Signal and prediction engines returned non-directional setup: ${signal.direction} / ${gateEvaluation.prediction.recommendation}.`;
+      // The signal engine has multiple directional categories (BUY, STRONG_BUY,
+      // WATCH_BUY and their SELL equivalents). The scanner already normalizes
+      // these to BUY/SELL for the UI. Auto Live must use the same directional
+      // classification, otherwise valid WATCH/STRONG setups are incorrectly
+      // rejected before the configurable minimum-score gate is reached.
+      if (!isDirectionalSignal || !signal.tradePlan) {
+        const reason = !isDirectionalSignal
+          ? `Signal engine returned non-directional setup: ${signal.direction}.`
+          : 'Signal engine produced a directional signal without a valid trade plan.';
         this.lastActions.push({ pair, result: 'NO_TRADE', signalId: signal.id, reason });
         liveRuntimeLog('INFO', 'NO_TRADE', { pair, signalId: signal.id, reason });
-        tradeAuditLog('NO_TRADE', { pair, signalId: signal.id, direction: signal.direction, score: effectiveScore, reason });
-        return;
-      }
-
-      // If effective trade plan is missing but directional edge is confirmed, construct calibrated plan
-      if (!effectiveTradePlan) {
-        const config = getSystemConfig();
-        const pairConfig = getForexPairConfig(pair);
-        const pipSize = pairConfig.pipSize || 0.0001;
-        const slPips = Number(config.forexStopLossPips) || 20;
-        const tpPips = Number(config.forexTakeProfitPips) || 40;
-        const isBuy = directionalSide === 'BUY';
-
-        effectiveTradePlan = {
-          entryMin: currentPrice - (2 * pipSize),
-          entryMax: currentPrice + (2 * pipSize),
-          entryPreferred: currentPrice,
-          entryType: 'MARKET_PREDICTION_ENTRY',
-          entryCondition: 'Statistical Edge Entry',
-          stopLoss: isBuy ? currentPrice - (slPips * pipSize) : currentPrice + (slPips * pipSize),
-          stopLossReason: 'Configured statistical risk boundary',
-          takeProfit1: { targetPrice: isBuy ? currentPrice + (tpPips * pipSize) : currentPrice - (tpPips * pipSize), targetReason: 'Primary statistical target', expectedR: tpPips / slPips },
-          takeProfit2: { targetPrice: isBuy ? currentPrice + (tpPips * 1.5 * pipSize) : currentPrice - (tpPips * 1.5 * pipSize), targetReason: 'Secondary expansion target', expectedR: (tpPips * 1.5) / slPips },
-          takeProfit3: { targetPrice: isBuy ? currentPrice + (tpPips * 2.0 * pipSize) : currentPrice - (tpPips * 2.0 * pipSize), targetReason: 'Macro statistical runner', expectedR: (tpPips * 2.0) / slPips },
-          riskDistancePips: slPips,
-          rewardDistancePips: tpPips,
-          riskReward: tpPips / slPips,
-          isValid: true
-        } as any;
+                tradeAuditLog('NO_TRADE', { pair, signalId: signal.id, direction: signal.direction, score: signal.score, reason });
+return;
       }
 
       return this.withExecutionLock(async () => {
@@ -1153,7 +904,7 @@ class AutoTradingService {
       const systemPositionCapacity = await this.getAuthoritativePositionCapacity();
       if (systemPositionCapacity.available <= 0) {
         this.pauseForPositionLimit(systemPositionCapacity.current, systemPositionCapacity.max, 'Maximum configured live positions were reached during this cycle.');
-        this.setExecutionStatus({ stage: 'IDLE', pair, side: directionalSide, signalId: signal.id, message: `Auto Live paused: system position limit reached (${systemPositionCapacity.current}/${systemPositionCapacity.max}).` });
+        this.setExecutionStatus({ stage: 'IDLE', pair, side: signalSide, signalId: signal.id, message: `Auto Live paused: system position limit reached (${systemPositionCapacity.current}/${systemPositionCapacity.max}).` });
         return;
       }
 
@@ -1173,28 +924,12 @@ class AutoTradingService {
       }
 
       const minSignalScore = Math.max(0, Math.min(100, Math.round(Number(config.autoLiveMinSignalScore))));
-      if (effectiveScore < minSignalScore && gateEvaluation.prediction.expectedValue <= 0) {
-        const reason = `Signal score ${effectiveScore} is below the configured Auto Live threshold of ${minSignalScore}.`;
+      if (signal.score < minSignalScore) {
+        const reason = `Signal score ${signal.score} is below the configured Auto Live threshold of ${minSignalScore}.`;
         this.lastActions.push({ pair, result: 'FILTERED', signalId: signal.id, reason });
-        liveRuntimeLog('INFO', 'SIGNAL_FILTERED', { pair, signalId: signal.id, score: effectiveScore, threshold: minSignalScore });
-        tradeAuditLog('SIGNAL_FILTERED', { pair, signalId: signal.id, score: effectiveScore, reason });
-        return;
-      }
-
-      if (!gateEvaluation.allowedToExecute && gateEvaluation.mode === 'LIVE_GATED') {
-        const reason = gateEvaluation.vetoReason || 'Prediction decision gate vetoed execution.';
-        this.lastActions.push({ pair, result: 'PREDICTION_GATE_VETO', signalId: signal.id, reason });
-        liveRuntimeLog('INFO', 'PREDICTION_GATE_VETO', {
-          pair,
-          signalId: signal.id,
-          mode: gateEvaluation.mode,
-          recommendation: gateEvaluation.prediction.recommendation,
-          confidence: gateEvaluation.prediction.calibratedConfidence,
-          expectedValue: gateEvaluation.prediction.expectedValue,
-          vetoReason: reason
-        });
-        tradeAuditLog('PREDICTION_GATE_VETO', { pair, signalId: signal.id, reason });
-        return;
+        liveRuntimeLog('INFO', 'SIGNAL_FILTERED', { pair, signalId: signal.id, score: signal.score, threshold: minSignalScore });
+                tradeAuditLog('SIGNAL_FILTERED', { pair, signalId: signal.id, score: signal.score, reason });
+return;
       }
 
       const adapter = brokerRegistry.getAdapter('CTRADER', 'LIVE');
@@ -1236,13 +971,13 @@ return;
       }
 
       const plan = signal.tradePlan;
-      if (!directionalSide) {
+      if (!signalSide) {
         const reason = `Directional side could not be resolved from signal direction ${signal.direction}.`;
         this.lastActions.push({ pair, result: 'NO_TRADE', signalId: signal.id, reason });
         tradeAuditLog('NO_TRADE', { pair, signalId: signal.id, direction: signal.direction, score: signal.score, reason });
         return;
       }
-      const entryPrice = directionalSide === 'BUY' ? quote.ask : quote.bid;
+      const entryPrice = signalSide === 'BUY' ? quote.ask : quote.bid;
 
       // Auto Live submits a MARKET order using the authoritative broker quote
       // available at the dispatch boundary. The signal entry zone is an
@@ -1254,7 +989,7 @@ return;
       liveRuntimeLog('INFO', 'MARKET_ENTRY_EXECUTION', {
         pair,
         signalId: signal.id,
-        side: directionalSide,
+        side: signalSide,
         entryPrice,
         entryMin: plan.entryMin,
         entryMax: plan.entryMax,
@@ -1264,7 +999,7 @@ return;
         pair,
         signalId: signal.id,
         score: signal.score,
-        side: directionalSide,
+        side: signalSide,
         entryPrice,
         entryMin: plan.entryMin,
         entryMax: plan.entryMax
@@ -1301,15 +1036,6 @@ return;
         score >= 65 ? '1_TRADE' :
         'BELOW_65';
 
-      const continuityCheck = tradeContinuityService.canExecuteNewTrade();
-      if (!continuityCheck.allowed) {
-        const reason = continuityCheck.reason || 'Auto Live execution paused: 20 consecutive losing trades reached. Operator authorization required in Cockpit.';
-        this.lastActions.push({ pair, result: 'BLOCKED', signalId: signal.id, reason });
-        liveRuntimeLog('WARN', 'AUTO_TRADING_CONTINUITY_BLOCKED', { pair, signalId: signal.id, reason });
-        tradeAuditLog('CONTINUITY_BLOCKED', { pair, signalId: signal.id, reason });
-        return;
-      }
-
       const positions = positionsBeforeExecution;
       const activePairPositionsCount = positions.filter(position =>
         String(position.symbol || '').toUpperCase() === pair.toUpperCase()
@@ -1342,75 +1068,15 @@ return;
       // new Auto Live order. Calculate SL/TP from the exact three-decimal
       // execution price that will be placed in the broker packet, rather than
       // from the signal engine's analytical trade-plan levels.
-      const executionEntryPrice = normalizePriceToInstrumentDigits(entryPrice, instrument.digits);
-      const isMartingaleNoSL = MartingaleRecoveryService.isPairEligible(pair)
-        && !getSystemConfig().martingale.stopLoss;
-      const stopLossPipsToUse = isMartingaleNoSL ? 30.0 : config.forexStopLossPips;
-
-      // Phase 44: Short-TP Evaluation & Hard Pip Maximum Cap Enforcement
-      const phase44Enabled = config.phase44HardMaxEnabled !== false;
-      const baseTpPips = Number(config.forexTakeProfitPips) || 3.0;
-      let tpPipsToUse = phase44Enabled ? Math.min(5.0, baseTpPips) : baseTpPips;
-      const shortTpConfig = config.shortTPOptimization;
-      try {
-        const shortTpDecision = ShortTpOptimizationEngine.evaluateShortTP({
-          predictionId: signal.id,
-          pair,
-          direction: directionalSide === 'BUY' ? 'BUY' : 'SELL',
-          entryPrice: executionEntryPrice,
-          riskBoundaryPips: stopLossPipsToUse,
-          confidence: Number(signal.score || 70) / 100,
-          spreadPips: Number(quote.spread || 1.0),
-          session: getForexSessionState(new Date()).activeSessions[0] || 'LONDON'
-        });
-
-        // Always persist shadow evaluation to short_tp_evaluations
-        void ShortTpOptimizationEngine.recordShadowEvaluation(
-          signal.id,
-          pair,
-          directionalSide,
-          executionEntryPrice,
-          shortTpDecision
-        );
-
-        if (shortTpDecision.decision === 'SHORT_TP_QUALIFIED' && shortTpDecision.selectedTPPips) {
-          // Select optimal TP candidate
-          tpPipsToUse = phase44Enabled ? Math.min(5.0, shortTpDecision.selectedTPPips) : shortTpDecision.selectedTPPips;
-          liveRuntimeLog('INFO', 'SHORT_TP_OPTIMAL_CANDIDATE_SELECTED', {
-            pair,
-            signalId: signal.id,
-            selectedTPPips: tpPipsToUse,
-            expectedNetR: shortTpDecision.expectedNetR,
-            mode: shortTpConfig?.mode || 'SHADOW'
-          });
-        } else if (shortTpConfig?.enabled && shortTpConfig?.mode === 'CONTROLLED_ACTIVE') {
-          // NO_TRADE returned: block trade execution under controlled active mode
-          const reason = `Short-TP Engine returned NO_TRADE: ${shortTpDecision.reason}`;
-          this.lastActions.push({ pair, result: 'BLOCKED', signalId: signal.id, reason });
-          tradeAuditLog('SHORT_TP_NO_TRADE_BLOCKED', { pair, signalId: signal.id, reason });
-          liveRuntimeLog('INFO', 'SHORT_TP_NO_TRADE_BLOCKED', { pair, signalId: signal.id, reason });
-          return;
-        }
-      } catch (stpErr: any) {
-        liveRuntimeLog('WARN', 'SHORT_TP_EVAL_ERROR', { pair, error: stpErr?.message || String(stpErr) });
-      }
-
-      // Safety constraint: Take Profit minimum check and optional Phase 44 max cap
-      if (phase44Enabled) {
-        tpPipsToUse = Math.min(5.0, Math.max(0.5, tpPipsToUse));
-      } else {
-        tpPipsToUse = Math.max(0.5, tpPipsToUse);
-      }
-
+      const executionEntryPrice = normalizePriceToThreeDigits(entryPrice);
       let configuredTargets;
       try {
         configuredTargets = calculateForexPipTargets(
-          directionalSide,
+          signalSide,
           executionEntryPrice,
           instrument.pipSize,
-          stopLossPipsToUse,
-          tpPipsToUse,
-          phase44Enabled
+          config.forexStopLossPips,
+          config.forexTakeProfitPips
         );
       } catch (targetError: any) {
         const reason = targetError?.message || String(targetError);
@@ -1479,7 +1145,7 @@ return;
       this.setExecutionStatus({
         stage: 'PREPARING_ORDER',
         pair,
-        side: directionalSide,
+        side: signalSide,
         signalId: signal.id,
         message: 'Preparing live order for ' + pair + '.'
       });
@@ -1487,7 +1153,7 @@ return;
       const order: OrderRequest = {
         market: 'FOREX',
         symbol: pair,
-        side: directionalSide,
+        side: signalSide,
         orderType: 'MARKET',
         quantity,
         price: executionEntryPrice,
@@ -1589,21 +1255,6 @@ return;
           side: order.side,
           signalId: signal.id
         });
-
-        // Asynchronously synchronize durable broker trade records
-        reconciliationService.synchronizeBrokerExecutions('CTRADER').catch(() => {});
-
-        if (MartingaleRecoveryService.isPairEligible(pair)) {
-          try {
-            const positions = await adapter.getPositions();
-            await MartingaleRecoveryService.reconcileWithBroker('CTRADER', 'LIVE', positions);
-          } catch (reconcileErr) {
-            liveRuntimeLog('WARN', 'MARTINGALE_POST_EXECUTION_RECONCILE_FAILED', {
-              pair,
-              error: String(reconcileErr)
-            });
-          }
-        }
       } else {
         this.finishExecution('REJECTED', pair + ' ' + order.side + ' was blocked or rejected before confirmed execution.', {
           pair,
@@ -1635,20 +1286,3 @@ return;
 }
 
 export const autoTradingService = new AutoTradingService();
-
-// Independent, lightweight Martingale Position Manager loop that runs
-// every 10 seconds to monitor and manage open positions on the broker,
-// completely independent of the "Auto Live" scanner's state.
-const martingaleManagerInterval = setInterval(() => {
-  try {
-    const config = getSystemConfig().martingale;
-    if (config?.enabled && autoTradingService.getStatus().state === 'RUNNING') {
-      liveRuntimeLog('SYSTEM', 'MARTINGALE_HEARTBEAT', { status: 'RUNNING' });
-      void autoTradingService.processMartingaleActivePositions();
-    }
-  } catch (err) {
-    liveRuntimeLog('ERROR', 'MARTINGALE_MANAGER_ERROR', { error: String(err) });
-  }
-}, 10_000);
-martingaleManagerInterval.unref?.();
-
