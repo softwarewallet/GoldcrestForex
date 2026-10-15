@@ -273,8 +273,23 @@ app.use('/api/ml', operatorAuthRequired, (_req: Request, res: Response) => {
 app.use('/api/governance', operatorAuthRequired, governanceRouter);
 
 app.get('/api/auto-trading/status', operatorAuthRequired, async (_req: Request, res: Response) => {
-  await tradeContinuityService.syncFromHistoricalTrades().catch(() => {});
-  res.json(autoTradingService.getStatus());
+  // Status polling must remain responsive even if historical reconciliation or
+  // the database is slow; status is observational and must never gate trading.
+  let syncTimer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      tradeContinuityService.syncFromHistoricalTrades(),
+      new Promise<void>(resolve => {
+        syncTimer = setTimeout(resolve, 2_000);
+        syncTimer.unref?.();
+      })
+    ]);
+  } catch {
+    // Continue returning the latest in-memory Auto Live status.
+  } finally {
+    if (syncTimer) clearTimeout(syncTimer);
+  }
+  return res.json(autoTradingService.getStatus());
 });
 
 app.post('/api/auto-trading/start', operatorAuthRequired, (req: Request, res: Response) => {
@@ -1393,6 +1408,25 @@ app.get('/api/markets', (req: Request, res: Response) => {
 
 // 4. Forex Endpoints (Phase 2A Full Analysis Engine)
 const FOREX_PAIRS_CACHE_TTL_MS = 60_000;
+
+const FOREX_PAIRS_INSTRUMENT_TIMEOUT_MS = 2_000;
+const FOREX_PAIRS_QUOTE_TIMEOUT_MS = 2_000;
+
+async function withApiTimeout<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+        timer.unref?.();
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 let forexPairsCache: { payload: any[]; expiresAt: number } | null = null;
 let forexPairsInFlight: Promise<any[]> | null = null;
 
@@ -1411,28 +1445,20 @@ app.get('/api/forex/pairs', async (_req: Request, res: Response) => {
       return res.json(forexPairsCache.payload);
     }
     if (forexPairsInFlight) {
-      return res.json(await forexPairsInFlight);
+      return res.json(await withApiTimeout(forexPairsInFlight, FOREX_PAIRS_INSTRUMENT_TIMEOUT_MS + FOREX_PAIRS_QUOTE_TIMEOUT_MS + 2_500, 'Forex pairs refresh'));
     }
 
     forexPairsInFlight = (async () => {
-      try {
-        const scanned = await scannerService.getForexScanner();
-        if (Array.isArray(scanned) && scanned.length > 0) {
-          forexPairsCache = {
-            payload: scanned,
-            expiresAt: Date.now() + FOREX_PAIRS_CACHE_TTL_MS
-          };
-          return scanned;
-        }
-      } catch (err) {
-        console.warn('ScannerService getForexScanner failed in /api/forex/pairs, using fallback:', err);
-      }
-
+      // This endpoint serves lightweight market-data rows, not strategy analysis.
+      // ScannerService refreshes every pair and runs prediction work; Promise.race
+      // cannot cancel that work after a timeout, so repeated dashboard requests
+      // could leave many background scans competing for the broker request queue.
+      // Strategy generation remains in /api/signals/all and the Auto Live engine.
       let adapter: any = null;
       let instruments: any[] = [];
       try {
         adapter = brokerRegistry.getAdapter('CTRADER', 'LIVE');
-        instruments = await adapter.getInstruments();
+        instruments = await withApiTimeout(adapter.getInstruments(), FOREX_PAIRS_INSTRUMENT_TIMEOUT_MS, 'cTrader instrument discovery');
       } catch {
         instruments = [];
       }
@@ -1449,7 +1475,27 @@ app.get('/api/forex/pairs', async (_req: Request, res: Response) => {
         }));
       }
 
-      const pairsWithQuotes = await Promise.all(instruments.map(async inst => {
+      // Keep fallback discovery bounded and anchored to the application's
+      // supported Forex universe. A broker master may put metals, indices, or
+      // symbols with broker-specific formatting first; slicing it directly can
+      // accidentally return zero usable Forex pairs to the dashboard.
+      const normalizePairKey = (value: unknown) => String(value || '').toUpperCase().replace(/[^A-Z]/g, '');
+      const fallbackInstruments = FOREX_PAIRS.slice(0, 8).map(pair => {
+        const key = normalizePairKey(pair.symbol);
+        const discovered = instruments.find(inst => normalizePairKey(inst.symbol) === key)
+          || instruments.find(inst => normalizePairKey(inst.name) === key);
+        return {
+          ...(discovered || {}),
+          symbol: pair.symbol,
+          name: pair.description,
+          description: pair.description,
+          assetClass: 'FOREX',
+          exchange: discovered?.exchange || 'CTRADER',
+          pipSize: pair.pipSize,
+          digits: pair.digits
+        };
+      });
+      const pairsWithQuotes = await Promise.all(fallbackInstruments.map(async inst => {
         const pipSize = inst.symbol.includes('JPY') ? 0.01 : 0.0001;
         let atr5mPips = inst.symbol.includes('JPY') ? 8.4 : inst.symbol.includes('GBP') ? 7.6 : 5.8;
         let atr5mVal = Number((atr5mPips * pipSize).toFixed(5));
@@ -1458,7 +1504,11 @@ app.get('/api/forex/pairs', async (_req: Request, res: Response) => {
         try {
           c5m = liveForexProvider.getCandles(inst.symbol, '5M', 25);
           if (!c5m || c5m.length < 5) {
-            c5m = await getLiveAnchoredCandles(inst.symbol, '5M', 25).catch(() => []);
+            c5m = await withApiTimeout(
+              getLiveAnchoredCandles(inst.symbol, '5M', 25),
+              2_000,
+              `5M candle fallback ${inst.symbol}`
+            ).catch(() => []);
           }
           if (c5m && c5m.length >= 5) {
             const atrArr = calculateATR(c5m, Math.min(14, c5m.length - 1));
@@ -1476,7 +1526,7 @@ app.get('/api/forex/pairs', async (_req: Request, res: Response) => {
         let quote: any = null;
         if (adapter) {
           try {
-            quote = await adapter.getQuote(inst.symbol);
+            quote = await withApiTimeout(adapter.getQuote(inst.symbol), FOREX_PAIRS_QUOTE_TIMEOUT_MS, `cTrader quote ${inst.symbol}`);
           } catch {}
         }
 
@@ -1504,7 +1554,9 @@ app.get('/api/forex/pairs', async (_req: Request, res: Response) => {
         // Resilient fallback using live anchored candles
         const lastCandle = c5m?.[c5m.length - 1];
         const prevCandle = c5m?.[c5m.length - 2] || lastCandle;
-        const close = Number(lastCandle?.close || (inst.symbol.includes('JPY') ? 152.45 : 1.085));
+        // Never manufacture a plausible-looking price when both live quotes
+        // and real candles are unavailable. Null prices render as unavailable.
+        const close = Number(lastCandle?.close || 0);
         const prevClose = Number(prevCandle?.close || close);
         const change = close - prevClose;
         const divisor = inst.symbol.includes('JPY') ? 100 : 10000;
@@ -1513,9 +1565,9 @@ app.get('/api/forex/pairs', async (_req: Request, res: Response) => {
           ...inst,
           baseCurrency: inst.symbol.split('/')[0],
           quoteCurrency: inst.symbol.split('/')[1] || '',
-          bid: close,
-          ask: Number((close + (inst.pipSize || pipSize) * 1.0).toFixed(5)),
-          spreadPips: 1.0,
+          bid: close > 0 ? close : null,
+          ask: close > 0 ? close : null,
+          spreadPips: 0,
           atr5m: atr5mVal,
           atr5mPips,
           dynamicSlPips,
@@ -1524,21 +1576,36 @@ app.get('/api/forex/pairs', async (_req: Request, res: Response) => {
           changePercent24h: prevClose > 0 ? Number(((change / prevClose) * 100).toFixed(2)) : 0,
           high24h: Number(lastCandle?.high || close),
           low24h: Number(lastCandle?.low || close),
-          dataStatus: 'DELAYED',
-          dataSource: 'LIVE_FEED_READY'
+          dataStatus: close > 0 ? 'DELAYED' : 'UNAVAILABLE',
+          dataSource: close > 0 ? 'HISTORICAL_CANDLES' : 'NO_VALID_MARKET_DATA'
         };
       }));
 
+      const hasFreshLiveQuote = pairsWithQuotes.some((pair: any) =>
+        Number(pair.bid) > 0 && Number(pair.ask) > 0 &&
+        ['LIVE', 'FRESH'].includes(String(pair.dataStatus || '').toUpperCase())
+      );
+      const hasAnyAuthoritativePrice = pairsWithQuotes.some((pair: any) =>
+        Number(pair.bid) > 0 && Number(pair.ask) > 0
+      );
+      // Healthy live snapshots get the normal cache TTL. Missing/degraded
+      // providers are rechecked quickly so a transient outage cannot leave the
+      // dashboard empty or stale for a full minute after recovery.
+      const cacheTtlMs = hasFreshLiveQuote ? FOREX_PAIRS_CACHE_TTL_MS : hasAnyAuthoritativePrice ? 15_000 : 5_000;
       forexPairsCache = {
         payload: pairsWithQuotes,
-        expiresAt: Date.now() + FOREX_PAIRS_CACHE_TTL_MS
+        expiresAt: Date.now() + cacheTtlMs
       };
       return pairsWithQuotes;
     })().finally(() => {
       forexPairsInFlight = null;
     });
 
-    return res.json(await forexPairsInFlight);
+    return res.json(await withApiTimeout(
+      forexPairsInFlight,
+      FOREX_PAIRS_INSTRUMENT_TIMEOUT_MS + FOREX_PAIRS_QUOTE_TIMEOUT_MS + 2_500,
+      'Forex pairs response'
+    ));
   } catch (err: any) {
     res.status(503).json({
       error: err?.code || 'LIVE_MARKET_DATA_UNAVAILABLE',
@@ -2164,10 +2231,11 @@ app.get('/api/forex/news', async (req: Request, res: Response) => {
       : configuredPairs;
 
     const forceRefresh = req.query.refresh === '1' || req.query.refresh === 'true';
-    const news = await fetchLiveForexNews({
-      pairs: requestedPairs,
-      forceRefresh
-    });
+    const news = await withApiTimeout(
+      fetchLiveForexNews({ pairs: requestedPairs, forceRefresh }),
+      15_000,
+      'Live Forex news ingestion'
+    );
 
     res.status(news.status === 'UNAVAILABLE' ? 503 : 200).json(news);
   } catch (err: any) {

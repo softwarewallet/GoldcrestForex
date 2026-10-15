@@ -1,4 +1,5 @@
 import { BrokerAdapter, OrderRequest, NormalizedQuote } from '../types';
+
 import { brokerRegistry } from '../registry';
 import { killSwitch } from './KillSwitch';
 import { getForexSessionState, getIndianSessionState } from '../../markets/common/session';
@@ -6,6 +7,30 @@ import { getSystemConfig } from '../../services/configService';
 import { executeQuery } from '../../database/db';
 import { reconciliationService } from '../../services/reconciliationService';
 import { MartingaleRecoveryService } from '../../services/martingaleRecoveryService';
+
+const READINESS_REQUEST_TIMEOUT_MS = Math.max(
+  2_000,
+  Number(process.env.GOLDCREST_READINESS_REQUEST_TIMEOUT_MS || 5_000)
+);
+
+/** Fail closed when a broker readiness request hangs. */
+async function withReadinessTimeout<T>(operation: Promise<T>, label: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`Readiness check timed out: ${label} (${READINESS_REQUEST_TIMEOUT_MS}ms)`)),
+          READINESS_REQUEST_TIMEOUT_MS
+        );
+        timer.unref?.();
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 const LIVE_QUOTE_MAX_AGE_MS = 30_000; // LIVE execution requires an authoritative quote no older than 30 seconds
 
@@ -90,13 +115,13 @@ class AutoTradeReadinessService {
     checks.strategyCalibrated = productionStrategyApproved && (approvedStrategyId === '*' || !strategyId || strategyId === approvedStrategyId || Boolean(strategyId));
 
     try {
-      checks.brokerConnected = (await adapter.getTradingStatus()) === 'CONNECTED';
+      checks.brokerConnected = (await withReadinessTimeout(adapter.getTradingStatus(), 'broker connection status')) === 'CONNECTED';
     } catch {
       checks.brokerConnected = false;
     }
 
     try {
-      account = await adapter.getAccount();
+      account = await withReadinessTimeout(adapter.getAccount(), 'account validation');
       checks.accountValidated = Boolean(account?.accountId && Number(account.balance) > 0);
       const permissions = account?.permissions || [];
       checks.tradingPermission = permissions.includes('TRADING') ||
@@ -108,14 +133,14 @@ class AutoTradeReadinessService {
     }
 
     try {
-      const instrument = await adapter.getInstrument(order.symbol);
+      const instrument = await withReadinessTimeout(adapter.getInstrument(order.symbol), 'instrument validation');
       checks.instrumentValidated = Boolean(instrument);
     } catch {
       checks.instrumentValidated = false;
     }
 
     try {
-      quote = quote || await adapter.getQuote(order.symbol);
+      quote = quote || await withReadinessTimeout(adapter.getQuote(order.symbol), 'live quote');
       checks.quoteFresh = Boolean(
         quote &&
         quote.status === 'FRESH' &&
@@ -140,7 +165,7 @@ class AutoTradeReadinessService {
       : getIndianSessionState().isOpen;
 
     try {
-      positions = await adapter.getPositions();
+      positions = await withReadinessTimeout(adapter.getPositions(), 'open positions');
     } catch {
       positions = [];
     }
@@ -155,7 +180,7 @@ class AutoTradeReadinessService {
 
     try {
       dailyLoss = typeof adapter.getDailyRealizedPnL === 'function'
-        ? Math.max(0, -Number(await adapter.getDailyRealizedPnL()))
+        ? Math.max(0, -Number(await withReadinessTimeout(adapter.getDailyRealizedPnL(), 'daily realized PnL')))
         : await reconciliationService.getDailyLoss(adapter.broker as 'CTRADER' | 'FIVE_PAISA', balance);
       if (!Number.isFinite(dailyLoss)) dailyLoss = 0;
     } catch {

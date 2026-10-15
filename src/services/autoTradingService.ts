@@ -50,6 +50,39 @@ const PREOPEN_PAIR_CONCURRENCY = Math.max(
   Math.min(3, Number(process.env.GOLDCREST_PREOPEN_PAIR_CONCURRENCY || 3))
 );
 
+// Startup/pre-open network operations must be bounded. A hung provider or news
+// request must not keep cycleInFlight=true forever and prevent future retries.
+const PREOPEN_PAIR_REFRESH_TIMEOUT_MS = Math.max(
+  3_000,
+  Number(process.env.GOLDCREST_PREOPEN_PAIR_REFRESH_TIMEOUT_MS || 10_000)
+);
+const PREOPEN_NEWS_TIMEOUT_MS = Math.max(
+  3_000,
+  Number(process.env.GOLDCREST_PREOPEN_NEWS_TIMEOUT_MS || 15_000)
+);
+
+async function withOperationTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  operationName: string
+): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<T>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`${operationName} timed out after ${timeoutMs}ms`)),
+          timeoutMs
+        );
+        timeout.unref?.();
+      })
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 async function mapWithConcurrency<T, R>(
   items: T[],
   concurrency: number,
@@ -691,15 +724,21 @@ class AutoTradingService {
         return;
       }
 
-      const newsPromise = fetchLiveForexNews({
-        pairs: getConfiguredAutoForexPairs()
-      });
+      const newsPromise = withOperationTimeout(
+        fetchLiveForexNews({ pairs: getConfiguredAutoForexPairs() }),
+        PREOPEN_NEWS_TIMEOUT_MS,
+        'Pre-open live-news request'
+      );
       const trendResultsRaw = await mapWithConcurrency(
         getConfiguredAutoForexPairs(),
         PREOPEN_PAIR_CONCURRENCY,
         async pair => {
           try {
-            await this.provider.refreshPair(pair);
+            await withOperationTimeout(
+              this.provider.refreshPair(pair),
+              PREOPEN_PAIR_REFRESH_TIMEOUT_MS,
+              `Pre-open market-data refresh for ${pair}`
+            );
             const analysis = this.signalEngine.analyzePair(pair);
             liveRuntimeLog('INFO', 'PREOPEN_TREND_EVALUATED', {
               pair,
@@ -990,7 +1029,7 @@ class AutoTradingService {
         signalId: null,
         message: 'Scanning live market data for ' + pair + '.'
       });
-      await this.provider.refreshPair(pair);
+      await withOperationTimeout(this.provider.refreshPair(pair), PREOPEN_PAIR_REFRESH_TIMEOUT_MS, `Auto Live market-data refresh for ${pair}`);
       liveRuntimeLog('INFO', 'LIVE_DATA_REFRESHED', { pair });
       const signal = await this.signalEngine.generateSignal(pair);
       const quote = this.provider.getQuote(pair);

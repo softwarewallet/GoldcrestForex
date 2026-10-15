@@ -61,6 +61,32 @@ export type ControlCenterSection =
 
 export type FreshnessStatus = 'LIVE' | 'RECENT' | 'STALE' | 'ERROR' | 'UNAVAILABLE';
 
+// Bound dashboard telemetry requests individually: one slow endpoint must not
+// keep the whole Control Center in a perpetual syncing state.
+const CONTROL_CENTER_REQUEST_TIMEOUT_MS = 8_000;
+
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs = CONTROL_CENTER_REQUEST_TIMEOUT_MS
+): Promise<Response> {
+  const controller = new AbortController();
+  const upstreamSignal = init.signal;
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, {
+      ...init,
+      signal: controller.signal
+    });
+  } finally {
+    window.clearTimeout(timeout);
+    // The helper owns its controller; upstreamSignal is intentionally not
+    // forwarded because this UI currently has no caller cancellation contract.
+    void upstreamSignal;
+  }
+}
+
+
 interface AccountCardData {
   broker: BrokerType;
   accountId: string;
@@ -196,6 +222,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
   const [selectedSignalDecision, setSelectedSignalDecision] = useState<any | null>(null);
   const [autoTradingStatus, setAutoTradingStatus] = useState<any | null>(parentAutoTradingStatus);
   const [autoTradingBusy, setAutoTradingBusy] = useState(false);
+  const [autoTradingControlError, setAutoTradingControlError] = useState<string | null>(null);
   const [closedMarketPrompt, setClosedMarketPrompt] = useState<any | null>(null);
   const [dailyLossLimitPct, setDailyLossLimitPct] = useState<number>(3);
 
@@ -239,7 +266,7 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
 
   useEffect(() => {
     let mounted = true;
-    fetch('/api/config', { cache: 'no-store' })
+    fetchWithTimeout('/api/config', { cache: 'no-store' }, 5_000)
       .then(async (res) => res.ok ? await res.json() : null)
       .then((config) => {
         const value = Number(config?.maxDailyLossPct);
@@ -266,17 +293,17 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
         signalsRes,
         newsRes
       ] = await Promise.all([
-        fetch('/api/brokers/status', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/brokers/positions', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/brokers/orders', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/governance/audit-logs?limit=100', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/governance/reconciliation/positions', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/governance/reconciliation/orders', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/governance/live-health', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/auto-trading/status', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/forex/pairs', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/signals/all', { cache: 'no-store' }).catch(() => null),
-        fetch('/api/forex/news', { cache: 'no-store' }).catch(() => null)
+        fetchWithTimeout('/api/brokers/status', { cache: 'no-store' }, 8_000).catch(() => null),
+        fetchWithTimeout('/api/brokers/positions', { cache: 'no-store' }, 8_000).catch(() => null),
+        fetchWithTimeout('/api/brokers/orders', { cache: 'no-store' }, 8_000).catch(() => null),
+        fetchWithTimeout('/api/governance/audit-logs?limit=100', { cache: 'no-store' }, 8_000).catch(() => null),
+        fetchWithTimeout('/api/governance/reconciliation/positions', { cache: 'no-store' }, 8_000).catch(() => null),
+        fetchWithTimeout('/api/governance/reconciliation/orders', { cache: 'no-store' }, 8_000).catch(() => null),
+        fetchWithTimeout('/api/governance/live-health', { cache: 'no-store' }, 8_000).catch(() => null),
+        fetchWithTimeout('/api/auto-trading/status', { cache: 'no-store' }, 8_000).catch(() => null),
+        fetchWithTimeout('/api/forex/pairs', { cache: 'no-store' }, 8_000).catch(() => null),
+        fetchWithTimeout('/api/signals/all', { cache: 'no-store' }, 8_000).catch(() => null),
+        fetchWithTimeout('/api/forex/news', { cache: 'no-store' }, 8_000).catch(() => null)
       ]);
 
       if (autoTradingRes?.ok) {
@@ -542,12 +569,13 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
 
   const toggleAutoTrading = useCallback(async () => {
     setAutoTradingBusy(true);
+    setAutoTradingControlError(null);
     try {
       const shouldStop = ['RUNNING', 'PREPARING'].includes(autoTradingStatus?.state);
-      const res = await fetch(shouldStop ? '/api/auto-trading/stop' : '/api/auto-trading/start', {
+      const res = await fetchWithTimeout(shouldStop ? '/api/auto-trading/stop' : '/api/auto-trading/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' }
-      });
+      }, 15_000);
       const data = await res.json().catch(() => ({}));
 
       if (data?.requiresClosedMarketConfirmation) {
@@ -559,35 +587,50 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
       setAutoTradingStatus(data);
       onAutoTradingStatusChange?.(data);
       if (!res.ok) {
-        console.warn(
-          'Auto trading control rejected:',
-          data?.lastCycleResult || data?.message || data?.error || res.statusText
-        );
+        const reason = data?.lastCycleResult || data?.message || data?.error || res.statusText || 'Auto Live request was rejected.';
+        setAutoTradingControlError(String(reason));
+        console.warn('Auto trading control rejected:', reason);
       }
-    } catch (err) {
+    } catch (err: any) {
+      const message = err?.name === 'AbortError'
+        ? 'Auto Live control request timed out. Checking the backend state before another attempt.'
+        : (err?.message || 'Auto Live control request failed.');
       console.warn('Auto trading control failed:', err);
+      setAutoTradingControlError(message);
+      // A client timeout does not prove that the server did not arm/stop Auto
+      // Live. Reconcile authoritative state before permitting another click.
+      try {
+        const statusRes = await fetchWithTimeout('/api/auto-trading/status', { cache: 'no-store' }, 5_000);
+        if (statusRes.ok) {
+          const latestStatus = await statusRes.json();
+          setAutoTradingStatus(latestStatus);
+          onAutoTradingStatusChange?.(latestStatus);
+          setAutoTradingControlError(`${message} Current backend state: ${latestStatus?.state || 'UNKNOWN'}.`);
+        }
+      } catch {
+        // Retain the original actionable timeout/error message.
+      }
     } finally {
       setAutoTradingBusy(false);
     }
-  }, [autoTradingStatus?.state]);
+  }, [autoTradingStatus?.state, onAutoTradingStatusChange]);
 
   const confirmClosedMarketAutoLive = useCallback(async () => {
     setAutoTradingBusy(true);
     setClosedMarketPrompt(null);
     try {
-      const res = await fetch('/api/auto-trading/start', {
+      const res = await fetchWithTimeout('/api/auto-trading/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ confirmWhenClosed: true })
-      });
+      }, 15_000);
       const data = await res.json().catch(() => ({}));
       setAutoTradingStatus(data);
       onAutoTradingStatusChange?.(data);
       if (!res.ok) {
-        console.warn(
-          'Confirmed auto trading start rejected:',
-          data?.lastCycleResult || data?.message || data?.error || res.statusText
-        );
+        const reason = data?.lastCycleResult || data?.message || data?.error || res.statusText || 'Confirmed Auto Live request was rejected.';
+        setAutoTradingControlError(String(reason));
+        console.warn('Confirmed auto trading start rejected:', reason);
       }
     } catch (err) {
       console.warn('Confirmed auto trading start failed:', err);
@@ -944,6 +987,15 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
                 ? 'STOP AUTO LIVE'
                 : 'START AUTO LIVE'}
             </button>
+            {autoTradingControlError && (
+              <span
+                role="status"
+                title={autoTradingControlError}
+                className="max-w-[220px] truncate text-[10px] font-medium text-rose-300"
+              >
+                {autoTradingControlError}
+              </span>
+            )}
 
             {autoTradingStatus?.preOpenPreparation?.news && (
               <div className={`flex items-center gap-2 px-2.5 py-1 rounded border text-[10px] font-mono ${
