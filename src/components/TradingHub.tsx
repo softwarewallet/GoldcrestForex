@@ -919,15 +919,17 @@ export const TradingHub: React.FC<TradingHubProps> = ({
             <div className="text-slate-500 text-xs font-mono mt-1">Operational view for live execution only.</div>
           </div>
           <div className="flex flex-wrap gap-2 font-mono text-[11px]">
-            <span className={"px-3 py-1 rounded-lg border font-bold " +
-              (autoStatus?.continuity?.isContinuityPaused ? "text-rose-300 bg-rose-950/80 border-rose-600 animate-pulse" :
-               autoStatus?.state === 'PAUSED_SCHEDULE' ? "text-amber-300 bg-amber-950/90 border-amber-500 animate-pulse" :
-               autoStatus?.state === 'RUNNING' ? "text-emerald-300 bg-emerald-950/60 border-emerald-800" :
-               autoStatus?.state === 'BLOCKED' ? "text-rose-300 bg-rose-950/60 border-rose-800" :
-               "text-amber-300 bg-amber-950/60 border-amber-800")}>
+            <span
+              title={autoStatusError || 'Auto Live lifecycle status'}
+              className={"px-3 py-1 rounded-lg border font-bold " +
+                (autoStatus?.continuity?.isContinuityPaused ? "text-rose-300 bg-rose-950/80 border-rose-600 animate-pulse" :
+                 autoStatus?.state === 'PAUSED_SCHEDULE' ? "text-amber-300 bg-amber-950/90 border-amber-500 animate-pulse" :
+                 autoStatus?.state === 'RUNNING' ? "text-emerald-300 bg-emerald-950/60 border-emerald-800" :
+                 autoStatus?.state === 'BLOCKED' || (!autoStatus && Boolean(autoStatusError)) ? "text-rose-300 bg-rose-950/60 border-rose-800" :
+                 "text-amber-300 bg-amber-950/60 border-amber-800")}>
               {autoStatus?.continuity?.isContinuityPaused ? 'AUTO LIVE: PAUSED (20 LOSSES)' :
                autoStatus?.state === 'PAUSED_SCHEDULE' ? 'AUTO LIVE: PAUSED (RISK WINDOW)' :
-               `AUTO LIVE: ${autoStatus?.state || 'LOADING'}`}
+               `AUTO LIVE: ${autoStatus?.state || (autoStatusError ? 'UNAVAILABLE' : 'LOADING')}`}
             </span>
             {autoStatus?.scheduler?.enabled && (
               <span className={"px-3 py-1 rounded-lg border font-bold " +
