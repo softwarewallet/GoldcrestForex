@@ -1,6 +1,6 @@
-import { ForexDataProvider, LiveForexProvider } from '../markets/forex/provider';
-import { ForexCandle, ForexMarketStatus, ForexQuote, ForexTimeframe } from '../markets/forex/types';
-import { FOREX_PAIRS, getForexPairConfig } from '../markets/forex/instruments';
+import { LiveForexProvider } from '../markets/forex/provider';
+import { ForexMarketStatus } from '../markets/forex/types';
+import { FOREX_PAIRS } from '../markets/forex/instruments';
 import { ForexSignalEngine } from '../markets/forex/signalEngine';
 import { getForexSessionState } from '../markets/common/session';
 import { getAutoLiveMarketGate, AutoLiveMarketGate } from './marketOpenGate';
@@ -21,7 +21,7 @@ import { ShortTpOptimizationEngine } from '../ml/direction/shortTpOptimizationEn
 import { evaluateAutoLiveScheduler, SchedulerEvaluationResult } from './schedulerUtils';
 import { reconciliationService } from './reconciliationService';
 
-const LIVE_QUOTE_MAX_AGE_MS = 1_800_000; // 30 minutes to prevent clock lag or tick latency issues
+const LIVE_QUOTE_MAX_AGE_MS = 30_000; // LIVE execution requires a fresh authoritative quote no older than 30 seconds
 
 const AUTO_INTERVAL_MS = Math.max(
   15_000,
