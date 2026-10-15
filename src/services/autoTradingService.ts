@@ -50,34 +50,6 @@ const PREOPEN_PAIR_CONCURRENCY = Math.max(
   Math.min(3, Number(process.env.GOLDCREST_PREOPEN_PAIR_CONCURRENCY || 3))
 );
 
-const AUTOLIVE_PAIR_REFRESH_TIMEOUT_MS = Math.max(
-  5_000,
-  Number(process.env.GOLDCREST_AUTOLIVE_PAIR_REFRESH_TIMEOUT_MS || 20_000)
-);
-const AUTOLIVE_NEWS_TIMEOUT_MS = Math.max(
-  5_000,
-  Number(process.env.GOLDCREST_AUTOLIVE_NEWS_TIMEOUT_MS || 15_000)
-);
-
-async function withAutoLiveTimeout<T>(
-  operation: Promise<T>,
-  timeoutMs: number,
-  label: string
-): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      operation,
-      new Promise<T>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
-        timer.unref?.();
-      })
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
 // Startup/pre-open network operations must be bounded. A hung provider or news
 // request must not keep cycleInFlight=true forever and prevent future retries.
 const PREOPEN_PAIR_REFRESH_TIMEOUT_MS = Math.max(
@@ -762,9 +734,9 @@ class AutoTradingService {
         PREOPEN_PAIR_CONCURRENCY,
         async pair => {
           try {
-            await withAutoLiveTimeout(
+            await withOperationTimeout(
               this.provider.refreshPair(pair),
-              AUTOLIVE_PAIR_REFRESH_TIMEOUT_MS,
+              PREOPEN_PAIR_REFRESH_TIMEOUT_MS,
               `Pre-open market-data refresh for ${pair}`
             );
             const analysis = this.signalEngine.analyzePair(pair);
@@ -1057,7 +1029,7 @@ class AutoTradingService {
         signalId: null,
         message: 'Scanning live market data for ' + pair + '.'
       });
-      await withAutoLiveTimeout(this.provider.refreshPair(pair), AUTOLIVE_PAIR_REFRESH_TIMEOUT_MS, `Auto Live market-data refresh for ${pair}`);
+      await withOperationTimeout(this.provider.refreshPair(pair), PREOPEN_PAIR_REFRESH_TIMEOUT_MS, `Auto Live market-data refresh for ${pair}`);
       liveRuntimeLog('INFO', 'LIVE_DATA_REFRESHED', { pair });
       const signal = await this.signalEngine.generateSignal(pair);
       const quote = this.provider.getQuote(pair);
