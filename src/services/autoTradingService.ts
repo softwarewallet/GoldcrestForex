@@ -483,7 +483,10 @@ class AutoTradingService {
         pairs: getConfiguredAutoForexPairs(),
         marketGate
       });
-      void this.runCycle();
+      // Yield to the event loop before starting the first scan. runCycle
+      // performs synchronous setup before its first await and can delay the
+      // HTTP arm response when invoked inline.
+      setTimeout(() => { void this.runCycle(); }, 0).unref?.();
     } else {
       this.state = 'PREPARING';
       this.lastCycleResult = 'Markets are closed. Auto Live is armed; pre-open preparation is running and the system will begin evaluating trades as soon as a supported market opens.';
@@ -493,7 +496,8 @@ class AutoTradingService {
         pairs: getConfiguredAutoForexPairs(),
         marketGate
       });
-      void this.runScheduledCycle();
+      // Return PREPARING promptly; run pre-open preparation after this call.
+      setTimeout(() => { void this.runScheduledCycle(); }, 0).unref?.();
     }
 
     this.timer = setInterval(() => {
