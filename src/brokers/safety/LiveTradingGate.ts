@@ -206,8 +206,8 @@ export class LiveTradingGate {
     let tradeValue = NaN;
     let tradeValueUsd = NaN;
 
-    if (maximumTradeValueCheckPassed && isForex && selectedBrokerEnvironment === 'LIVE') {
-      // For cTrader LIVE Forex, maxTradeValueForexUsd is the broker protocol
+    if (maximumTradeValueCheckPassed && isForex && adapter.broker === 'CTRADER') {
+      // For cTrader Forex in either selected API mode, maxTradeValueForexUsd is the broker protocol
       // volume itself. Do not multiply order quantity by price or perform
       // quote-currency conversion here. The configured value is also the
       // authoritative per-order ceiling, so any execution path that supplies
