@@ -5,6 +5,7 @@ import { ForexSignalEngine } from '../markets/forex/signalEngine';
 import { getForexSessionState } from '../markets/common/session';
 import { getAutoLiveMarketGate, AutoLiveMarketGate } from './marketOpenGate';
 import { fetchLiveForexNews, LiveNewsSnapshot } from './liveNewsService';
+import { getCTraderApiMode } from './configService';
 import { brokerRegistry } from '../brokers/registry';
 import { autoExecutionEngine, refreshAutonomousExecutionPermission, disarmLocalAutonomousExecution } from '../brokers/safety/AutoExecutionEngine';
 import { autoTradeReadinessService } from '../brokers/safety/AutoTradeReadiness';
@@ -348,6 +349,21 @@ class AutoTradingService {
         ...this.getStatus(),
         requiresClosedMarketConfirmation: true
       };
+    }
+
+    // This Auto Live implementation is sourced from Goldcrest-FX-Live,
+    // which routes autonomous orders exclusively through cTrader LIVE. The
+    // target app had a DEMO default that silently reconfigured the adapter
+    // registered as CTRADER_LIVE, so readiness would reject every order.
+    if (getCTraderApiMode() !== 'LIVE') {
+      this.state = 'BLOCKED';
+      this.lastCycleResult = 'Auto Live requires cTrader API mode LIVE. The current cTrader API mode is DEMO; switch the API mode to LIVE and verify LIVE credentials before starting.';
+      liveRuntimeLog('WARN', 'AUTO_TRADING_START_BLOCKED', {
+        stage: 'CTRADER_API_MODE',
+        configuredMode: getCTraderApiMode(),
+        reason: this.lastCycleResult
+      });
+      return this.getStatus();
     }
 
     if (!this.isRequested()) {
