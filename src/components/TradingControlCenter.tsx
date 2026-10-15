@@ -292,17 +292,17 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
         signalsRes,
         newsRes
       ] = await Promise.all([
-        fetchWithTimeout('/api/brokers/status', { cache: 'no-store' }, { cache: 'no-store' }).catch(() => null),
-        fetchWithTimeout('/api/brokers/positions', { cache: 'no-store' }, { cache: 'no-store' }).catch(() => null),
-        fetchWithTimeout('/api/brokers/orders', { cache: 'no-store' }, { cache: 'no-store' }).catch(() => null),
-        fetchWithTimeout('/api/governance/audit-logs?limit=100', { cache: 'no-store' }, { cache: 'no-store' }).catch(() => null),
-        fetchWithTimeout('/api/governance/reconciliation/positions', { cache: 'no-store' }, { cache: 'no-store' }).catch(() => null),
-        fetchWithTimeout('/api/governance/reconciliation/orders', { cache: 'no-store' }, { cache: 'no-store' }).catch(() => null),
-        fetchWithTimeout('/api/governance/live-health', { cache: 'no-store' }, { cache: 'no-store' }).catch(() => null),
-        fetchWithTimeout('/api/auto-trading/status', { cache: 'no-store' }, { cache: 'no-store' }).catch(() => null),
-        fetchWithTimeout('/api/forex/pairs', { cache: 'no-store' }, { cache: 'no-store' }).catch(() => null),
-        fetchWithTimeout('/api/signals/all', { cache: 'no-store' }, { cache: 'no-store' }).catch(() => null),
-        fetchWithTimeout('/api/forex/news', { cache: 'no-store' }, { cache: 'no-store' }).catch(() => null)
+        fetchWithTimeout('/api/brokers/status', { cache: 'no-store' }, 8_000).catch(() => null),
+        fetchWithTimeout('/api/brokers/positions', { cache: 'no-store' }, 8_000).catch(() => null),
+        fetchWithTimeout('/api/brokers/orders', { cache: 'no-store' }, 8_000).catch(() => null),
+        fetchWithTimeout('/api/governance/audit-logs?limit=100', { cache: 'no-store' }, 8_000).catch(() => null),
+        fetchWithTimeout('/api/governance/reconciliation/positions', { cache: 'no-store' }, 8_000).catch(() => null),
+        fetchWithTimeout('/api/governance/reconciliation/orders', { cache: 'no-store' }, 8_000).catch(() => null),
+        fetchWithTimeout('/api/governance/live-health', { cache: 'no-store' }, 8_000).catch(() => null),
+        fetchWithTimeout('/api/auto-trading/status', { cache: 'no-store' }, 8_000).catch(() => null),
+        fetchWithTimeout('/api/forex/pairs', { cache: 'no-store' }, 8_000).catch(() => null),
+        fetchWithTimeout('/api/signals/all', { cache: 'no-store' }, 8_000).catch(() => null),
+        fetchWithTimeout('/api/forex/news', { cache: 'no-store' }, 8_000).catch(() => null)
       ]);
 
       if (autoTradingRes?.ok) {
@@ -570,10 +570,10 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
     setAutoTradingBusy(true);
     try {
       const shouldStop = ['RUNNING', 'PREPARING'].includes(autoTradingStatus?.state);
-      const res = await fetch(shouldStop ? '/api/auto-trading/stop' : '/api/auto-trading/start', {
+      const res = await fetchWithTimeout(shouldStop ? '/api/auto-trading/stop' : '/api/auto-trading/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' }
-      });
+      }, 15_000);
       const data = await res.json().catch(() => ({}));
 
       if (data?.requiresClosedMarketConfirmation) {
@@ -601,11 +601,11 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
     setAutoTradingBusy(true);
     setClosedMarketPrompt(null);
     try {
-      const res = await fetch('/api/auto-trading/start', {
+      const res = await fetchWithTimeout('/api/auto-trading/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ confirmWhenClosed: true })
-      });
+      }, 15_000);
       const data = await res.json().catch(() => ({}));
       setAutoTradingStatus(data);
       onAutoTradingStatusChange?.(data);
