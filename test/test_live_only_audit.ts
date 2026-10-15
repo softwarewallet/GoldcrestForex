@@ -46,8 +46,14 @@ assert.equal(
   `LIVE runtime audit failed. Forbidden paper/sandbox/synthetic runtime references remain:\n${findings.join('\n')}`
 );
 
-const configSnapshot = fs.readFileSync(path.resolve(process.cwd(), 'data/system-config.json'), 'utf8');
-assert.match(configSnapshot, /"cTraderApiMode"\s*:\s*"(LIVE|DEMO)"/i, 'Persisted cTrader configuration must select LIVE or DEMO explicitly.');
+const configSnapshotPath = path.resolve(process.cwd(), 'data/system-config.json');
+// Operator config is created at runtime and is intentionally not committed.
+// When present, validate it; on a clean checkout validate the runtime default
+// through getCTraderApiMode() below instead of requiring a local settings file.
+if (fs.existsSync(configSnapshotPath)) {
+  const configSnapshot = fs.readFileSync(configSnapshotPath, 'utf8');
+  assert.match(configSnapshot, /"cTraderApiMode"\s*:\s*"(LIVE|DEMO)"/i, 'Persisted cTrader configuration must select LIVE or DEMO explicitly.');
+}
 const envExample = fs.readFileSync(path.resolve(process.cwd(), '.env.example'), 'utf8');
 assert.match(envExample, /CTRADER_LIVE_API_HOST/);
 assert.match(envExample, /CTRADER_DEMO_API_HOST/);
