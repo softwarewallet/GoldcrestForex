@@ -2,7 +2,7 @@ import { BrokerAdapter, LiveTradingGateResult, OrderRequest, NormalizedQuote } f
 import { brokerRegistry } from '../registry';
 import { killSwitch } from './KillSwitch';
 import { tradeValidator } from './TradeValidator';
-import { getSystemConfig } from '../../services/configService';
+import { getCTraderApiMode, getSystemConfig } from '../../services/configService';
 import { liveRuntimeLog } from '../../services/liveRuntimeLog';
 import { MartingaleRecoveryService } from '../../services/martingaleRecoveryService';
 
@@ -35,10 +35,14 @@ export class LiveTradingGate {
     const selectedBrokerEnvironment = adapter.broker === 'CTRADER'
       ? String((adapter as any).getConfigStatus?.()?.environment || adapter.environment).toUpperCase()
       : String(adapter.environment).toUpperCase();
-    const liveEnvironmentSelected = selectedBrokerEnvironment === 'LIVE'
-      && brokerRegistry.getEnvironment() === 'LIVE';
-    if (!liveEnvironmentSelected) {
-      failedReasons.push('Condition 1 Failed: Active environment is not LIVE.');
+    const expectedBrokerEnvironment = adapter.broker === 'CTRADER'
+      ? getCTraderApiMode()
+      : 'LIVE';
+    const selectedEnvironmentMatches = selectedBrokerEnvironment === expectedBrokerEnvironment;
+    if (!selectedEnvironmentMatches) {
+      failedReasons.push(
+        `Condition 1 Failed: Adapter environment ${selectedBrokerEnvironment} does not match selected broker mode ${expectedBrokerEnvironment}.`
+      );
     }
 
     // Check 2: Live broker connected
@@ -294,7 +298,7 @@ export class LiveTradingGate {
     return {
       passed,
       checks: {
-        liveEnvironmentSelected,
+        liveEnvironmentSelected: selectedEnvironmentMatches,
         liveBrokerConnected,
         accountValidated,
         tradingPermissionConfirmed,
