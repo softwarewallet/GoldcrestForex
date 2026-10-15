@@ -62,7 +62,9 @@ const LiveRuntimeLogSettings: React.FC = () => {
 
   useEffect(() => {
     void refresh();
-    const timer = window.setInterval(() => void refresh(), 5000);
+    // Audit-file inventory changes infrequently; avoid repeated directory scans
+    // every five seconds while an operator keeps Settings open.
+    const timer = window.setInterval(() => void refresh(), 30000);
     return () => window.clearInterval(timer);
   }, []);
 
