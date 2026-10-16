@@ -24,6 +24,7 @@ export interface PredictOptions {
   horizon?: PredictionHorizon;
   currentClose?: number;
   candles?: Array<{ open: number; high: number; low: number; close: number; timestamp: number; volume: number }>;
+  multiTimeframeCandles?: Record<string, Array<{ open: number; high: number; low: number; close: number; timestamp: number; volume: number }>>;
   currentTechnicalSignal?: {
     direction: string;
     score: number;
@@ -163,23 +164,34 @@ export class CombinedPredictionEngine {
     const vetoReasons: string[] = [];
 
     // 4.5 Quantitative Direction Engine & cTrader Native Indicator Layer Integration
-    const candleCloses = options.candles?.map(c => c.close) || [options.currentClose || 1.0];
-    const candleHighs = options.candles?.map(c => c.high) || [(options.currentClose || 1.0) + 0.0010];
-    const candleLows = options.candles?.map(c => c.low) || [(options.currentClose || 1.0) - 0.0010];
-    const candleVolumes = options.candles?.map(c => c.volume) || [100];
+    const cutoffCandles = (options.candles || []).filter(c => Number.isFinite(c.timestamp) && c.timestamp <= cutoffTimestamp);
+    const candleCloses = cutoffCandles.map(c => c.close);
+    const candleHighs = cutoffCandles.map(c => c.high);
+    const candleLows = cutoffCandles.map(c => c.low);
+    const candleVolumes = cutoffCandles.map(c => c.volume);
 
     const currentPriceVal = options.currentClose || (candleCloses.length > 0 ? candleCloses[candleCloses.length - 1] : 1.0);
+    const mtfData: Record<string, { closes: number[] }> = {};
+    for (const [timeframe, rows] of Object.entries(options.multiTimeframeCandles || {})) {
+      const closes = (rows || [])
+        .filter(row => Number.isFinite(row.timestamp) && row.timestamp <= cutoffTimestamp)
+        .sort((a, b) => a.timestamp - b.timestamp)
+        .map(row => row.close);
+      if (closes.length >= 20) mtfData[timeframe] = { closes };
+    }
 
     const quantDirection = DirectionFusionEngine.calculateQuantitativeDirection({
       pair,
       horizon,
-      closes: candleCloses.length >= 20 ? candleCloses : Array(25).fill(currentPriceVal),
-      highs: candleHighs.length >= 20 ? candleHighs : Array(25).fill(currentPriceVal + 0.0010),
-      lows: candleLows.length >= 20 ? candleLows : Array(25).fill(currentPriceVal - 0.0010),
-      volumes: candleVolumes.length >= 20 ? candleVolumes : Array(25).fill(100),
+      closes: candleCloses,
+      highs: candleHighs,
+      lows: candleLows,
+      volumes: candleVolumes,
+      mtfData,
       newsSentiment: news.relativeSentiment,
       newsImpactScore: news.marketImpactScore,
       highImpactActive: news.marketImpactScore > 0.6,
+      newsDataAvailable: news.relevantArticles > 0,
       spreadPips
     });
 
