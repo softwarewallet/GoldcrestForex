@@ -1287,118 +1287,47 @@ export async function fetchLiveCTraderQuote(
   isLive: boolean,
   digits: number
 ): Promise<CTraderMarketQuote> {
-  const quoteKey = `${isLive ? 'LIVE' : 'DEMO'}:${ctidTraderAccountId}:${symbolId}`;
-  const existing = inFlightSpotQuotes.get(quoteKey);
-  if (existing) return existing;
-
-  const work = withAuthenticatedAccount(
-    ctidTraderAccountId,
-    clientId,
-    clientSecret,
-    accessToken,
-    isLive,
-    async ws => {
-      const clientMsgId = `quote_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      let timer: NodeJS.Timeout | undefined;
-      let settled = false;
-      let onMsg: ((data: any) => void) | undefined;
-      // ProtoOASpotEvent is incremental: a frame can contain only bid OR ask.
-      // Accumulate both sides for this symbol instead of treating the first
-      // one-sided frame as a complete quote (which made every pair fail).
-      let latestBid: number | undefined;
-      let latestAsk: number | undefined;
-      let quoteTimestamp = Date.now();
-
-      const eventPromise = new Promise<CTraderMarketQuote>((resolve, reject) => {
-        const cleanup = () => {
-          if (timer) clearTimeout(timer);
-          if (onMsg) ws.off('message', onMsg);
-        };
-        onMsg = (data: any) => {
-          try {
-            const raw = typeof data === 'string' ? data : (data?.data ?? data).toString();
-            const msg = JSON.parse(raw);
-            // Ignore request errors emitted for other queued operations on this
-            // persistent WebSocket. Only a correlated rejection belongs to
-            // this spot subscription; uncorrelated errors must not fan out.
-            if (
-              msg.payloadType === MSG_ERROR_RES
-              && msg.clientMsgId === clientMsgId
-            ) {
-              settled = true;
-              cleanup();
-              reject(new Error(`cTrader quote error: ${JSON.stringify(msg.payload)}`));
-              return;
-            }
-            if (msg.payloadType !== MSG_SPOT_EVENT || Number(msg.payload?.symbolId) !== symbolId) return;
+  return withAuthenticatedAccount(ctidTraderAccountId, clientId, clientSecret, accessToken, isLive, async ws => {
+    const clientMsgId = `quote_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    return new Promise<CTraderMarketQuote>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`Timeout waiting for cTrader spot event for ${symbol}`)), 3000);
+      const onMsg = (data: any) => {
+        try {
+          const raw = typeof data === 'string' ? data : (data?.data ?? data).toString();
+          const msg = JSON.parse(raw);
+          if (msg.payloadType === MSG_ERROR_RES) {
+            clearTimeout(timer);
+            ws.off?.('message', onMsg);
+            reject(new Error(`cTrader quote error: ${JSON.stringify(msg.payload)}`));
+          }
+          if (msg.payloadType === MSG_SPOT_EVENT && Number(msg.payload?.symbolId) === symbolId) {
             const p = msg.payload;
-            if (p.bid !== undefined) {
-              const bid = priceFromRelative(Number(p.bid), digits);
-              if (Number.isFinite(bid) && bid > 0) latestBid = bid;
-            }
-            if (p.ask !== undefined) {
-              const ask = priceFromRelative(Number(p.ask), digits);
-              if (Number.isFinite(ask) && ask > 0) latestAsk = ask;
-            }
-            if (p.timestamp !== undefined && Number.isFinite(Number(p.timestamp)) && Number(p.timestamp) > 0) {
-              quoteTimestamp = Number(p.timestamp);
-            }
-            // Wait for both sides; one-sided spot updates are normal on cTrader.
-            if (latestBid === undefined || latestAsk === undefined) return;
-            if (latestAsk < latestBid) return;
-            settled = true;
-            cleanup();
+            if (p.bid === undefined && p.ask === undefined) return;
+            clearTimeout(timer);
+            ws.off?.('message', onMsg);
             resolve({
               symbol,
               symbolId,
-              bid: latestBid,
-              ask: latestAsk,
-              timestamp: quoteTimestamp,
+              bid: p.bid === undefined ? undefined : priceFromRelative(Number(p.bid), digits),
+              ask: p.ask === undefined ? undefined : priceFromRelative(Number(p.ask), digits),
+              timestamp: p.timestamp ? Number(p.timestamp) : Date.now(),
               status: 'FRESH'
             });
-          } catch {}
-        };
-        ws.on('message', onMsg);
-      });
-
-      try {
-        // Pace the outbound subscription request through the same per-socket
-        // queue used by historical, account and order requests. The queue slot
-        // ends after send; the spot event is awaited separately.
-        await queueWsRequest(ws, async () => {
-          timer = setTimeout(() => {
-            if (settled) return;
-            settled = true;
-            if (onMsg) ws.off('message', onMsg);
-          }, 5000);
-          ws.send(JSON.stringify({
-            clientMsgId,
-            payloadType: MSG_SUBSCRIBE_SPOTS_REQ,
-            payload: {
-              ctidTraderAccountId,
-              symbolId: [symbolId],
-              subscribeToSpotTimestamp: true
-            }
-          }));
-        });
-        return await Promise.race([
-          eventPromise,
-          new Promise<CTraderMarketQuote>((_resolve, reject) => {
-            setTimeout(() => reject(new Error(`Timeout waiting for cTrader spot event for ${symbol}`)), 5500).unref?.();
-          })
-        ]);
-      } catch (error) {
-        if (timer) clearTimeout(timer);
-        if (onMsg) ws.off('message', onMsg);
-        throw error;
-      }
-    }
-  ).finally(() => {
-    if (inFlightSpotQuotes.get(quoteKey) === work) inFlightSpotQuotes.delete(quoteKey);
+          }
+        } catch {}
+      };
+      ws.on('message', onMsg);
+      ws.send(JSON.stringify({
+        clientMsgId,
+        payloadType: MSG_SUBSCRIBE_SPOTS_REQ,
+        payload: {
+          ctidTraderAccountId,
+          symbolId: [symbolId],
+          subscribeToSpotTimestamp: true
+        }
+      }));
+    });
   });
-
-  inFlightSpotQuotes.set(quoteKey, work);
-  return work;
 }
 
 export async function fetchCTraderTrendbars(
