@@ -4,6 +4,7 @@ import { BrokerAccountInfo, TradingEnvironment } from '../../types';
 import { getCTraderApiMode } from '../../../services/configService';
 import { recordTradeRequest, recordTradeResult } from '../../../services/tradeAuditLog';
 import { webSocketManager, ConnectionKey } from '../../../services/webSocketManager';
+import { CTraderRequestQueue, CTraderRequestRateClass } from './requestQueue';
 
 export interface CTraderRawAccount {
   ctidTraderAccountId: number;
@@ -653,89 +654,61 @@ function getPayloadTypeName(payloadType: number): string {
   return names[payloadType] || `Type ${payloadType}`;
 }
 
-interface WsQueuedRequest {
-  priority: number;
-  sequence: number;
-  enqueuedAt: number;
-  task: () => Promise<unknown>;
-  resolve: (value: unknown) => void;
-  reject: (reason?: unknown) => void;
-}
+const wsConnectionState = new WeakMap<WebSocket, CTraderRequestQueue>();
 
-interface WsConnectionRequestQueueState {
-  pending: WsQueuedRequest[];
-  draining: boolean;
-  sequence: number;
-  lastRequestTimestamp: number;
-  cooldownUntil: number;
-}
-
-const wsConnectionState = new WeakMap<WebSocket, WsConnectionRequestQueueState>();
-// Preserve cTrader's request-rate limit while preventing long historical-candle
-// backlogs from delaying quotes and orders. FIFO ordering is retained within a priority.
-const MIN_REQUEST_INTERVAL_MS = Math.max(
-  750,
-  Number(process.env.CTRADER_MIN_REQUEST_INTERVAL_MS || 1000)
+// cTrader allows up to 50 non-historical requests/sec and 5 historical
+// requests/sec per connection. Keep headroom below those documented limits.
+// Request acknowledgements are handled concurrently; the queue paces outbound
+// dispatch instead of holding the queue slot until a potentially slow response.
+const CTRADER_STANDARD_REQUEST_INTERVAL_MS = Math.max(
+  20,
+  Number(process.env.CTRADER_STANDARD_REQUEST_INTERVAL_MS || 25)
+);
+const CTRADER_HISTORICAL_REQUEST_INTERVAL_MS = Math.max(
+  200,
+  Number(process.env.CTRADER_HISTORICAL_REQUEST_INTERVAL_MS || 220)
 );
 
 function getCTraderRequestPriority(payloadType: number): number {
   if ([MSG_NEW_ORDER_REQ, MSG_CANCEL_ORDER_REQ, MSG_AMEND_ORDER_REQ, MSG_AMEND_POSITION_SLTP_REQ, MSG_CLOSE_POSITION_REQ].includes(payloadType)) return 100;
-  if (payloadType === MSG_SUBSCRIBE_SPOTS_REQ) return 90;
+  if ([MSG_SUBSCRIBE_SPOTS_REQ, MSG_UNSUBSCRIBE_SPOTS_REQ].includes(payloadType)) return 90;
   if ([MSG_RECONCILE_REQ, MSG_ORDER_DETAILS_REQ, MSG_DEAL_LIST_REQ].includes(payloadType)) return 75;
   if ([MSG_GET_ACCOUNTS_REQ, MSG_TRADER_REQ, MSG_SYMBOLS_LIST_REQ].includes(payloadType)) return 50;
   if (payloadType === MSG_GET_TRENDBARS_REQ) return 10;
   return 40;
 }
 
-async function drainWsQueue(state: WsConnectionRequestQueueState): Promise<void> {
-  if (state.draining) return;
-  state.draining = true;
-  try {
-    while (state.pending.length > 0) {
-      state.pending.sort((a, b) => b.priority - a.priority || a.sequence - b.sequence);
-      const entry = state.pending.shift()!;
-      const requiredAt = Math.max(state.lastRequestTimestamp + MIN_REQUEST_INTERVAL_MS, state.cooldownUntil);
-      const waitMs = Math.max(0, requiredAt - Date.now());
-      if (waitMs > 0) await new Promise(resolve => setTimeout(resolve, waitMs));
-      state.lastRequestTimestamp = Date.now();
-
-      const queueWaitMs = state.lastRequestTimestamp - entry.enqueuedAt;
-      if (queueWaitMs >= 5000) {
-        console.warn(`[cTrader] Request waited ${queueWaitMs}ms in queue (priority=${entry.priority}, pending=${state.pending.length}).`);
-      }
-      try {
-        entry.resolve(await entry.task());
-      } catch (error: any) {
-        const message = String(error?.message || error);
-        if (/BLOCKED_PAYLOAD_TYPE|RATE_LIMIT_EXCEEDED|TOO_MANY_REQUESTS|rate limit|too many requests/i.test(message)) {
-          state.cooldownUntil = Math.max(state.cooldownUntil, Date.now() + 5000);
-        }
-        entry.reject(error);
-      }
-    }
-  } finally {
-    state.draining = false;
-    if (state.pending.length > 0) void drainWsQueue(state);
-  }
+function getCTraderRequestRateClass(payloadType: number): CTraderRequestRateClass {
+  return payloadType === MSG_GET_TRENDBARS_REQ ? 'HISTORICAL' : 'STANDARD';
 }
 
-function queueWsRequest<T>(ws: WebSocket, task: () => Promise<T>, priority = 40): Promise<T> {
-  let state = wsConnectionState.get(ws);
-  if (!state) {
-    state = { pending: [], draining: false, sequence: 0, lastRequestTimestamp: 0, cooldownUntil: 0 };
-    wsConnectionState.set(ws, state);
-  }
-  return new Promise<T>((resolve, reject) => {
-    state!.pending.push({
-      priority,
-      sequence: state!.sequence++,
-      enqueuedAt: Date.now(),
-      task: task as () => Promise<unknown>,
-      resolve: value => resolve(value as T),
-      reject
+function getWsRequestQueue(ws: WebSocket): CTraderRequestQueue {
+  let queue = wsConnectionState.get(ws);
+  if (!queue) {
+    queue = new CTraderRequestQueue({
+      standardIntervalMs: CTRADER_STANDARD_REQUEST_INTERVAL_MS,
+      historicalIntervalMs: CTRADER_HISTORICAL_REQUEST_INTERVAL_MS,
+      cooldownMs: 5000,
+      onSlowRequest: (queueWaitMs, priority, pending) => {
+        console.warn(`[cTrader] Request waited ${queueWaitMs}ms in queue (priority=${priority}, pending=${pending}).`);
+      }
     });
-    void drainWsQueue(state!);
-  });
+    wsConnectionState.set(ws, queue);
+  }
+  return queue;
+}
+
+function queueWsRequest<T>(
+  ws: WebSocket,
+  task: () => Promise<T>,
+  priority = 40,
+  rateClass: CTraderRequestRateClass = 'STANDARD'
+): Promise<T> {
+  return getWsRequestQueue(ws).enqueue(task, priority, rateClass);
+}
+
+function applyWsRequestCooldown(ws: WebSocket, cooldownMs: number): void {
+  getWsRequestQueue(ws).applyCooldown(cooldownMs);
 }
 
 function sendAndAwait(
@@ -748,7 +721,8 @@ function sendAndAwait(
   return queueWsRequest(
     ws,
     () => sendAndAwaitUnqueued(ws, payloadType, payload, expectedPayloadType, timeoutMs, 1),
-    getCTraderRequestPriority(payloadType)
+    getCTraderRequestPriority(payloadType),
+    getCTraderRequestRateClass(payloadType)
   );
 }
 
@@ -807,8 +781,14 @@ function sendAndAwaitUnqueued(
               : 2000;
             const retryAfter = Math.max(1500, baseRetry) * Math.pow(2, attempt - 1) + Math.random() * 500;
             console.warn(`[cTrader] Rate limited (${msg.payloadType} / ${errorCode || '2142'}). Cooling down ${Math.round(retryAfter)}ms before retry ${attempt + 1}/4.`);
+            applyWsRequestCooldown(ws, retryAfter);
             setTimeout(() => {
-              sendAndAwaitUnqueued(ws, payloadType, payload, expectedPayloadType, timeoutMs, attempt + 1).then(resolve).catch(reject);
+              queueWsRequest(
+                ws,
+                () => sendAndAwaitUnqueued(ws, payloadType, payload, expectedPayloadType, timeoutMs, attempt + 1),
+                getCTraderRequestPriority(payloadType),
+                getCTraderRequestRateClass(payloadType)
+              ).then(resolve).catch(reject);
             }, retryAfter);
           } else {
             reject(new Error(`cTrader API error (${msg.payloadType}): ${JSON.stringify(msg.payload)}`));
@@ -843,16 +823,41 @@ async function withAuthenticatedAccount<T>(
   const ws = await webSocketManager.getConnection(key, async () => {
     const ws = new WebSocket(key.endpoint, { headers: { 'User-Agent': 'Goldcrest-Trading-Bot/1.3.0' } });
     ws.setMaxListeners(200);
-    await new Promise<void>((resolve, reject) => {
-      ws.once('open', resolve);
-      ws.once('error', reject);
-      setTimeout(() => reject(new Error('Timeout')), 30000);
-    });
-    
-    // Auth
-    await sendAndAwait(ws, MSG_APP_AUTH_REQ, { clientId, clientSecret }, MSG_APP_AUTH_RES);
-    await sendAndAwait(ws, MSG_ACC_AUTH_REQ, { ctidTraderAccountId: accountId, accessToken }, MSG_ACC_AUTH_RES);
-    return ws;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const finish = (error?: Error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          ws.off('open', onOpen);
+          ws.off('error', onError);
+          ws.off('close', onClose);
+          if (error) reject(error);
+          else resolve();
+        };
+        const onOpen = () => finish();
+        const onError = (error: Error) => finish(error);
+        const onClose = (code: number, reason: Buffer) => finish(new Error(
+          'cTrader WebSocket closed before opening (' + code + '): ' + reason.toString()
+        ));
+        const timer = setTimeout(
+          () => finish(new Error('Timeout connecting to cTrader host: ' + key.endpoint)),
+          10000
+        );
+        ws.once('open', onOpen);
+        ws.once('error', onError);
+        ws.once('close', onClose);
+      });
+
+      // Authorize the app and selected account before exposing the socket.
+      await sendAndAwait(ws, MSG_APP_AUTH_REQ, { clientId, clientSecret }, MSG_APP_AUTH_RES);
+      await sendAndAwait(ws, MSG_ACC_AUTH_REQ, { ctidTraderAccountId: accountId, accessToken }, MSG_ACC_AUTH_RES);
+      return ws;
+    } catch (error) {
+      safeCloseSocket(ws);
+      throw error;
+    }
   });
 
   return await fn(ws);
