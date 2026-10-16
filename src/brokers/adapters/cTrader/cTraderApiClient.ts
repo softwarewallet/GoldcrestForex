@@ -1414,6 +1414,27 @@ const CTRADER_SPOT_QUOTE_TIMEOUT_MS = 5500;
 const CTRADER_SPOT_CACHE_FRESH_MS = 2500;
 const CTRADER_SPOT_SUBSCRIPTION_ACK_TIMEOUT_MS = 7000;
 
+export type CTraderSpotSubscriptionRecoveryMode = 'SUCCESS' | 'SPLIT_RETRY' | 'FAIL';
+
+/**
+ * ALREADY_SUBSCRIBED means cTrader has an active spot subscription. For batches,
+ * retry individually so one already-active symbol cannot hide missing symbols.
+ * A timed-out batch is also ambiguous: the broker may have applied it despite a
+ * missing acknowledgement, so reconcile it one symbol at a time rather than
+ * blindly marking all symbols subscribed or immediately discarding quote waiters.
+ */
+export function getCTraderSpotSubscriptionRecoveryMode(
+  action: 'SUBSCRIBE' | 'UNSUBSCRIBE',
+  symbolCount: number,
+  errorCode: string
+): CTraderSpotSubscriptionRecoveryMode {
+  if (action !== 'SUBSCRIBE') return 'FAIL';
+  const code = String(errorCode || '').trim().toUpperCase();
+  if (code === 'ALREADY_SUBSCRIBED') return symbolCount > 1 ? 'SPLIT_RETRY' : 'SUCCESS';
+  if (code === 'ACK_TIMEOUT' && symbolCount > 1) return 'SPLIT_RETRY';
+  return 'FAIL';
+}
+
 function rejectCTraderSpotWaiters(state: CTraderSpotStreamState, symbolId: number, error: Error): void {
   const waiters = state.waiters.get(symbolId);
   if (!waiters) return;
@@ -1457,6 +1478,42 @@ function settleCTraderSpotSubscription(state: CTraderSpotStreamState, clientMsgI
   if (error) request.reject(error);
   else request.resolve();
 }
+function retryCTraderSpotSubscriptionIndividually(
+  ws: WebSocket,
+  state: CTraderSpotStreamState,
+  clientMsgId: string,
+  reason: string
+): void {
+  const request = state.requests.get(clientMsgId);
+  if (!request || request.action !== 'SUBSCRIBE' || request.symbolIds.length <= 1) return;
+
+  state.requests.delete(clientMsgId);
+  if (request.timer) clearTimeout(request.timer);
+  for (const symbolId of request.symbolIds) {
+    state.requestedSymbolIds.delete(symbolId);
+    state.confirmedSymbolIds.delete(symbolId);
+    if (state.subscriptionPromises.get(symbolId) === request.promise) {
+      state.subscriptionPromises.delete(symbolId);
+    }
+  }
+
+  console.warn(
+    '[cTrader] Reconciling uncertain spot-subscription batch individually (' +
+    request.symbolIds.length + ' symbols): ' + reason
+  );
+
+  // Retry sequentially through the per-connection queue. Individual
+  // ALREADY_SUBSCRIBED responses will be treated as successful for that symbol;
+  // other symbols still need their own affirmative response.
+  void Promise.all(
+    request.symbolIds.map(symbolId =>
+      sendCTraderSpotSubscriptionBatch(ws, state, [symbolId], 'SUBSCRIBE')
+    )
+  ).then(() => request.resolve()).catch(error => request.reject(
+    error instanceof Error ? error : new Error(String(error))
+  ));
+}
+
 function failCTraderSpotStream(state: CTraderSpotStreamState, error: Error): void {
   for (const clientMsgId of [...state.requests.keys()]) settleCTraderSpotSubscription(state, clientMsgId, error);
   for (const symbolId of [...state.waiters.keys()]) rejectCTraderSpotWaiters(state, symbolId, error);
@@ -1493,11 +1550,33 @@ function getOrCreateCTraderSpotStream(ws: WebSocket, accountId: number): CTrader
         return;
       }
       if (msg.payloadType === MSG_ERROR_RES && clientMsgId && state.requests.has(clientMsgId)) {
+        const request = state.requests.get(clientMsgId)!;
+        const payload = msg.payload || {};
+        const errorCode = String(payload.errorCode || '').trim().toUpperCase();
+        const recoveryMode = getCTraderSpotSubscriptionRecoveryMode(
+          request.action,
+          request.symbolIds.length,
+          errorCode
+        );
+        if (recoveryMode === 'SUCCESS') {
+          // cTrader confirms this symbol is already actively subscribed.
+          settleCTraderSpotSubscription(state, clientMsgId);
+          return;
+        }
+        if (recoveryMode === 'SPLIT_RETRY') {
+          retryCTraderSpotSubscriptionIndividually(
+            ws,
+            state,
+            clientMsgId,
+            'broker error ' + errorCode
+          );
+          return;
+        }
         settleCTraderSpotSubscription(
           state,
           clientMsgId,
-          new Error('cTrader ' + state.requests.get(clientMsgId)!.action.toLowerCase() +
-            ' spot request rejected: ' + JSON.stringify(msg.payload || {}))
+          new Error('cTrader ' + request.action.toLowerCase() +
+            ' spot request rejected: ' + JSON.stringify(payload))
         );
         return;
       }
@@ -1592,12 +1671,16 @@ async function sendCTraderSpotSubscriptionBatch(
   const request: CTraderSpotSubscriptionRequest = {
     action, symbolIds, resolve: resolveRequest, reject: rejectRequest, timer: null, promise
   };
-  request.timer = setTimeout(() => settleCTraderSpotSubscription(
-    state,
-    clientMsgId,
-    new Error('Timed out waiting for cTrader spot-' + action.toLowerCase() +
-      ' acknowledgement for ' + symbolIds.length + ' symbols.')
-  ), CTRADER_SPOT_SUBSCRIPTION_ACK_TIMEOUT_MS);
+  request.timer = setTimeout(() => {
+    const timeoutMessage = 'Timed out waiting for cTrader spot-' + action.toLowerCase() +
+      ' acknowledgement for ' + symbolIds.length + ' symbols.';
+    const recoveryMode = getCTraderSpotSubscriptionRecoveryMode(action, symbolIds.length, 'ACK_TIMEOUT');
+    if (recoveryMode === 'SPLIT_RETRY') {
+      retryCTraderSpotSubscriptionIndividually(ws, state, clientMsgId, timeoutMessage);
+      return;
+    }
+    settleCTraderSpotSubscription(state, clientMsgId, new Error(timeoutMessage));
+  }, CTRADER_SPOT_SUBSCRIPTION_ACK_TIMEOUT_MS);
   state.requests.set(clientMsgId, request);
 
   if (action === 'SUBSCRIBE') {
