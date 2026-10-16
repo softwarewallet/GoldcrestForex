@@ -1,0 +1,87 @@
+name: Protect Auto Live and Trade Execution
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited, labeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  protect-execution-surface:
+    name: Require operator approval for locked execution paths
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Enforce Auto Live execution lock
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          APPROVED_LABEL: operator-approved-auto-live-change
+        run: |
+          set -euo pipefail
+          git fetch origin "${BASE_REF}"
+          changed_files="$(git diff --name-only "origin/${BASE_REF}...HEAD")"
+
+          protected_paths=(
+            "server.ts"
+            "src/services/autoTradingService.ts"
+            "src/services/autoLiveMarketDataSession.ts"
+            "src/services/tradeContinuityService.ts"
+            "src/services/reconciliationService.ts"
+            "src/services/executionReconciliationService.ts"
+            "src/markets/forex/provider.ts"
+            "src/markets/forex/signalEngine.ts"
+            "src/brokers/safety/AutoExecutionEngine.ts"
+            "src/brokers/safety/AutoTradeReadiness.ts"
+            "src/brokers/safety/LiveTradingGate.ts"
+            "src/brokers/safety/TradeValidator.ts"
+            "src/brokers/safety/TradeSizing.ts"
+            "src/brokers/safety/KillSwitch.ts"
+            "src/brokers/adapters/cTrader/CTraderBrokerAdapter.ts"
+            "src/brokers/adapters/cTrader/CTraderLiveAdapter.ts"
+            "src/brokers/adapters/cTrader/cTraderApiClient.ts"
+            "src/brokers/adapters/cTrader/requestQueue.ts"
+            "test/test_auto_trading_orchestrator.ts"
+            "test/test_auto_trade_readiness.ts"
+            "test/test_live_only_audit.ts"
+            "test/test_local_auto_live_arm.ts"
+            "test/test_ctrader_request_queue.ts"
+            "test/test_ctrader_batched_spot_quotes.ts"
+            "test/test_auto_live_market_data_gate.ts"
+          )
+
+          protected_changes=()
+          while IFS= read -r file; do
+            [[ -z "${file}" ]] && continue
+            for protected_path in "${protected_paths[@]}"; do
+              if [[ "${file}" == "${protected_path}" ]]; then
+                protected_changes+=("${file}")
+                break
+              fi
+            done
+          done <<< "${changed_files}"
+
+          if (( ${#protected_changes[@]} == 0 )); then
+            echo "No locked Auto Live or trade-execution files changed."
+            exit 0
+          fi
+
+          printf 'Detected changes to locked execution paths:\n'
+          printf ' - %s\n' "${protected_changes[@]}"
+
+          if [[ ",${PR_LABELS}," == *",${APPROVED_LABEL},"* ]]; then
+            echo "Explicit operator-approval label is present; protected-path CI check permits review to continue."
+            exit 0
+          fi
+
+          echo "::error::Auto Live and trade-execution paths are locked. Do not modify these files unless the operator explicitly requests the change."
+          echo "::error::To authorize a requested change, apply the PR label: ${APPROVED_LABEL}"
+          exit 1
