@@ -589,6 +589,9 @@ export const TradingControlCenter: React.FC<TradingControlCenterProps> = ({
   const toggleAutoTrading = useCallback(async () => {
     setAutoTradingBusy(true);
     setAutoTradingControlError(null);
+    // Release low-priority dashboard telemetry connections before issuing the
+    // control-plane request. The backend start/stop operation remains unchanged.
+    window.dispatchEvent(new Event('goldcrest:autolive-control-priority'));
     try {
       const shouldStop = ['RUNNING', 'PREPARING'].includes(autoTradingStatus?.state);
       const res = await fetchWithTimeout(shouldStop ? '/api/auto-trading/stop' : '/api/auto-trading/start', {
