@@ -19,6 +19,7 @@
     "test:exp_2026_research_004": "tsx test/test_exp_2026_research_004.ts",
     "test:exp_2026_research_008": "tsx test/test_exp_2026_research_008.ts",
     "test:direction_engine": "tsx test/test_quantitative_direction_engine.ts",
+    "test:prediction_confluence": "tsx test/test_prediction_confluence.ts",
     "test:native_indicators": "tsx test/test_ctrader_native_indicators.ts",
     "test:phase39_validation": "tsx test/test_phase39_empirical_validation.ts",
     "test:phase40_validation": "tsx test/test_phase40_extended_shadow_validation.ts",
