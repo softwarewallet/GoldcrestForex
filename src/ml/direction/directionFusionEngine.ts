@@ -45,6 +45,7 @@ export interface FusionInputOptions {
   spreadPips?: number;
   /** Explicitly indicate whether pair-relative news articles survived freshness/relevance filtering. */
   newsDataAvailable?: boolean;
+  pipSize?: number;
   championPrediction?: { direction: string; probability: number };
 }
 
@@ -71,7 +72,7 @@ export class DirectionFusionEngine {
       && volumes.length >= closes.length
       && volumes.some(value => Number.isFinite(value) && value > 0);
     const vwap = hasUsableVolume
-      ? VolumeOrderFlowEngine.evaluateVWAP(closes, highs, lows, volumes)
+      ? VolumeOrderFlowEngine.evaluateVWAP(closes, highs, lows, volumes, options.pipSize ?? (pair.includes('JPY') ? 0.01 : pair === 'XAU/USD' ? 0.1 : 0.0001))
       : unavailableComponent('VolumeOrderFlowEngine', 'Genuine price and tick-volume history is insufficient for VWAP evidence.');
     const obi = OrderBookEngine.evaluateOrderBook(options.bidVolume, options.askVolume);
 
@@ -84,7 +85,7 @@ export class DirectionFusionEngine {
     const news = newsSupplied
       ? NewsRiskEngine.evaluateNews(options.newsSentiment, options.newsImpactScore, options.highImpactActive)
       : unavailableComponent('NewsRiskEngine', 'No fresh pair-relative news evidence was supplied.');
-    const mtf = MultiTimeframeEngine.evaluateMTF(options.mtfData || {});
+    const mtf = MultiTimeframeEngine.evaluateMTF(options.mtfData || {}, options.pipSize ?? (pair.includes('JPY') ? 0.01 : pair === 'XAU/USD' ? 0.1 : 0.0001));
 
     // MLDirectionEngine is currently a hand-weighted sigmoid, not a trained
     // calibrated model; its former fixed RSI/ADX/DI inputs are deliberately not
