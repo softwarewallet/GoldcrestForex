@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Server, ShieldCheck, RefreshCw, CheckCircle2, XCircle, Lock, Database, DollarSign, IndianRupee, Sliders } from 'lucide-react';
 import { BrokerCredentialStatus, BrokerType, TradingEnvironment, ConnectionTestResult } from '../brokers/types';
+import { FOREX_PAIRS } from '../markets/forex/instruments';
 import { AutoLiveSchedulerPanel } from './AutoLiveSchedulerPanel';
 import { AutoLiveSchedulerConfig } from '../services/schedulerUtils';
 import { CTraderDemoConfigStatus } from './CTraderDemoConfigStatus';
@@ -142,7 +143,7 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
         if (Number.isFinite(Number(config.dailyProfitTargetUsd))) {
           setDailyProfitTargetUsd(Number(config.dailyProfitTargetUsd));
         }
-        if (Array.isArray(config.autoLiveForexPairs) && config.autoLiveForexPairs.length > 0) {
+        if (Array.isArray(config.autoLiveForexPairs)) {
           setAutoLiveForexPairs(config.autoLiveForexPairs);
         }
         if (Array.isArray(config.autoLiveIndianUnderlyings)) {
@@ -700,7 +701,7 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
                 {pairMessage && <div className="text-[10px] text-cyan-300 font-mono mb-2">{pairMessage}</div>}
 
                 <div className="grid sm:grid-cols-2 gap-2">
-                  {['EUR/USD','GBP/USD','USD/JPY','USD/CHF','AUD/USD','USD/CAD','NZD/USD','EUR/GBP','EUR/JPY','GBP/JPY','AUD/JPY','EUR/AUD','GBP/AUD','XAU/USD'].map(pair => {
+                  {FOREX_PAIRS.map(pair => {
                     const checked = autoLiveForexPairs.includes(pair);
                     const isPending = pendingPairToggle === pair;
                     return (
