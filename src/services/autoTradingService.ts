@@ -15,6 +15,7 @@ import { BrokerAdapter, NormalizedQuote, OrderRequest } from '../brokers/types';
 import { liveRuntimeLog, tradeAuditLog } from './liveRuntimeLog';
 import { tradeContinuityService } from './tradeContinuityService';
 import { calculateForexPipTargets, normalizePriceToThreeDigits, sizeForexOrderToMaxTradeValue } from '../brokers/safety/TradeSizing';
+import type { ForexSignal } from '../markets/forex/types';
 
 const LIVE_QUOTE_MAX_AGE_MS = 30_000;
 
@@ -89,6 +90,59 @@ export interface AutoTradingExecutionStatus {
   updatedAt: number;
 }
 
+export interface AutoLiveSignalSnapshot {
+  id: string;
+  timestamp: number;
+  market: 'FOREX';
+  instrument: string;
+  direction: 'BUY' | 'SELL' | 'NO_TRADE';
+  rawDirection: ForexSignal['direction'];
+  strategy: string;
+  score: number;
+  mlProbability: number;
+  entryZone: { min: number; max: number; preferred: number };
+  stopLoss?: number;
+  target1?: number;
+  signalStatus: ForexSignal['status'];
+  hasTradePlan: boolean;
+  reasons: string[];
+  evaluationStatus?: string;
+  evaluationReason?: string;
+}
+
+/** Normalize the exact signal produced by Auto Live for the cockpit API. */
+export function mapAutoLiveSignalForCockpit(
+  signal: Pick<ForexSignal, 'id' | 'timestamp' | 'pair' | 'direction' | 'strategyVersion' | 'score' | 'mlProbability' | 'tradePlan' | 'status' | 'reasons'>
+): AutoLiveSignalSnapshot {
+  const plan = signal.tradePlan;
+  const direction: AutoLiveSignalSnapshot['direction'] = signal.direction.includes('BUY')
+    ? 'BUY'
+    : signal.direction.includes('SELL')
+      ? 'SELL'
+      : 'NO_TRADE';
+  return {
+    id: signal.id,
+    timestamp: Number(signal.timestamp) || Date.now(),
+    market: 'FOREX',
+    instrument: signal.pair,
+    direction,
+    rawDirection: signal.direction,
+    strategy: signal.strategyVersion || 'Auto Live Forex Signal Engine',
+    score: Number(signal.score) || 0,
+    mlProbability: signal.mlProbability == null ? 0 : Number(signal.mlProbability),
+    entryZone: {
+      min: Number(plan?.entryMin) || 0,
+      max: Number(plan?.entryMax) || 0,
+      preferred: Number(plan?.entryPreferred) || 0
+    },
+    stopLoss: plan ? Number(plan.stopLoss) || undefined : undefined,
+    target1: plan ? Number(plan.takeProfit1?.targetPrice) || undefined : undefined,
+    signalStatus: signal.status,
+    hasTradePlan: Boolean(plan),
+    reasons: Array.isArray(signal.reasons) ? [...signal.reasons] : []
+  };
+}
+
 export interface AutoTradingStatus {
   state: AutoTradingState;
   enabledByEnvironment: boolean;
@@ -101,6 +155,7 @@ export interface AutoTradingStatus {
   indianUnderlyings: string[];
   lastCycleAt: number | null;
   lastCycleResult: string | null;
+  cycleSignals: AutoLiveSignalSnapshot[];
   lastActions: Array<{
     pair: string;
     result: string;
@@ -130,6 +185,7 @@ class AutoTradingService {
   private lastCycleAt: number | null = null;
   private lastCycleResult: string | null = null;
   private lastActions: AutoTradingStatus['lastActions'] = [];
+  private cycleSignals: AutoLiveSignalSnapshot[] = [];
   private lastPreOpenPreparedAt: number | null = null;
   private preOpenTrendPairsEvaluated = 0;
   private preOpenNews: LiveNewsSnapshot | null = null;
@@ -251,6 +307,17 @@ class AutoTradingService {
       indianUnderlyings: [...getSystemConfig().autoLiveIndianUnderlyings],
       lastCycleAt: this.lastCycleAt,
       lastCycleResult: this.lastCycleResult,
+      cycleSignals: this.cycleSignals.map(signal => {
+        const action = this.lastActions.find(item => item.signalId === signal.id)
+          || this.lastActions.find(item => item.pair === signal.instrument);
+        return {
+          ...signal,
+          evaluationStatus: action?.result || (
+            signal.direction === 'NO_TRADE' ? 'NO_TRADE' : signal.hasTradePlan ? 'EVALUATING' : 'NO_PLAN'
+          ),
+          evaluationReason: action?.reason || signal.reasons.join('; ')
+        };
+      }),
       lastActions: [...this.lastActions],
       marketGate: getAutoLiveMarketGate(),
       currentExecution: { ...this.currentExecution },
@@ -709,6 +776,7 @@ class AutoTradingService {
 
     this.lastCycleAt = Date.now();
     this.lastActions = [];
+    this.cycleSignals = [];
     this.setExecutionStatus({
       stage: 'SCANNING_MARKET',
       pair: null,
@@ -929,6 +997,23 @@ class AutoTradingService {
       const signalStartedAt = Date.now();
       liveRuntimeLog('INFO', 'AUTO_LIVE_SIGNAL_GENERATION_STARTED', { pair });
       const signal = await this.signalEngine.generateSignal(pair);
+      const cockpitSignal = mapAutoLiveSignalForCockpit(signal);
+      // Capture the signal from the same engine Auto Live uses for execution.
+      // The standalone /api/signals scanner is intentionally suppressed while
+      // Auto Live owns the broker queue, so the cockpit must read this feed.
+      this.cycleSignals = [
+        ...this.cycleSignals.filter(item => item.instrument !== pair),
+        cockpitSignal
+      ];
+      liveRuntimeLog('INFO', 'AUTO_LIVE_COCKPIT_SIGNAL_CAPTURED', {
+        pair,
+        signalId: cockpitSignal.id,
+        direction: cockpitSignal.direction,
+        rawDirection: cockpitSignal.rawDirection,
+        score: cockpitSignal.score,
+        hasTradePlan: cockpitSignal.hasTradePlan,
+        cycleSignalCount: this.cycleSignals.length
+      });
       liveRuntimeLog('INFO', 'AUTO_LIVE_SIGNAL_GENERATION_FINISHED', {
         pair, durationMs: Date.now() - signalStartedAt, signalId: signal.id,
         direction: signal.direction, score: signal.score, status: signal.status,

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { autoTradingService, mapWithConcurrency } from '../src/services/autoTradingService';
+import { autoTradingService, mapWithConcurrency, mapAutoLiveSignalForCockpit } from '../src/services/autoTradingService';
 import { LIVE_AUTO_EXECUTION_ALLOWED, refreshAutonomousExecutionPermission } from '../src/brokers/safety/AutoExecutionEngine';
 import { getSystemConfig, updateSystemConfig } from '../src/services/configService';
 
@@ -69,5 +69,57 @@ const concurrencyResults = await mapWithConcurrency([1, 2, 3, 4, 5], 2, async it
 });
 assert.deepEqual(concurrencyResults, [2, 4, 6, 8, 10]);
 assert.ok(maxActiveWorkers <= 2, `expected at most 2 concurrent workers; observed ${maxActiveWorkers}`);
+
+const mappedAutoLiveSignal = mapAutoLiveSignalForCockpit({
+  id: 'signal-usdcad-test',
+  timestamp: 1_800_000_000_000,
+  pair: 'USD/CAD',
+  direction: 'STRONG_BUY',
+  strategyVersion: 'fx_structure_v2a',
+  score: 82,
+  mlProbability: 0.73,
+  status: 'WAITING_FOR_ENTRY',
+  reasons: ['Bullish structure'],
+  tradePlan: {
+    entryMin: 1.35,
+    entryMax: 1.351,
+    entryPreferred: 1.3505,
+    entryType: 'PULLBACK_ENTRY',
+    entryCondition: 'Confirm pullback',
+    stopLoss: 1.345,
+    stopLossReason: 'Below structure',
+    takeProfit1: { targetPrice: 1.36, targetReason: 'R multiple', expectedR: 2 },
+    takeProfit2: { targetPrice: 1.365, targetReason: 'Extension', expectedR: 3 },
+    takeProfit3: { targetPrice: 1.37, targetReason: 'Extension', expectedR: 4 },
+    riskDistancePips: 55,
+    rewardDistancePips: 95,
+    riskReward: 1.73,
+    isValid: true
+  }
+});
+assert.equal(mappedAutoLiveSignal.instrument, 'USD/CAD');
+assert.equal(mappedAutoLiveSignal.direction, 'BUY');
+assert.equal(mappedAutoLiveSignal.rawDirection, 'STRONG_BUY');
+assert.equal(mappedAutoLiveSignal.score, 82);
+assert.equal(mappedAutoLiveSignal.hasTradePlan, true);
+assert.equal(mappedAutoLiveSignal.stopLoss, 1.345);
+assert.equal(mappedAutoLiveSignal.target1, 1.36);
+assert.deepEqual(mappedAutoLiveSignal.entryZone, { min: 1.35, max: 1.351, preferred: 1.3505 });
+
+const mappedNeutralSignal = mapAutoLiveSignalForCockpit({
+  id: 'signal-euraud-neutral-test',
+  timestamp: 1_800_000_000_100,
+  pair: 'EUR/AUD',
+  direction: 'NEUTRAL',
+  strategyVersion: 'fx_structure_v2a',
+  score: 48,
+  mlProbability: null,
+  status: 'NO_TRADE',
+  reasons: ['Conflicting timeframes'],
+  tradePlan: null
+});
+assert.equal(mappedNeutralSignal.direction, 'NO_TRADE');
+assert.equal(mappedNeutralSignal.hasTradePlan, false);
+assert.equal(mappedNeutralSignal.target1, undefined);
 
 console.log('AUTO-TRADING ORCHESTRATOR SAFETY TEST PASSED');
