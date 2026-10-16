@@ -1,0 +1,30 @@
+# Keep the working Auto Live and trade-execution code under operator review.
+# The repository owner must explicitly review changes to these paths.
+server.ts @softwarewallet
+src/services/autoTradingService.ts @softwarewallet
+src/services/autoLiveMarketDataSession.ts @softwarewallet
+src/services/tradeContinuityService.ts @softwarewallet
+src/services/reconciliationService.ts @softwarewallet
+src/services/executionReconciliationService.ts @softwarewallet
+src/markets/forex/provider.ts @softwarewallet
+src/markets/forex/signalEngine.ts @softwarewallet
+src/brokers/safety/AutoExecutionEngine.ts @softwarewallet
+src/brokers/safety/AutoTradeReadiness.ts @softwarewallet
+src/brokers/safety/LiveTradingGate.ts @softwarewallet
+src/brokers/safety/TradeValidator.ts @softwarewallet
+src/brokers/safety/TradeSizing.ts @softwarewallet
+src/brokers/safety/KillSwitch.ts @softwarewallet
+src/brokers/adapters/cTrader/CTraderBrokerAdapter.ts @softwarewallet
+src/brokers/adapters/cTrader/CTraderLiveAdapter.ts @softwarewallet
+src/brokers/adapters/cTrader/cTraderApiClient.ts @softwarewallet
+src/brokers/adapters/cTrader/requestQueue.ts @softwarewallet
+test/test_auto_trading_orchestrator.ts @softwarewallet
+test/test_auto_trade_readiness.ts @softwarewallet
+test/test_live_only_audit.ts @softwarewallet
+test/test_local_auto_live_arm.ts @softwarewallet
+test/test_ctrader_request_queue.ts @softwarewallet
+test/test_ctrader_batched_spot_quotes.ts @softwarewallet
+test/test_auto_live_market_data_gate.ts @softwarewallet
+.github/workflows/protect-auto-live-execution.yml @softwarewallet
+.github/CODEOWNERS @softwarewallet
+docs/AUTO_LIVE_EXECUTION_LOCK.md @softwarewallet
