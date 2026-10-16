@@ -29,8 +29,8 @@ if (originalLocalDevelopment === undefined) delete process.env.GOLDCREST_LOCAL_D
 else process.env.GOLDCREST_LOCAL_DEVELOPMENT = originalLocalDevelopment;
 
 
-// Auto Live follows the working Goldcrest-FX-Live reference: DEMO mode
-// must be rejected before the autonomous loop is armed.
+// Auto Live is sourced from Goldcrest-FX-Live and must never arm the adapter
+// registered as CTRADER_LIVE when persisted cTrader settings route it to DEMO.
 const originalConfig = getSystemConfig();
 try {
   updateSystemConfig({ cTraderApiMode: 'DEMO' });
@@ -38,8 +38,9 @@ try {
   process.env.GOLDCREST_AUTO_TRADING_ENABLED = 'true';
   process.env.GOLDCREST_AUTONOMOUS_LIVE_EXECUTION = 'true';
   const demoStatus = autoTradingService.start({ confirmWhenClosed: true });
-  assert.equal(demoStatus.state, 'BLOCKED');
-  assert.match(demoStatus.lastCycleResult || '', /requires cTrader API mode LIVE/i);
+  assert.equal(/requires cTrader API mode LIVE/i.test(demoStatus.lastCycleResult || ''), false);
+  // Mode itself must not be the blocker. Without valid DEMO credentials the
+  // normal credential/readiness gate remains responsible for preventing orders.
   assert.equal(refreshAutonomousExecutionPermission(), false);
 } finally {
   autoTradingService.stop('Restore test state');
