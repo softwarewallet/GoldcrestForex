@@ -424,8 +424,25 @@ class AutoTradingService {
       };
     }
 
-    // Auto Live is mode-agnostic: the cTrader adapter resolves the selected
-    // DEMO/LIVE endpoint and matching credentials from system configuration.
+    // Follow the working Goldcrest-FX-Live reference: Auto Live only arms
+    // autonomous execution for the cTrader LIVE environment. DEMO remains
+    // available to other workflows but cannot start this live-order loop.
+    if (getCTraderApiMode() !== 'LIVE') {
+      this.state = 'BLOCKED';
+      this.lastCycleResult = 'Auto Live requires cTrader API mode LIVE. The current mode is DEMO; select LIVE and verify LIVE credentials before starting.';
+      liveRuntimeLog('WARN', 'AUTO_TRADING_START_BLOCKED', {
+        stage: 'CTRADER_API_MODE',
+        configuredMode: getCTraderApiMode(),
+        reason: this.lastCycleResult
+      });
+      tradeAuditLog('AUTO_TRADING_START_BLOCKED', {
+        stage: 'CTRADER_API_MODE',
+        configuredMode: getCTraderApiMode(),
+        reason: this.lastCycleResult
+      });
+      return this.getStatus();
+    }
+
     if (!this.isRequested()) {
       this.state = 'BLOCKED';
       this.lastCycleResult = 'Autonomous execution is not enabled. Both GOLDCREST_AUTO_TRADING_ENABLED and GOLDCREST_AUTONOMOUS_LIVE_EXECUTION must be true.';
@@ -602,8 +619,21 @@ class AutoTradingService {
   private async runScheduledCycle(): Promise<void> {
     if (!['PREPARING', 'RUNNING', 'PAUSED_LIMIT', 'PAUSED_RUNTIME'].includes(this.state) || this.cycleInFlight) return;
 
+    if (getCTraderApiMode() !== 'LIVE') {
+      this.state = 'BLOCKED';
+      this.lastCycleResult = 'Auto Live stopped because cTrader API mode changed away from LIVE. Select LIVE before restarting.';
+      liveRuntimeLog('WARN', 'AUTO_TRADING_MODE_CHANGED_BLOCKED', {
+        configuredMode: getCTraderApiMode(),
+        reason: this.lastCycleResult
+      });
+      return;
+    }
+
     const marketGate = getAutoLiveMarketGate();
 
+    // Match the known-working reference runtime: transient execution-permission
+    // failures pause safely and retry on the existing scheduler, rather than
+    // permanently blocking Auto Live after one connectivity interruption.
     if (this.state === 'PAUSED_RUNTIME') {
       if (killSwitch.isHalted()) {
         this.state = 'BLOCKED';
@@ -644,7 +674,6 @@ class AutoTradingService {
 
     await this.runCycle();
   }
-
   private async runPreOpenPreparation(marketGate: AutoLiveMarketGate): Promise<void> {
     if (this.state !== 'PREPARING' || this.cycleInFlight) return;
 
@@ -779,6 +808,15 @@ class AutoTradingService {
 
   private async runCycle(): Promise<void> {
     if (this.state !== 'RUNNING' || this.cycleInFlight) return;
+    if (getCTraderApiMode() !== 'LIVE') {
+      this.state = 'BLOCKED';
+      this.lastCycleResult = 'Auto Live stopped because cTrader API mode is not LIVE. Select LIVE before restarting.';
+      liveRuntimeLog('WARN', 'AUTO_TRADING_MODE_CHANGED_BLOCKED', {
+        configuredMode: getCTraderApiMode(),
+        reason: this.lastCycleResult
+      });
+      return;
+    }
     this.cycleInFlight = true;
     const cycleStartedAt = Date.now();
     const cycleId = `autolive-${cycleStartedAt}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1397,6 +1435,21 @@ return;
         sizingAdjusted: sizing.adjusted,
         sizingMode: 'DIRECT_QUANTITY_NO_CURRENCY_CONVERSION'
       });
+
+      // Re-check mode immediately before entering the shared execution/safety
+      // engine. A settings change while market data was being fetched must not
+      // redirect a previously armed Auto Live cycle to DEMO.
+      if (getCTraderApiMode() !== 'LIVE') {
+        const reason = 'Auto Live blocked: cTrader API mode changed away from LIVE before order authorization.';
+        this.lastActions.push({ pair, result: 'BLOCKED', signalId: signal.id, reason });
+        liveRuntimeLog('WARN', 'AUTO_TRADING_MODE_CHANGED_BEFORE_EXECUTION', {
+          pair, signalId: signal.id, configuredMode: getCTraderApiMode(), reason
+        });
+        tradeAuditLog('AUTO_TRADING_MODE_CHANGED_BEFORE_EXECUTION', {
+          pair, signalId: signal.id, configuredMode: getCTraderApiMode(), reason
+        });
+        return;
+      }
 
       this.setExecutionStatus({
         stage: 'SAFETY_GATE',
