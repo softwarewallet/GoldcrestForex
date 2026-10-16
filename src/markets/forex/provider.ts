@@ -108,6 +108,12 @@ export class LiveForexProvider implements LiveForexDataProvider {
       symbol: string; timeframe: string; timestamp: number;
       open: number; high: number; low: number; close: number; volume: number;
     }> = [];
+    const refreshedTimeframes: string[] = [];
+    const refreshStartedAt = Date.now();
+    liveRuntimeLog('INFO', 'CTRADER_MARKET_DATA_REFRESH_STARTED', {
+      pair: symbol,
+      timeframes: requestedTimeframes.map(item => item.timeframe)
+    });
 
     // Re-request each timeframe only when its candle cadence requires it.
     // The 15M/Daily histories are large enough to support analog validation;
@@ -115,14 +121,45 @@ export class LiveForexProvider implements LiveForexDataProvider {
     for (const item of requestedTimeframes) {
       const key = `${symbol}:${item.timeframe}`;
       const cached = this.candles.get(key);
-      const cacheAge = Date.now() - (fetchedAt.get(item.timeframe) || 0);
-      const needsFetch = !cached || cached.length < 35 || cacheAge >= item.ttlMs;
-      if (!needsFetch) continue;
-
-      const data = await adapter.getHistoricalCandles(symbol, item.timeframe, item.limit);
-      if (!Array.isArray(data) || data.length < 35) {
-        throw new Error(`Insufficient broker-confirmed ${item.timeframe} candle history for ${symbol}; received ${Array.isArray(data) ? data.length : 0}.`);
+      const lastFetchedAt = fetchedAt.get(item.timeframe) || 0;
+      const cacheAge = lastFetchedAt ? Date.now() - lastFetchedAt : null;
+      const needsFetch = !cached || cached.length < 35 || cacheAge === null || cacheAge >= item.ttlMs;
+      if (!needsFetch) {
+        liveRuntimeLog('INFO', 'CTRADER_CANDLE_CACHE_HIT', {
+          pair: symbol, timeframe: item.timeframe, candleCount: cached?.length || 0,
+          cacheAgeMs: cacheAge, cacheTtlMs: item.ttlMs
+        });
+        continue;
       }
+
+      const requestStartedAt = Date.now();
+      liveRuntimeLog('INFO', 'CTRADER_CANDLE_REQUEST_STARTED', {
+        pair: symbol, timeframe: item.timeframe, limit: item.limit,
+        cacheAgeMs: cacheAge, cacheTtlMs: item.ttlMs
+      });
+      let data: any[];
+      try {
+        data = await adapter.getHistoricalCandles(symbol, item.timeframe, item.limit);
+      } catch (error: any) {
+        liveRuntimeLog('ERROR', 'CTRADER_CANDLE_REQUEST_FAILED', {
+          pair: symbol, timeframe: item.timeframe,
+          durationMs: Date.now() - requestStartedAt, error: error?.message || String(error)
+        });
+        throw error;
+      }
+      if (!Array.isArray(data) || data.length < 35) {
+        const error = new Error(`Insufficient broker-confirmed ${item.timeframe} candle history for ${symbol}; received ${Array.isArray(data) ? data.length : 0}.`);
+        liveRuntimeLog('ERROR', 'CTRADER_CANDLE_REQUEST_FAILED', {
+          pair: symbol, timeframe: item.timeframe,
+          durationMs: Date.now() - requestStartedAt, error: error.message
+        });
+        throw error;
+      }
+      refreshedTimeframes.push(item.timeframe);
+      liveRuntimeLog('INFO', 'CTRADER_CANDLE_REQUEST_COMPLETED', {
+        pair: symbol, timeframe: item.timeframe, candleCount: data.length,
+        durationMs: Date.now() - requestStartedAt
+      });
       const candles: ForexCandle[] = data.map((bar: any) => ({
         pair: symbol,
         timeframe: item.timeframe,
@@ -228,6 +265,14 @@ export class LiveForexProvider implements LiveForexDataProvider {
     }
 
     this.quotes.set(symbol, quote);
+    liveRuntimeLog('INFO', 'CTRADER_MARKET_DATA_REFRESH_COMPLETED', {
+      pair: symbol,
+      durationMs: Date.now() - refreshStartedAt,
+      refreshedTimeframes,
+      cacheHitTimeframes: requestedTimeframes.map(item => item.timeframe).filter(timeframe => !refreshedTimeframes.includes(timeframe)),
+      quoteStatus: quote.dataStatus,
+      quoteAgeMs: Math.max(0, Date.now() - Number(quote.timestamp || 0))
+    });
     sharedForexSnapshots.set(symbol, {
       candles: new Map<string, ForexCandle[]>(
         requestedTimeframes.reduce<Array<[string, ForexCandle[]]>>((entries, item) => {
