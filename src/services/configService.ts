@@ -214,6 +214,12 @@ function sanitizePersistedConfig(input: unknown): Partial<SystemConfig> {
 
     if (typeof value === 'number') {
       if (Number.isFinite(value)) {
+        if (key === 'maxConsecutiveLosses') {
+          if (Number.isInteger(value) && value >= 1 && value <= 100) {
+            (output as any)[key] = value;
+          }
+          continue;
+        }
         if (key === 'forexTakeProfitPips') {
           const maxCap = (input as any).phase44HardMaxEnabled !== false ? 5.0 : 100.0;
           (output as any)[key] = Math.min(maxCap, Math.max(0.5, value));
@@ -343,6 +349,10 @@ export function updateSystemConfig(updates: Partial<SystemConfig>): SystemConfig
   }
   if (updates.cTraderApiMode !== undefined && !['LIVE', 'DEMO'].includes(updates.cTraderApiMode)) {
     throw new Error('cTrader API mode must be LIVE or DEMO.');
+  }
+  if (updates.maxConsecutiveLosses !== undefined &&
+      (!Number.isInteger(updates.maxConsecutiveLosses) || updates.maxConsecutiveLosses < 1 || updates.maxConsecutiveLosses > 100)) {
+    throw new Error('Maximum consecutive losses must be an integer from 1 to 100.');
   }
 
   activeConfig = {
