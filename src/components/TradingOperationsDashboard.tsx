@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
@@ -22,16 +22,29 @@ export const TradingOperationsDashboard: React.FC<TradingOperationsDashboardProp
   const [ordersRecon, setOrdersRecon] = useState<any[]>([]);
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const refreshController = useRef<AbortController | null>(null);
+  const refreshInFlight = useRef(false);
 
   const refresh = useCallback(async () => {
+    // Never stack telemetry batches; they can otherwise consume browser
+    // connections needed by the operator's Auto Live start/stop command.
+    if (refreshInFlight.current) return;
+    refreshInFlight.current = true;
+    const controller = new AbortController();
+    refreshController.current = controller;
+    const timeout = window.setTimeout(() => controller.abort(), 5000);
     setLoading(true);
     try {
+      const request = (url: string) => fetch(url, {
+        cache: 'no-store',
+        signal: controller.signal
+      });
       const [statusRes, healthRes, posRes, orderRes, auditRes] = await Promise.all([
-        fetch('/api/governance/status', { cache: 'no-store' }),
-        fetch('/api/governance/live-health', { cache: 'no-store' }),
-        fetch('/api/governance/reconciliation/positions', { cache: 'no-store' }),
-        fetch('/api/governance/reconciliation/orders', { cache: 'no-store' }),
-        fetch('/api/governance/audit-logs?limit=50', { cache: 'no-store' })
+        request('/api/governance/status'),
+        request('/api/governance/live-health'),
+        request('/api/governance/reconciliation/positions'),
+        request('/api/governance/reconciliation/orders'),
+        request('/api/governance/audit-logs?limit=50')
       ]);
 
       if (statusRes.ok) setStatus(await statusRes.json());
@@ -45,17 +58,30 @@ export const TradingOperationsDashboard: React.FC<TradingOperationsDashboardProp
         const data = await auditRes.json();
         setAuditLogs(Array.isArray(data) ? data : []);
       }
-    } catch (error) {
-      console.error('Failed to load live operations dashboard:', error);
+    } catch (error: any) {
+      if (error?.name !== 'AbortError') {
+        console.error('Failed to load live operations dashboard:', error);
+      }
     } finally {
+      window.clearTimeout(timeout);
+      if (refreshController.current === controller) refreshController.current = null;
+      refreshInFlight.current = false;
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
+    const prioritizeAutoLive = () => {
+      refreshController.current?.abort();
+    };
+    window.addEventListener('goldcrest:autolive-control-priority', prioritizeAutoLive);
     void refresh();
-    const timer = setInterval(() => void refresh(), 15000);
-    return () => clearInterval(timer);
+    const timer = setInterval(() => void refresh(), 60000);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('goldcrest:autolive-control-priority', prioritizeAutoLive);
+      refreshController.current?.abort();
+    };
   }, [refresh]);
 
   const emergencyHalted = Boolean(status?.emergencyStop?.isHalted);
