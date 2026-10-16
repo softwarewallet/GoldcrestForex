@@ -1111,7 +1111,7 @@ return;
         return;
       }
 
-      const quote = await adapter.getQuote(pair);
+      let quote = await adapter.getQuote(pair);
       if (quote.status !== 'FRESH' || Date.now() - quote.timestamp >= LIVE_QUOTE_MAX_AGE_MS) {
         const reason = 'Fresh broker quote unavailable at dispatch boundary.';
         this.lastActions.push({ pair, result: 'BLOCKED', signalId: signal.id, reason });
@@ -1126,7 +1126,7 @@ return;
         tradeAuditLog('NO_TRADE', { pair, signalId: signal.id, direction: signal.direction, score: signal.score, reason });
         return;
       }
-      const entryPrice = signalSide === 'BUY' ? quote.ask : quote.bid;
+      let entryPrice = signalSide === 'BUY' ? quote.ask : quote.bid;
 
       // Auto Live submits a MARKET order using the authoritative broker quote
       // available at the dispatch boundary. The signal entry zone is an
@@ -1154,11 +1154,15 @@ return;
         entryMax: plan.entryMax
       });
 
-      const account = await adapter.getAccount();
+      // Account and instrument metadata are independent broker reads. Fetch
+      // them concurrently to reduce time before the final quote refresh.
+      const [account, instrument] = await Promise.all([
+        adapter.getAccount(),
+        adapter.getInstrument(pair)
+      ]);
 
       // Direct-quantity sizing does not require the cTrader account currency
       // to be USD. The configured Forex quantity is sent directly to the broker.
-      const instrument = await adapter.getInstrument(pair);
       if (!instrument) {
         const reason = 'Live broker instrument metadata unavailable.';
         this.lastActions.push({ pair, result: 'BLOCKED', signalId: signal.id, reason });
@@ -1217,7 +1221,7 @@ return;
       // new Auto Live order. Calculate SL/TP from the exact three-decimal
       // execution price that will be placed in the broker packet, rather than
       // from the signal engine's analytical trade-plan levels.
-      const executionEntryPrice = normalizePriceToThreeDigits(entryPrice);
+      let executionEntryPrice = normalizePriceToThreeDigits(entryPrice);
       let configuredTargets;
       try {
         configuredTargets = calculateForexPipTargets(
@@ -1316,6 +1320,60 @@ return;
       const dailyRealizedPnL = typeof adapter.getDailyRealizedPnL === 'function'
         ? await adapter.getDailyRealizedPnL()
         : 0;
+      // Refresh the authoritative quote AFTER slow account, instrument,
+      // sizing and daily-PnL work. The earlier quote is only a planning input;
+      // the safety gate must receive a quote obtained immediately before it.
+      const quoteRefreshStartedAt = Date.now();
+      try {
+        quote = await adapter.getQuote(pair);
+      } catch (quoteError: any) {
+        const reason = 'Unable to refresh authoritative broker quote immediately before safety gate: ' + (quoteError?.message || String(quoteError));
+        this.lastActions.push({ pair, result: 'BLOCKED', signalId: signal.id, reason });
+        liveRuntimeLog('WARN', 'AUTO_LIVE_FINAL_QUOTE_REFRESH_FAILED', {
+          pair, signalId: signal.id, durationMs: Date.now() - quoteRefreshStartedAt, error: quoteError?.message || String(quoteError)
+        });
+        tradeAuditLog('QUOTE_BLOCKED', { pair, signalId: signal.id, reason });
+        return;
+      }
+      const finalQuoteAgeMs = Date.now() - Number(quote.timestamp);
+      if (quote.status !== 'FRESH' || finalQuoteAgeMs < 0 || finalQuoteAgeMs >= LIVE_QUOTE_MAX_AGE_MS) {
+        const reason = `Authoritative broker quote is not fresh enough for dispatch (status=${quote.status}, ageMs=${finalQuoteAgeMs}).`;
+        this.lastActions.push({ pair, result: 'BLOCKED', signalId: signal.id, reason });
+        liveRuntimeLog('WARN', 'AUTO_LIVE_FINAL_QUOTE_NOT_FRESH', {
+          pair, signalId: signal.id, status: quote.status, quoteAgeMs: finalQuoteAgeMs,
+          durationMs: Date.now() - quoteRefreshStartedAt
+        });
+        tradeAuditLog('QUOTE_BLOCKED', { pair, signalId: signal.id, reason, quoteAgeMs: finalQuoteAgeMs });
+        return;
+      }
+
+      entryPrice = signalSide === 'BUY' ? quote.ask : quote.bid;
+      executionEntryPrice = normalizePriceToThreeDigits(entryPrice);
+      try {
+        configuredTargets = calculateForexPipTargets(
+          signalSide,
+          executionEntryPrice,
+          instrument.pipSize,
+          config.forexStopLossPips,
+          config.forexTakeProfitPips
+        );
+      } catch (targetError: any) {
+        const reason = 'Unable to recalculate SL/TP from the final broker quote: ' + (targetError?.message || String(targetError));
+        this.lastActions.push({ pair, result: 'BLOCKED', signalId: signal.id, reason });
+        liveRuntimeLog('WARN', 'AUTO_LIVE_FINAL_TARGETS_BLOCKED', {
+          pair, signalId: signal.id, entryPrice: executionEntryPrice, error: targetError?.message || String(targetError)
+        });
+        return;
+      }
+      order.price = executionEntryPrice;
+      order.stopLoss = configuredTargets.stopLoss;
+      order.takeProfit = configuredTargets.takeProfit;
+      liveRuntimeLog('INFO', 'AUTO_LIVE_FINAL_QUOTE_READY', {
+        pair, signalId: signal.id, side: signalSide, quoteAgeMs: finalQuoteAgeMs,
+        quoteRefreshDurationMs: Date.now() - quoteRefreshStartedAt,
+        entryPrice: executionEntryPrice, stopLoss: order.stopLoss, takeProfit: order.takeProfit
+      });
+
       const totalExposure = positions
         .filter(position => position.currency === 'USD' && position.market === 'FOREX')
         .reduce((sum, position) => sum + Math.abs(Number(position.quantity || 0)) * Number(position.currentPrice || 0), 0)

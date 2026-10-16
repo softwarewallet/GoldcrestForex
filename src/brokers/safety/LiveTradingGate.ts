@@ -29,6 +29,25 @@ export class LiveTradingGate {
   async evaluate(adapter: BrokerAdapter, params: LiveGateEvaluationParams): Promise<LiveTradingGateResult> {
     const failedReasons: string[] = [];
 
+    // These broker reads are independent. Run them concurrently so slow
+    // account/position endpoints do not consume the 30-second quote window
+    // one after another. Each result still fails closed when unavailable.
+    const brokerChecksStartedAt = Date.now();
+    const [statusResult, accountResult, instrumentResult, positionsResult] = await Promise.all([
+      adapter.getTradingStatus().then(value => ({ value })).catch(error => ({ error })),
+      adapter.getAccount().then(value => ({ value })).catch(error => ({ error })),
+      adapter.getInstrument(params.order.symbol).then(value => ({ value })).catch(error => ({ error })),
+      adapter.getPositions().then(value => ({ value })).catch(error => ({ error }))
+    ]);
+    liveRuntimeLog('INFO', 'LIVE_GATE_BROKER_PREFLIGHT_COMPLETED', {
+      symbol: params.order.symbol,
+      durationMs: Date.now() - brokerChecksStartedAt,
+      tradingStatusAvailable: 'value' in statusResult,
+      accountAvailable: 'value' in accountResult,
+      instrumentAvailable: 'value' in instrumentResult,
+      positionsAvailable: 'value' in positionsResult
+    });
+
     // Check the configured cTrader API mode as well as registry metadata.
     // CTraderLiveAdapter's adapter type can remain LIVE while its credentials
     // are routed to DEMO by the UI-selected API mode.
@@ -46,22 +65,16 @@ export class LiveTradingGate {
     }
 
     // Check 2: Live broker connected
-    const status = await adapter.getTradingStatus();
+    const status = 'value' in statusResult ? statusResult.value : 'UNAVAILABLE';
     const liveBrokerConnected = status === 'CONNECTED';
     if (!liveBrokerConnected) {
       failedReasons.push(`Condition 2 Failed: Broker status is ${status}, must be CONNECTED.`);
     }
 
     // Check 3: Account successfully validated
-    let accountValidated = false;
-    let permissions: string[] = [];
-    try {
-      const account = await adapter.getAccount();
-      accountValidated = Boolean(account && account.accountId && account.balance > 0);
-      permissions = account.permissions || [];
-    } catch {
-      accountValidated = false;
-    }
+    const account = 'value' in accountResult ? accountResult.value : null;
+    const accountValidated = Boolean(account && account.accountId && account.balance > 0);
+    const permissions: string[] = account?.permissions || [];
     if (!accountValidated) {
       failedReasons.push('Condition 3 Failed: Live account could not be validated or has non-positive balance.');
     }
@@ -73,7 +86,7 @@ export class LiveTradingGate {
     }
 
     // Check 5: Instrument validated
-    const instrument = await adapter.getInstrument(params.order.symbol);
+    const instrument = 'value' in instrumentResult ? instrumentResult.value : null;
     const instrumentValidated = instrument !== null;
     if (!instrumentValidated) {
       failedReasons.push(`Condition 5 Failed: Instrument ${params.order.symbol} is not valid on this broker.`);
@@ -138,11 +151,9 @@ export class LiveTradingGate {
     // and this final dispatch boundary.
     let authoritativePositions: Awaited<ReturnType<BrokerAdapter['getPositions']>> = [];
     let positionsVerified = false;
-    try {
-      authoritativePositions = await adapter.getPositions();
-      positionsVerified = Array.isArray(authoritativePositions);
-    } catch {
-      positionsVerified = false;
+    if ('value' in positionsResult && Array.isArray(positionsResult.value)) {
+      authoritativePositions = positionsResult.value;
+      positionsVerified = true;
     }
 
     // Check 13: Per-pair simultaneous-position limit.
