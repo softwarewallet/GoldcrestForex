@@ -155,7 +155,7 @@ export class AutoLivePredictionShadowService {
           metadata: {
             source: 'GOLDCREST_FX_LIVE_LEGACY_BASELINE',
             candleCount: fifteen.candles.length,
-            modelVersion: 'xgboost_forex_v1.0.0_baseline',
+            modelVersion: 'legacy_rule_based_ema_rsi_structure_v1',
             heuristicProbability: legacySignal.mlProbability,
             calibratedProbability: false,
             noTradeReasons: legacySignal.noTradeReasons || []
