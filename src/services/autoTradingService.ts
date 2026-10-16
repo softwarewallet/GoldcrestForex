@@ -1154,11 +1154,15 @@ return;
         entryMax: plan.entryMax
       });
 
-      const account = await adapter.getAccount();
+      // Account and instrument metadata are independent broker reads. Fetch
+      // them concurrently to reduce time before the final quote refresh.
+      const [account, instrument] = await Promise.all([
+        adapter.getAccount(),
+        adapter.getInstrument(pair)
+      ]);
 
       // Direct-quantity sizing does not require the cTrader account currency
       // to be USD. The configured Forex quantity is sent directly to the broker.
-      const instrument = await adapter.getInstrument(pair);
       if (!instrument) {
         const reason = 'Live broker instrument metadata unavailable.';
         this.lastActions.push({ pair, result: 'BLOCKED', signalId: signal.id, reason });
