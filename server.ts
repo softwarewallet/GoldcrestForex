@@ -1244,6 +1244,7 @@ app.post('/api/config', operatorAuthRequired, async (req: Request, res: Response
     const requestedAutoLiveMinSignalScore = req.body?.autoLiveMinSignalScore;
     const requestedAutoLiveMaxTradesPerPair = req.body?.autoLiveMaxTradesPerPair;
     const requestedMaxOpenPositions = req.body?.maxOpenPositions;
+    const requestedMaxConsecutiveLosses = req.body?.maxConsecutiveLosses;
     const requestedMaxDailyLossPct = req.body?.maxDailyLossPct;
     const requestedForexStopLossPips = req.body?.forexStopLossPips;
     const requestedForexTakeProfitPips = req.body?.forexTakeProfitPips;
@@ -1286,6 +1287,14 @@ app.post('/api/config', operatorAuthRequired, async (req: Request, res: Response
         return res.status(400).json({ error: 'maxOpenPositions must be an integer from 1 to 100.' });
       }
       updates.maxOpenPositions = value;
+    }
+
+    if (requestedMaxConsecutiveLosses !== undefined) {
+      const value = Number(requestedMaxConsecutiveLosses);
+      if (!Number.isInteger(value) || value < 1 || value > 100) {
+        return res.status(400).json({ error: 'maxConsecutiveLosses must be an integer from 1 to 100.' });
+      }
+      updates.maxConsecutiveLosses = value;
     }
 
     if (requestedMaxDailyLossPct !== undefined) {

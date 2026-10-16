@@ -37,6 +37,7 @@ try {
     maxTradeValueForexUsd: 777,
     maxTradeValueIndianInr: 55555,
     maxOpenPositions: 12,
+    maxConsecutiveLosses: 7,
     forexStopLossPips: 18,
     forexTakeProfitPips: 36,
     autoLiveForexPairs: ['EUR/USD', 'USD/JPY', 'XAU/USD'],
@@ -46,6 +47,7 @@ try {
   assert.equal(getSystemConfig().maxTradeValueForexUsd, 777);
   assert.equal(getSystemConfig().maxTradeValueIndianInr, 55555);
   assert.equal(getSystemConfig().maxOpenPositions, 12);
+  assert.equal(getSystemConfig().maxConsecutiveLosses, 7);
   assert.equal(getSystemConfig().forexStopLossPips, 18);
   assert.equal(getSystemConfig().forexTakeProfitPips, 36);
   assert.deepEqual(getSystemConfig().autoLiveForexPairs, ['EUR/USD', 'USD/JPY', 'XAU/USD']);
@@ -56,11 +58,20 @@ try {
   assert.equal(persisted.maxTradeValueForexUsd, 777);
   assert.equal(persisted.maxTradeValueIndianInr, 55555);
   assert.equal(persisted.maxOpenPositions, 12);
+  assert.equal(persisted.maxConsecutiveLosses, 7);
   assert.equal(persisted.forexStopLossPips, 18);
   assert.equal(persisted.forexTakeProfitPips, 36);
   assert.deepEqual(persisted.autoLiveForexPairs, ['EUR/USD', 'USD/JPY', 'XAU/USD']);
   assert.deepEqual(persisted.autoLiveIndianUnderlyings, ['FINNIFTY', 'MIDCPNIFTY']);
 
+  assert.throws(
+    () => updateSystemConfig({ maxConsecutiveLosses: 0 }),
+    /Maximum consecutive losses must be an integer from 1 to 100/
+  );
+  assert.throws(
+    () => updateSystemConfig({ maxConsecutiveLosses: 1.5 }),
+    /Maximum consecutive losses must be an integer from 1 to 100/
+  );
   console.log('CONFIG PERSISTENCE TEST PASSED');
 } finally {
   fs.rmSync(tempDir, { recursive: true, force: true });
