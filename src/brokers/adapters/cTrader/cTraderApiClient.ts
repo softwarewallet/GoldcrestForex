@@ -582,6 +582,15 @@ export function buildCTraderSpotSubscriptionPayload(
   return { ctidTraderAccountId, symbolId: normalizedIds, subscribeToSpotTimestamp: true };
 }
 
+/** Unsubscribe payload intentionally omits subscribe-only fields. */
+export function buildCTraderSpotUnsubscriptionPayload(
+  ctidTraderAccountId: number,
+  symbolIds: number[]
+): { ctidTraderAccountId: number; symbolId: number[] } {
+  const payload = buildCTraderSpotSubscriptionPayload(ctidTraderAccountId, symbolIds);
+  return { ctidTraderAccountId: payload.ctidTraderAccountId, symbolId: payload.symbolId };
+}
+
 export interface CTraderCandle {
   open: number;
   high: number;
@@ -1594,7 +1603,9 @@ async function sendCTraderSpotSubscriptionBatch(
   }
 
   try {
-    const payload = buildCTraderSpotSubscriptionPayload(state.accountId, symbolIds);
+    const payload = action === 'SUBSCRIBE'
+      ? buildCTraderSpotSubscriptionPayload(state.accountId, symbolIds)
+      : buildCTraderSpotUnsubscriptionPayload(state.accountId, symbolIds);
     await queueWsRequest(ws, async () => {
       if (ws.readyState !== WebSocket.OPEN) {
         throw new Error('cTrader WebSocket is not open for spot subscription.');

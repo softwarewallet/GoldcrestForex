@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   buildCTraderSpotSubscriptionPayload,
+  buildCTraderSpotUnsubscriptionPayload,
   normalizeCTraderSpotSymbolIds
 } from '../src/brokers/adapters/cTrader/cTraderApiClient';
 
@@ -12,4 +13,8 @@ assert.deepEqual(buildCTraderSpotSubscriptionPayload(789, [101, 202, 101]), {
 });
 assert.throws(() => buildCTraderSpotSubscriptionPayload(789, [0, -2]), /at least one valid symbol ID/);
 assert.throws(() => buildCTraderSpotSubscriptionPayload(0, [101]), /valid cTrader account ID/);
+assert.deepEqual(buildCTraderSpotUnsubscriptionPayload(789, [101, 202, 101]), {
+  ctidTraderAccountId: 789,
+  symbolId: [101, 202]
+});
 console.log('PASS: cTrader spot subscriptions use a deduplicated multi-symbol payload.');
