@@ -24,6 +24,7 @@ import {
   fetchLiveCTraderAccountDetails,
   fetchCTraderSymbols,
   fetchLiveCTraderQuote,
+  subscribeLiveCTraderSpots,
   submitLiveCTraderOrder,
   fetchCTraderTrendbars,
   fetchCTraderReconcileState,
@@ -73,6 +74,8 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
   private static readonly SYMBOL_CACHE_TTL_MS = 5 * 60 * 1000;
   private static readonly ACCOUNT_DATA_CACHE_TTL_MS = 10 * 1000;
   private accountFetchInFlight: Promise<BrokerAccountInfo> | null = null;
+  private spotUniverseSubscriptionKey: string | null = null;
+  private spotUniverseSubscriptionPromise: Promise<void> | null = null;
   private lastKnownApiMode: string | null = null;
 
   /**
@@ -102,6 +105,8 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
     this.symbolCache = null;
     this.conversionAssetCache = null;
     this.conversionChainCache.clear();
+    this.spotUniverseSubscriptionKey = null;
+    this.spotUniverseSubscriptionPromise = null;
   }
 
   /**
@@ -962,6 +967,56 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
     } catch (err: any) {
       throw normalizeBrokerError(err, 'CTRADER', this.environment);
     }
+  }
+
+
+  /**
+   * Subscribe the configured Forex universe through one cTrader
+   * ProtoOASubscribeSpotsReq. The socket retains this subscription for quote reads.
+   */
+  async subscribeQuotes(symbols: string[]): Promise<void> {
+    this.syncConfig();
+    this.validateCredentials();
+    const raw = await this.resolveRawAccount();
+    const availableSymbols = await this.getCachedCTraderSymbols(raw);
+    const requestedNames = new Set(
+      (Array.isArray(symbols) ? symbols : []).map(symbol => String(symbol || '').replace('/', '').toUpperCase())
+    );
+    const matchedSymbols = availableSymbols.filter(symbol =>
+      requestedNames.has(symbol.symbolName.replace('/', '').toUpperCase())
+    );
+    const subscriptionSymbols = matchedSymbols.map(symbol => ({
+      symbolId: symbol.symbolId,
+      symbol: symbol.symbolName,
+      digits: symbol.digits
+    }));
+    if (subscriptionSymbols.length === 0) {
+      throw new BrokerError(
+        'INVALID_SYMBOL',
+        'No requested Forex symbols were found in the authenticated cTrader symbol list.',
+        'CTRADER',
+        this.environment
+      );
+    }
+    const symbolKey = subscriptionSymbols.map(symbol => String(symbol.symbolId)).sort().join(',');
+    const key = String(this.environment) + ':' + String(raw.isLive) + ':' +
+      String(raw.ctidTraderAccountId) + ':' + symbolKey;
+    if (this.spotUniverseSubscriptionKey === key && this.spotUniverseSubscriptionPromise) {
+      return this.spotUniverseSubscriptionPromise;
+    }
+    this.spotUniverseSubscriptionKey = key;
+    const work = subscribeLiveCTraderSpots(
+      raw.ctidTraderAccountId, subscriptionSymbols,
+      this.config.clientId!, this.config.clientSecret!, this.config.accessToken!, raw.isLive
+    );
+    this.spotUniverseSubscriptionPromise = work.catch((error: any) => {
+      if (this.spotUniverseSubscriptionKey === key) {
+        this.spotUniverseSubscriptionKey = null;
+        this.spotUniverseSubscriptionPromise = null;
+      }
+      throw error;
+    });
+    return this.spotUniverseSubscriptionPromise;
   }
 
   async getQuote(symbol: string): Promise<NormalizedQuote> {

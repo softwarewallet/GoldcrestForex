@@ -549,6 +549,37 @@ export interface CTraderMarketQuote {
   status: 'FRESH' | 'STALE';
 }
 
+export interface CTraderSpotSubscriptionSymbol {
+  symbolId: number;
+  symbol: string;
+  digits: number;
+}
+
+/** Deduplicate and validate symbol IDs before issuing a batched Open API request. */
+export function normalizeCTraderSpotSymbolIds(symbolIds: number[]): number[] {
+  const unique: number[] = [];
+  for (const raw of Array.isArray(symbolIds) ? symbolIds : []) {
+    const id = Number(raw);
+    if (Number.isSafeInteger(id) && id > 0 && !unique.includes(id)) unique.push(id);
+  }
+  return unique;
+}
+
+/** Keep the wire payload shape testable and consistent for single- and multi-symbol subscriptions. */
+export function buildCTraderSpotSubscriptionPayload(
+  ctidTraderAccountId: number,
+  symbolIds: number[]
+): { ctidTraderAccountId: number; symbolId: number[]; subscribeToSpotTimestamp: boolean } {
+  if (!Number.isSafeInteger(ctidTraderAccountId) || ctidTraderAccountId <= 0) {
+    throw new Error('A valid cTrader account ID is required for spot subscriptions.');
+  }
+  const normalizedIds = normalizeCTraderSpotSymbolIds(symbolIds);
+  if (normalizedIds.length === 0) {
+    throw new Error('A spot subscription batch must contain at least one valid symbol ID.');
+  }
+  return { ctidTraderAccountId, symbolId: normalizedIds, subscribeToSpotTimestamp: true };
+}
+
 export interface CTraderCandle {
   open: number;
   high: number;
@@ -1328,128 +1359,315 @@ export async function fetchCTraderReconcileState(
   });
 }
 
+
 const inFlightSpotQuotes = new Map<string, Promise<CTraderMarketQuote>>();
 
-export async function fetchLiveCTraderQuote(
-  ctidTraderAccountId: number,
-  symbolId: number,
-  symbol: string,
-  clientId: string,
-  clientSecret: string,
-  accessToken: string,
-  isLive: boolean,
-  digits: number
+interface CTraderSpotSnapshot { bid?: number; ask?: number; timestamp: number; receivedAt: number; }
+interface CTraderSpotWaiter {
+  resolve: (quote: CTraderMarketQuote) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+}
+interface CTraderSpotSubscriptionRequest {
+  symbolIds: number[];
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout | null;
+  promise: Promise<void>;
+}
+interface CTraderSpotStreamState {
+  accountId: number;
+  symbols: Map<number, CTraderSpotSubscriptionSymbol>;
+  snapshots: Map<number, CTraderSpotSnapshot>;
+  requestedSymbolIds: Set<number>;
+  confirmedSymbolIds: Set<number>;
+  pendingSymbolIds: Set<number>;
+  waiters: Map<number, Set<CTraderSpotWaiter>>;
+  requests: Map<string, CTraderSpotSubscriptionRequest>;
+  subscriptionPromises: Map<number, Promise<void>>;
+  flushTimer?: NodeJS.Timeout;
+  messageHandler: (data: any) => void;
+  closeHandler: () => void;
+  errorHandler: (error: any) => void;
+}
+const cTraderSpotStreams = new WeakMap<WebSocket, CTraderSpotStreamState>();
+const CTRADER_SPOT_SUBSCRIPTION_BATCH_SIZE = 50;
+const CTRADER_SPOT_BATCH_DELAY_MS = 20;
+const CTRADER_SPOT_QUOTE_TIMEOUT_MS = 5500;
+const CTRADER_SPOT_CACHE_FRESH_MS = 2500;
+const CTRADER_SPOT_SUBSCRIPTION_ACK_TIMEOUT_MS = 7000;
+
+function rejectCTraderSpotWaiters(state: CTraderSpotStreamState, symbolId: number, error: Error): void {
+  const waiters = state.waiters.get(symbolId);
+  if (!waiters) return;
+  state.waiters.delete(symbolId);
+  for (const waiter of waiters) {
+    clearTimeout(waiter.timer);
+    waiter.reject(error);
+  }
+}
+function settleCTraderSpotSubscription(state: CTraderSpotStreamState, clientMsgId: string, error?: Error): void {
+  const request = state.requests.get(clientMsgId);
+  if (!request) return;
+  state.requests.delete(clientMsgId);
+  if (request.timer) clearTimeout(request.timer);
+  for (const symbolId of request.symbolIds) {
+    if (error) {
+      state.requestedSymbolIds.delete(symbolId);
+      state.confirmedSymbolIds.delete(symbolId);
+      rejectCTraderSpotWaiters(state, symbolId, error);
+    } else {
+      state.confirmedSymbolIds.add(symbolId);
+    }
+    if (state.subscriptionPromises.get(symbolId) === request.promise) state.subscriptionPromises.delete(symbolId);
+  }
+  if (error) request.reject(error);
+  else request.resolve();
+}
+function failCTraderSpotStream(state: CTraderSpotStreamState, error: Error): void {
+  for (const clientMsgId of [...state.requests.keys()]) settleCTraderSpotSubscription(state, clientMsgId, error);
+  for (const symbolId of [...state.waiters.keys()]) rejectCTraderSpotWaiters(state, symbolId, error);
+  state.requestedSymbolIds.clear();
+  state.confirmedSymbolIds.clear();
+  state.pendingSymbolIds.clear();
+  if (state.flushTimer) {
+    clearTimeout(state.flushTimer);
+    state.flushTimer = undefined;
+  }
+}
+function getOrCreateCTraderSpotStream(ws: WebSocket, accountId: number): CTraderSpotStreamState {
+  const existing = cTraderSpotStreams.get(ws);
+  if (existing) {
+    if (existing.accountId !== accountId) throw new Error('cTrader spot stream account mismatch on an authenticated socket.');
+    return existing;
+  }
+  let state!: CTraderSpotStreamState;
+  const messageHandler = (data: any) => {
+    try {
+      const raw = typeof data === 'string' ? data : (data?.data ?? data).toString();
+      const msg = JSON.parse(raw);
+      const clientMsgId = String(msg.clientMsgId || '');
+      if (msg.payloadType === MSG_SUBSCRIBE_SPOTS_RES && clientMsgId) {
+        settleCTraderSpotSubscription(state, clientMsgId);
+        return;
+      }
+      if (msg.payloadType === MSG_ERROR_RES && clientMsgId && state.requests.has(clientMsgId)) {
+        settleCTraderSpotSubscription(state, clientMsgId,
+          new Error('cTrader batch spot subscription rejected: ' + JSON.stringify(msg.payload || {})));
+        return;
+      }
+      if (msg.payloadType !== MSG_SPOT_EVENT) return;
+      const payload = msg.payload || {};
+      const symbolId = Number(payload.symbolId);
+      const symbolInfo = state.symbols.get(symbolId);
+      if (!symbolInfo || !Number.isSafeInteger(symbolId) || symbolId <= 0) return;
+      const previous = state.snapshots.get(symbolId);
+      let bid = previous?.bid;
+      let ask = previous?.ask;
+      let receivedPrice = false;
+      // cTrader spot events are incremental and can include only one side.
+      if (payload.bid !== undefined) {
+        const parsedBid = priceFromRelative(Number(payload.bid), symbolInfo.digits);
+        if (Number.isFinite(parsedBid) && parsedBid > 0) { bid = parsedBid; receivedPrice = true; }
+      }
+      if (payload.ask !== undefined) {
+        const parsedAsk = priceFromRelative(Number(payload.ask), symbolInfo.digits);
+        if (Number.isFinite(parsedAsk) && parsedAsk > 0) { ask = parsedAsk; receivedPrice = true; }
+      }
+      if (!receivedPrice) return;
+      const receivedAt = Date.now();
+      const rawTimestamp = Number(payload.timestamp);
+      const timestamp = Number.isFinite(rawTimestamp) && rawTimestamp > 0 ? rawTimestamp : receivedAt;
+      state.snapshots.set(symbolId, { bid, ask, timestamp, receivedAt });
+      if (bid === undefined || ask === undefined || bid <= 0 || ask < bid) return;
+      const quote: CTraderMarketQuote = { symbol: symbolInfo.symbol, symbolId, bid, ask, timestamp, status: 'FRESH' };
+      const waiters = state.waiters.get(symbolId);
+      if (waiters) {
+        state.waiters.delete(symbolId);
+        for (const waiter of waiters) {
+          clearTimeout(waiter.timer);
+          waiter.resolve(quote);
+        }
+      }
+    } catch {
+      // Ignore malformed or unrelated WebSocket messages.
+    }
+  };
+  const errorHandler = (error: any) => {
+    failCTraderSpotStream(state,
+      new Error('cTrader spot stream socket error: ' + String(error?.message || error || 'unknown error')));
+  };
+  const closeHandler = () => {
+    failCTraderSpotStream(state, new Error('cTrader WebSocket closed while waiting for spot quotes.'));
+    ws.off('message', messageHandler);
+    ws.off('error', errorHandler);
+    cTraderSpotStreams.delete(ws);
+  };
+  state = {
+    accountId,
+    symbols: new Map<number, CTraderSpotSubscriptionSymbol>(),
+    snapshots: new Map<number, CTraderSpotSnapshot>(),
+    requestedSymbolIds: new Set<number>(),
+    confirmedSymbolIds: new Set<number>(),
+    pendingSymbolIds: new Set<number>(),
+    waiters: new Map<number, Set<CTraderSpotWaiter>>(),
+    requests: new Map<string, CTraderSpotSubscriptionRequest>(),
+    subscriptionPromises: new Map<number, Promise<void>>(),
+    messageHandler,
+    closeHandler,
+    errorHandler
+  };
+  cTraderSpotStreams.set(ws, state);
+  ws.on('message', messageHandler);
+  ws.once('close', closeHandler);
+  ws.on('error', errorHandler);
+  return state;
+}
+async function sendCTraderSpotSubscriptionBatch(
+  ws: WebSocket, state: CTraderSpotStreamState, requestedIds: number[]
+): Promise<void> {
+  const symbolIds = normalizeCTraderSpotSymbolIds(requestedIds)
+    .filter(id => !state.confirmedSymbolIds.has(id) && !state.requestedSymbolIds.has(id));
+  if (!symbolIds.length) return;
+  const clientMsgId = 'spot_batch_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+  let resolveRequest!: () => void;
+  let rejectRequest!: (error: Error) => void;
+  const promise = new Promise<void>((resolve, reject) => { resolveRequest = resolve; rejectRequest = reject; });
+  const request: CTraderSpotSubscriptionRequest = {
+    symbolIds, resolve: resolveRequest, reject: rejectRequest, timer: null, promise
+  };
+  request.timer = setTimeout(() => settleCTraderSpotSubscription(state, clientMsgId,
+    new Error('Timed out waiting for cTrader spot-subscription acknowledgement for ' + symbolIds.length + ' symbols.')),
+  CTRADER_SPOT_SUBSCRIPTION_ACK_TIMEOUT_MS);
+  state.requests.set(clientMsgId, request);
+  for (const symbolId of symbolIds) {
+    state.requestedSymbolIds.add(symbolId);
+    state.subscriptionPromises.set(symbolId, promise);
+  }
+  try {
+    const payload = buildCTraderSpotSubscriptionPayload(state.accountId, symbolIds);
+    await queueWsRequest(ws, async () => {
+      if (ws.readyState !== WebSocket.OPEN) throw new Error('cTrader WebSocket is not open for spot subscription.');
+      ws.send(JSON.stringify({ clientMsgId, payloadType: MSG_SUBSCRIBE_SPOTS_REQ, payload }));
+    }, 90);
+  } catch (error: any) {
+    settleCTraderSpotSubscription(state, clientMsgId,
+      new Error(String(error?.message || error || 'Failed to send cTrader spot subscription.')));
+  }
+  return promise;
+}
+async function sendCTraderSpotSubscriptionBatches(
+  ws: WebSocket, state: CTraderSpotStreamState, symbolIds: number[]
+): Promise<void> {
+  const ids = normalizeCTraderSpotSymbolIds(symbolIds);
+  const batches: number[][] = [];
+  for (let index = 0; index < ids.length; index += CTRADER_SPOT_SUBSCRIPTION_BATCH_SIZE) {
+    batches.push(ids.slice(index, index + CTRADER_SPOT_SUBSCRIPTION_BATCH_SIZE));
+  }
+  await Promise.all(batches.map(batch => sendCTraderSpotSubscriptionBatch(ws, state, batch)));
+}
+async function flushPendingCTraderSpotSubscriptions(ws: WebSocket, state: CTraderSpotStreamState): Promise<void> {
+  const ids = [...state.pendingSymbolIds];
+  state.pendingSymbolIds.clear();
+  const toSend = ids.filter(id => !state.confirmedSymbolIds.has(id) && !state.requestedSymbolIds.has(id));
+  if (!toSend.length) return;
+  try {
+    await sendCTraderSpotSubscriptionBatches(ws, state, toSend);
+  } catch (error: any) {
+    console.warn('[cTrader] Batched spot subscription failed: ' + String(error?.message || error));
+  }
+}
+function scheduleCTraderSpotSubscriptionFlush(ws: WebSocket, state: CTraderSpotStreamState): void {
+  if (state.flushTimer) return;
+  state.flushTimer = setTimeout(() => {
+    state.flushTimer = undefined;
+    void flushPendingCTraderSpotSubscriptions(ws, state);
+  }, CTRADER_SPOT_BATCH_DELAY_MS);
+}
+function waitForCTraderSpotQuote(
+  ws: WebSocket, accountId: number, requested: CTraderSpotSubscriptionSymbol
 ): Promise<CTraderMarketQuote> {
-  const quoteKey = `${isLive ? 'LIVE' : 'DEMO'}:${ctidTraderAccountId}:${symbolId}`;
+  const state = getOrCreateCTraderSpotStream(ws, accountId);
+  const symbolId = Number(requested.symbolId);
+  if (!Number.isSafeInteger(symbolId) || symbolId <= 0) {
+    return Promise.reject(new Error('A valid cTrader symbol ID is required for a spot quote.'));
+  }
+  state.symbols.set(symbolId, requested);
+  const cached = state.snapshots.get(symbolId);
+  if (cached && cached.bid !== undefined && cached.ask !== undefined &&
+      cached.bid > 0 && cached.ask >= cached.bid &&
+      Date.now() - cached.receivedAt <= CTRADER_SPOT_CACHE_FRESH_MS) {
+    return Promise.resolve({
+      symbol: requested.symbol, symbolId, bid: cached.bid, ask: cached.ask,
+      timestamp: cached.timestamp, status: 'FRESH'
+    });
+  }
+  return new Promise<CTraderMarketQuote>((resolve, reject) => {
+    let waiters = state.waiters.get(symbolId);
+    if (!waiters) { waiters = new Set<CTraderSpotWaiter>(); state.waiters.set(symbolId, waiters); }
+    const waiter: CTraderSpotWaiter = {
+      resolve,
+      reject,
+      timer: setTimeout(() => {
+        const current = state.waiters.get(symbolId);
+        if (current) {
+          current.delete(waiter);
+          if (current.size === 0) state.waiters.delete(symbolId);
+        }
+        reject(new Error('Timeout waiting for cTrader spot event for ' + requested.symbol));
+      }, CTRADER_SPOT_QUOTE_TIMEOUT_MS)
+    };
+    waiters.add(waiter);
+    if (!state.confirmedSymbolIds.has(symbolId) && !state.requestedSymbolIds.has(symbolId)) {
+      state.pendingSymbolIds.add(symbolId);
+      scheduleCTraderSpotSubscriptionFlush(ws, state);
+    }
+  });
+}
+
+/** Prime one authenticated socket with a multi-symbol request and retain its spot stream. */
+export async function subscribeLiveCTraderSpots(
+  ctidTraderAccountId: number, symbols: CTraderSpotSubscriptionSymbol[],
+  clientId: string, clientSecret: string, accessToken: string, isLive: boolean
+): Promise<void> {
+  const unique = new Map<number, CTraderSpotSubscriptionSymbol>();
+  for (const symbol of Array.isArray(symbols) ? symbols : []) {
+    const id = Number(symbol?.symbolId);
+    if (Number.isSafeInteger(id) && id > 0 && !unique.has(id)) {
+      unique.set(id, { symbolId: id, symbol: String(symbol.symbol || id), digits: Number(symbol.digits || 5) });
+    }
+  }
+  if (!unique.size) return;
+  await withAuthenticatedAccount(ctidTraderAccountId, clientId, clientSecret, accessToken, isLive, async ws => {
+    const state = getOrCreateCTraderSpotStream(ws, ctidTraderAccountId);
+    for (const symbol of unique.values()) state.symbols.set(symbol.symbolId, symbol);
+    if (state.flushTimer) { clearTimeout(state.flushTimer); state.flushTimer = undefined; }
+    const allIds = normalizeCTraderSpotSymbolIds([...unique.keys(), ...state.pendingSymbolIds]);
+    state.pendingSymbolIds.clear();
+    const toSend = allIds.filter(id => !state.confirmedSymbolIds.has(id) && !state.requestedSymbolIds.has(id));
+    const sendPromise = toSend.length
+      ? sendCTraderSpotSubscriptionBatches(ws, state, toSend)
+      : Promise.resolve();
+    const inFlight = allIds
+      .map(id => state.subscriptionPromises.get(id))
+      .filter((promise): promise is Promise<void> => Boolean(promise));
+    await Promise.all([sendPromise, ...inFlight]);
+  });
+}
+
+export async function fetchLiveCTraderQuote(
+  ctidTraderAccountId: number, symbolId: number, symbol: string,
+  clientId: string, clientSecret: string, accessToken: string, isLive: boolean, digits: number
+): Promise<CTraderMarketQuote> {
+  const quoteKey = (isLive ? 'LIVE' : 'DEMO') + ':' + ctidTraderAccountId + ':' + symbolId;
   const existing = inFlightSpotQuotes.get(quoteKey);
   if (existing) return existing;
-
   const work = withAuthenticatedAccount(
-    ctidTraderAccountId,
-    clientId,
-    clientSecret,
-    accessToken,
-    isLive,
-    async ws => {
-      const clientMsgId = `quote_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      let timer: NodeJS.Timeout | undefined;
-      let settled = false;
-      let onMsg: ((data: any) => void) | undefined;
-      // ProtoOASpotEvent is incremental: a frame can contain only bid OR ask.
-      // Accumulate both sides for this symbol instead of treating the first
-      // one-sided frame as a complete quote (which made every pair fail).
-      let latestBid: number | undefined;
-      let latestAsk: number | undefined;
-      let quoteTimestamp = Date.now();
-
-      const eventPromise = new Promise<CTraderMarketQuote>((resolve, reject) => {
-        const cleanup = () => {
-          if (timer) clearTimeout(timer);
-          if (onMsg) ws.off('message', onMsg);
-        };
-        onMsg = (data: any) => {
-          try {
-            const raw = typeof data === 'string' ? data : (data?.data ?? data).toString();
-            const msg = JSON.parse(raw);
-            // Ignore request errors emitted for other queued operations on this
-            // persistent WebSocket. Only a correlated rejection belongs to
-            // this spot subscription; uncorrelated errors must not fan out.
-            if (
-              msg.payloadType === MSG_ERROR_RES
-              && msg.clientMsgId === clientMsgId
-            ) {
-              settled = true;
-              cleanup();
-              reject(new Error(`cTrader quote error: ${JSON.stringify(msg.payload)}`));
-              return;
-            }
-            if (msg.payloadType !== MSG_SPOT_EVENT || Number(msg.payload?.symbolId) !== symbolId) return;
-            const p = msg.payload;
-            if (p.bid !== undefined) {
-              const bid = priceFromRelative(Number(p.bid), digits);
-              if (Number.isFinite(bid) && bid > 0) latestBid = bid;
-            }
-            if (p.ask !== undefined) {
-              const ask = priceFromRelative(Number(p.ask), digits);
-              if (Number.isFinite(ask) && ask > 0) latestAsk = ask;
-            }
-            if (p.timestamp !== undefined && Number.isFinite(Number(p.timestamp)) && Number(p.timestamp) > 0) {
-              quoteTimestamp = Number(p.timestamp);
-            }
-            // Wait for both sides; one-sided spot updates are normal on cTrader.
-            if (latestBid === undefined || latestAsk === undefined) return;
-            if (latestAsk < latestBid) return;
-            settled = true;
-            cleanup();
-            resolve({
-              symbol,
-              symbolId,
-              bid: latestBid,
-              ask: latestAsk,
-              timestamp: quoteTimestamp,
-              status: 'FRESH'
-            });
-          } catch {}
-        };
-        ws.on('message', onMsg);
-      });
-
-      try {
-        // Pace the outbound subscription request through the same per-socket
-        // queue used by historical, account and order requests. The queue slot
-        // ends after send; the spot event is awaited separately.
-        await queueWsRequest(ws, async () => {
-          timer = setTimeout(() => {
-            if (settled) return;
-            settled = true;
-            if (onMsg) ws.off('message', onMsg);
-          }, 5000);
-          ws.send(JSON.stringify({
-            clientMsgId,
-            payloadType: MSG_SUBSCRIBE_SPOTS_REQ,
-            payload: {
-              ctidTraderAccountId,
-              symbolId: [symbolId],
-              subscribeToSpotTimestamp: true
-            }
-          }));
-        }, 90);
-        return await Promise.race([
-          eventPromise,
-          new Promise<CTraderMarketQuote>((_resolve, reject) => {
-            setTimeout(() => reject(new Error(`Timeout waiting for cTrader spot event for ${symbol}`)), 5500).unref?.();
-          })
-        ]);
-      } catch (error) {
-        if (timer) clearTimeout(timer);
-        if (onMsg) ws.off('message', onMsg);
-        throw error;
-      }
-    }
+    ctidTraderAccountId, clientId, clientSecret, accessToken, isLive,
+    async ws => waitForCTraderSpotQuote(ws, ctidTraderAccountId, { symbolId, symbol, digits })
   ).finally(() => {
     if (inFlightSpotQuotes.get(quoteKey) === work) inFlightSpotQuotes.delete(quoteKey);
   });
-
   inFlightSpotQuotes.set(quoteKey, work);
   return work;
 }
