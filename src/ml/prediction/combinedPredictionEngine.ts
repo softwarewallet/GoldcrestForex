@@ -35,6 +35,7 @@ export interface PredictOptions {
   };
   newsArticles?: LiveNewsArticle[];
   spreadPips?: number;
+  pipSize?: number;
   cutoffTimestamp?: number;
 }
 
@@ -192,6 +193,7 @@ export class CombinedPredictionEngine {
       newsImpactScore: news.marketImpactScore,
       highImpactActive: news.marketImpactScore > 0.6,
       newsDataAvailable: news.relevantArticles > 0,
+      pipSize: options.pipSize,
       spreadPips
     });
 
