@@ -12,10 +12,22 @@ import { MomentumEngine } from './momentumEngine';
 import { TrendEngine } from './trendEngine';
 import { VolumeOrderFlowEngine } from './volumeOrderFlowEngine';
 import { OrderBookEngine } from './orderBookEngine';
-import { MacroEngine } from './macroEngine';
 import { NewsRiskEngine } from './newsRiskEngine';
 import { MultiTimeframeEngine } from './multiTimeframeEngine';
-import { MLDirectionEngine } from './mlDirectionEngine';
+
+function unavailableComponent(componentName: string, explanation: string): ComponentDirectionResult {
+  return {
+    componentName,
+    direction: 'NEUTRAL',
+    score: 0,
+    strength: 0,
+    confidence: 0,
+    dataQuality: 'UNAVAILABLE',
+    timestamp: Date.now(),
+    featureVersion: '3.0.0',
+    explanation
+  };
+}
 
 export interface FusionInputOptions {
   pair: string;
@@ -31,6 +43,9 @@ export interface FusionInputOptions {
   highImpactActive?: boolean;
   mtfData?: Record<string, { closes: number[] }>;
   spreadPips?: number;
+  /** Explicitly indicate whether pair-relative news articles survived freshness/relevance filtering. */
+  newsDataAvailable?: boolean;
+  pipSize?: number;
   championPrediction?: { direction: string; probability: number };
 }
 
@@ -43,25 +58,39 @@ export class DirectionFusionEngine {
     const lows = options.lows || [];
     const volumes = options.volumes || closes.map(() => 100);
 
-    // 1. Evaluate all independent components
-    const momentum = MomentumEngine.evaluateMomentum(closes);
-    const trend = TrendEngine.evaluateTrend(highs, lows, closes);
-    const vwap = VolumeOrderFlowEngine.evaluateVWAP(closes, highs, lows, volumes);
+    // Only components with sufficient real inputs can vote. LOW_QUALITY or
+    // fabricated defaults must not influence the composite direction.
+    const momentum = closes.length >= 35
+      ? MomentumEngine.evaluateMomentum(closes)
+      : unavailableComponent('MomentumEngine', 'At least 35 actual candles are required for momentum evidence.');
+    const trend = closes.length >= 50 && highs.length >= 50 && lows.length >= 50
+      ? TrendEngine.evaluateTrend(highs, lows, closes)
+      : unavailableComponent('TrendEngine', 'At least 50 actual candles are required for trend/EMA evidence.');
+    const hasUsableVolume = closes.length >= 35
+      && highs.length >= closes.length
+      && lows.length >= closes.length
+      && volumes.length >= closes.length
+      && volumes.some(value => Number.isFinite(value) && value > 0);
+    const vwap = hasUsableVolume
+      ? VolumeOrderFlowEngine.evaluateVWAP(closes, highs, lows, volumes, options.pipSize ?? (pair.includes('JPY') ? 0.01 : pair === 'XAU/USD' ? 0.1 : 0.0001))
+      : unavailableComponent('VolumeOrderFlowEngine', 'Genuine price and tick-volume history is insufficient for VWAP evidence.');
     const obi = OrderBookEngine.evaluateOrderBook(options.bidVolume, options.askVolume);
-    const macro = MacroEngine.evaluateMacro(pair);
-    const news = NewsRiskEngine.evaluateNews(options.newsSentiment, options.newsImpactScore, options.highImpactActive);
-    const mtf = MultiTimeframeEngine.evaluateMTF(options.mtfData || {});
 
-    const ml = MLDirectionEngine.evaluateML({
-      rsi: 55,
-      macdHist: momentum.score,
-      adx: 28,
-      diSpread: 5,
-      emaAlignment: trend.score,
-      vwapDist: vwap.score,
-      macroDiff: macro.score,
-      newsSentiment: news.score
-    });
+    // MacroEngine currently embeds fixed example rates. Keep the component visible
+    // for diagnosis, but exclude it until timestamped authoritative rate data is wired.
+    const macro = unavailableComponent('MacroEngine', 'No timestamped authoritative macro-rate snapshot was supplied; fixed rate constants are excluded.');
+    const newsSupplied = options.newsDataAvailable ?? (
+      options.newsSentiment !== undefined || options.newsImpactScore !== undefined
+    );
+    const news = newsSupplied
+      ? NewsRiskEngine.evaluateNews(options.newsSentiment, options.newsImpactScore, options.highImpactActive)
+      : unavailableComponent('NewsRiskEngine', 'No fresh pair-relative news evidence was supplied.');
+    const mtf = MultiTimeframeEngine.evaluateMTF(options.mtfData || {}, options.pipSize ?? (pair.includes('JPY') ? 0.01 : pair === 'XAU/USD' ? 0.1 : 0.0001));
+
+    // MLDirectionEngine is currently a hand-weighted sigmoid, not a trained
+    // calibrated model; its former fixed RSI/ADX/DI inputs are deliberately not
+    // counted as model evidence.
+    const ml = unavailableComponent('MLDirectionEngine', 'No trained and empirically calibrated ML model artifact is configured; placeholder features are excluded.');
 
     const components: Record<string, ComponentDirectionResult> = {
       Momentum: momentum,
@@ -91,8 +120,8 @@ export class DirectionFusionEngine {
     };
 
     for (const [name, comp] of Object.entries(components)) {
-      const w = weights[name] || 0.1;
-      if (comp.dataQuality === 'AVAILABLE' || comp.dataQuality === 'LOW_QUALITY') {
+      const w = weights[name] ?? 0;
+      if (comp.dataQuality === 'AVAILABLE' && w > 0) {
         totalWeight += w;
         if (comp.score > 0) bullishEvidenceSum += comp.score * w;
         else if (comp.score < 0) bearishEvidenceSum += Math.abs(comp.score) * w;
@@ -130,8 +159,13 @@ export class DirectionFusionEngine {
 
     const predictionId = `quant_dir_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
 
-    const championDir = options.championPrediction?.direction || 'BUY';
-    const championProb = options.championPrediction?.probability || 0.65;
+    const championVsChallenger = options.championPrediction ? {
+      championDirection: options.championPrediction.direction,
+      championProbability: options.championPrediction.probability,
+      challengerDirection: finalDirection,
+      challengerProbability: probUp,
+      agreement: options.championPrediction.direction === finalDirection
+    } : undefined;
 
     return {
       predictionId,
@@ -151,14 +185,8 @@ export class DirectionFusionEngine {
       marketRegime,
       components,
       costAdjustedSpreadPips: spreadPips,
-      explanation: `Quantitative Direction: ${finalDirection} (NetScore: ${netScore.toFixed(2)}, Conflict: ${(conflictRatio * 100).toFixed(0)}%, Regime: ${marketRegime})`,
-      championVsChallenger: {
-        championDirection: championDir,
-        championProbability: championProb,
-        challengerDirection: finalDirection,
-        challengerProbability: probUp,
-        agreement: championDir === finalDirection
-      }
+      explanation: `Quantitative Direction: ${finalDirection} (uncalibrated evidence score: ${netScore.toFixed(2)}, Conflict: ${(conflictRatio * 100).toFixed(0)}%, Regime: ${marketRegime})`,
+      ...(championVsChallenger ? { championVsChallenger } : {})
     };
   }
 }

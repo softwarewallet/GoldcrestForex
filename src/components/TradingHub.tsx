@@ -149,6 +149,31 @@ export const TradingHub: React.FC<TradingHubProps> = ({
     maxOpenPositions: number;
     lastCycleAt: number | null;
     lastCycleResult: string | null;
+    predictionFusion?: Record<string, {
+      status: 'COMPLETE' | 'INSUFFICIENT_DATA' | 'PENDING' | 'ERROR';
+      pair: string;
+      startedAt: number;
+      completedAt: number;
+      incumbentSignalId: string;
+      message?: string;
+      fusion?: {
+        consensus: 'BUY' | 'SELL' | 'NO_TRADE';
+        confidenceTier: 'HIGH_CONFLUENCE' | 'PARTIAL_AGREEMENT' | 'CONFLICT' | 'INSUFFICIENT_EVIDENCE' | 'NO_TRADE';
+        qualifiedVoteCount: number;
+        conflictRatio: number;
+        rationale: string[];
+        executionAuthority: 'OBSERVATION_ONLY';
+        observations: Array<{
+          engine: string;
+          direction: 'BUY' | 'SELL' | 'NO_TRADE';
+          evidenceState: string;
+          confidence?: number;
+          sampleSize?: number;
+          reason: string;
+          metadata?: Record<string, unknown>;
+        }>;
+      };
+    }>;
     cycleSignals?: Array<{
       id: string;
       timestamp: number;
@@ -1114,6 +1139,22 @@ export const TradingHub: React.FC<TradingHubProps> = ({
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
           <div className="flex flex-wrap justify-between gap-2"><div><div className="text-sm font-bold text-white font-mono">{autoLiveOwnsSignalFeed ? 'Auto Live Signals & Decisions' : 'Actionable Signals'}</div><div className="text-[10px] text-slate-500">Scanned: <span className="text-cyan-300">{displayedSignalScanStats.total}</span> · Actionable: <span className="text-emerald-300">{displayedSignalScanStats.actionable}</span> · NO_TRADE / NEUTRAL: <span className="text-slate-400">{displayedSignalScanStats.noTrade}</span> · Errors: <span className="text-rose-300">{displayedSignalScanStats.errors}</span> · Auto Live minimum score: <span className="text-cyan-300">{autoStatus?.minSignalScore ?? '—'}</span></div></div><div className="flex gap-2 items-center"><span className="text-[11px] font-mono text-slate-400">Scan Age: <b className="text-cyan-300">{signalsScanCompletedAt ? formatAge(signalsScanCompletedAt) : 'N/A'}</b></span><button type="button" onClick={() => fetchRealSignals(false)} disabled={isLoadingSignals} className="px-2.5 py-1 rounded-lg border border-slate-700 bg-slate-950 text-slate-300 text-[11px] font-mono">Refresh</button></div></div>
           {triggerNotification && <div className={"p-3 rounded-lg border text-xs font-mono " + (triggerNotification.type === 'error' ? "border-rose-800 bg-rose-950/40 text-rose-300" : "border-emerald-800 bg-emerald-950/40 text-emerald-300")}>{triggerNotification.message}</div>}
+          {autoLiveOwnsSignalFeed && <div className="rounded-lg border border-cyan-900/70 bg-slate-950/70 p-3 space-y-2">
+            <div className="text-xs font-bold text-cyan-300 font-mono">MULTI-ENGINE PREDICTION FUSION · SHADOW ONLY</div>
+            <div className="text-[10px] text-slate-500">Current Auto Live signal, the legacy Goldcrest-FX-Live technical baseline, the statistical predictor and deterministic macro/volatility policy are compared on fresh data. Observations never authorize orders.</div>
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
+              {(autoStatus?.predictionFusion ? Object.values(autoStatus.predictionFusion).sort((a,b)=>b.completedAt-a.completedAt).slice(0,6) : []).map(item => <div key={item.pair} className="rounded border border-slate-800 bg-slate-900 p-2 space-y-1">
+                <div className="flex justify-between gap-2"><span className="font-bold text-white text-xs">{item.pair}</span><span className={"text-[10px] font-mono " + (item.status === 'COMPLETE' ? 'text-emerald-300' : item.status === 'PENDING' ? 'text-cyan-300' : 'text-amber-300')}>{item.status}</span></div>
+                {item.fusion ? <>
+                  <div className="text-xs text-slate-300">Shadow consensus: <b className={item.fusion.consensus === 'BUY' ? 'text-emerald-300' : item.fusion.consensus === 'SELL' ? 'text-rose-300' : 'text-slate-300'}>{item.fusion.consensus}</b> · {item.fusion.confidenceTier.replace(/_/g,' ')}</div>
+                  <div className="text-[10px] text-slate-500">Qualified methods: {item.fusion.qualifiedVoteCount} · Disagreement: {(item.fusion.conflictRatio*100).toFixed(0)}%</div>
+                  <div className="flex flex-wrap gap-1">{item.fusion.observations.map(obs => <span key={obs.engine} title={obs.reason} className={"rounded border px-1.5 py-0.5 text-[9px] " + (obs.evidenceState === 'AVAILABLE' ? 'border-emerald-900 text-emerald-300' : 'border-slate-700 text-slate-500')}>{obs.engine.replace(/_/g,' ')}: {obs.direction} ({obs.evidenceState})</span>)}</div>
+                  <div className="text-[10px] text-slate-500" title={item.fusion.rationale.join(' ')}>{item.fusion.rationale.join(' ')}</div>
+                </> : <div className="text-[10px] text-slate-400">{item.message || 'Waiting for shadow comparison.'}</div>}
+              </div>)}
+            </div>
+            {(!autoStatus?.predictionFusion || Object.keys(autoStatus.predictionFusion).length===0) && <div className="text-[10px] text-slate-500">Challenger comparison starts after Auto Live sees a current broker quote and enough fresh candles.</div>}
+          </div>}
           <div className="overflow-x-auto"><table className="w-full text-xs font-mono"><thead><tr className="text-slate-500 border-b border-slate-800"><th className="py-2 text-left">Market</th><th>Symbol</th><th>Side</th><th>Strategy</th><th className="text-right">SL</th><th className="text-right">TP</th><th>Score</th><th>ML</th><th>Age</th><th>{autoLiveOwnsSignalFeed ? 'Auto Live Decision' : 'Action'}</th></tr></thead>
           <tbody>{visiblePlannedTrades.map(signal => {
             const decision = String(signal.evaluationStatus || signal.status || signal.signalStatus || 'PREDICTED').toUpperCase();

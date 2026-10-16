@@ -16,6 +16,7 @@ import { liveRuntimeLog, tradeAuditLog } from './liveRuntimeLog';
 import { tradeContinuityService } from './tradeContinuityService';
 import { calculateForexPipTargets, normalizePriceToThreeDigits, sizeForexOrderToMaxTradeValue } from '../brokers/safety/TradeSizing';
 import type { ForexSignal } from '../markets/forex/types';
+import { autoLivePredictionShadowService, AutoLiveShadowComparison } from '../ml/fusion/autoLivePredictionShadowService';
 
 const LIVE_QUOTE_MAX_AGE_MS = 30_000;
 
@@ -156,6 +157,7 @@ export interface AutoTradingStatus {
   lastCycleAt: number | null;
   lastCycleResult: string | null;
   cycleSignals: AutoLiveSignalSnapshot[];
+  predictionFusion: Record<string, AutoLiveShadowComparison>;
   lastActions: Array<{
     pair: string;
     result: string;
@@ -186,6 +188,7 @@ class AutoTradingService {
   private lastCycleResult: string | null = null;
   private lastActions: AutoTradingStatus['lastActions'] = [];
   private cycleSignals: AutoLiveSignalSnapshot[] = [];
+  private predictionFusion: Record<string, AutoLiveShadowComparison> = {};
   private lastPreOpenPreparedAt: number | null = null;
   private preOpenTrendPairsEvaluated = 0;
   private preOpenNews: LiveNewsSnapshot | null = null;
@@ -318,6 +321,7 @@ class AutoTradingService {
           evaluationReason: action?.reason || signal.reasons.join('; ')
         };
       }),
+      predictionFusion: { ...this.predictionFusion },
       lastActions: [...this.lastActions],
       marketGate: getAutoLiveMarketGate(),
       currentExecution: { ...this.currentExecution },
@@ -998,6 +1002,61 @@ class AutoTradingService {
       liveRuntimeLog('INFO', 'AUTO_LIVE_SIGNAL_GENERATION_STARTED', { pair });
       const signal = await this.signalEngine.generateSignal(pair);
       const cockpitSignal = mapAutoLiveSignalForCockpit(signal);
+      // Run independent challengers in SHADOW mode only. This intentionally
+      // does not await the challengers and never feeds their directions into
+      // execution, sizing, order creation, or existing safety gates.
+      const fusionCutoff = Date.now();
+      let shadowQuote: ReturnType<LiveForexProvider['getQuote']> | null = null;
+      try {
+        shadowQuote = this.provider.getQuote(pair);
+      } catch (quoteError: any) {
+        liveRuntimeLog('WARN', 'AUTO_LIVE_SHADOW_QUOTE_UNAVAILABLE', {
+          pair, signalId: signal.id, error: quoteError?.message || String(quoteError)
+        });
+      }
+      if (shadowQuote) {
+        autoLivePredictionShadowService.launch({
+          pair,
+          cutoffTimestamp: fusionCutoff,
+          incumbent: signal,
+          quote: {
+            bid: Number(shadowQuote.bid),
+            ask: Number(shadowQuote.ask),
+            timestamp: Number(shadowQuote.timestamp),
+            spreadPips: Number(shadowQuote.spreadPips),
+            dataStatus: String(shadowQuote.dataStatus)
+          },
+          candles5M: this.provider.getCandles(pair, '5M', 80),
+          candles15M: this.provider.getCandles(pair, '15M', 500),
+          candles1H: this.provider.getCandles(pair, '1H', 80),
+          newsSnapshot: this.preOpenNews
+        }, comparison => {
+          this.predictionFusion = { ...this.predictionFusion, [pair]: comparison };
+          liveRuntimeLog(
+            comparison.status === 'COMPLETE' ? 'INFO' : comparison.status === 'PENDING' ? 'INFO' : 'WARN',
+            'AUTO_LIVE_PREDICTION_FUSION_SHADOW_RESULT',
+            {
+              pair,
+              status: comparison.status,
+              incumbentSignalId: comparison.incumbentSignalId,
+              consensus: comparison.fusion?.consensus,
+              confidenceTier: comparison.fusion?.confidenceTier,
+              qualifiedVoteCount: comparison.fusion?.qualifiedVoteCount,
+              conflictRatio: comparison.fusion?.conflictRatio,
+              observations: comparison.fusion?.observations.map(item => ({
+                engine: item.engine,
+                direction: item.direction,
+                evidenceState: item.evidenceState,
+                confidence: item.confidence,
+                sampleSize: item.sampleSize,
+                reason: item.reason
+              })),
+              message: comparison.message,
+              executionAuthority: comparison.fusion?.executionAuthority || 'OBSERVATION_ONLY'
+            }
+          );
+        });
+      }
       // Capture the signal from the same engine Auto Live uses for execution.
       // The standalone /api/signals scanner is intentionally suppressed while
       // Auto Live owns the broker queue, so the cockpit must read this feed.
