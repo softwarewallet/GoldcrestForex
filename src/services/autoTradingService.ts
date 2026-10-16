@@ -604,6 +604,9 @@ class AutoTradingService {
 
     const marketGate = getAutoLiveMarketGate();
 
+    // Match the known-working reference runtime: transient execution-permission
+    // failures pause safely and retry on the existing scheduler, rather than
+    // permanently blocking Auto Live after one connectivity interruption.
     if (this.state === 'PAUSED_RUNTIME') {
       if (killSwitch.isHalted()) {
         this.state = 'BLOCKED';
@@ -644,7 +647,6 @@ class AutoTradingService {
 
     await this.runCycle();
   }
-
   private async runPreOpenPreparation(marketGate: AutoLiveMarketGate): Promise<void> {
     if (this.state !== 'PREPARING' || this.cycleInFlight) return;
 
