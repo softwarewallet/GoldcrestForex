@@ -8,7 +8,7 @@ export class VolumeOrderFlowEngine {
   /**
    * Calculates VWAP using broker/tick volume, explicitly labeled as TICK_VOLUME_VWAP.
    */
-  public static calculateVWAP(closes: number[], highs: number[], lows: number[], volumes: number[]): VWAPResult {
+  public static calculateVWAP(closes: number[], highs: number[], lows: number[], volumes: number[], pipSize = 0.0001): VWAPResult {
     if (!closes || closes.length === 0 || !volumes || volumes.length === 0) {
       return { vwap: closes[closes.length - 1] || 1.0, distancePips: 0, normalizedDistanceATR: 0, slope: 0, status: 'UNAVAILABLE', score: 0 };
     }
@@ -25,8 +25,8 @@ export class VolumeOrderFlowEngine {
     const vwap = vSum > 0 ? pvSum / vSum : closes[closes.length - 1];
     const currentPrice = closes[closes.length - 1];
     const diff = currentPrice - vwap;
-    const pipSize = 0.0001;
-    const distancePips = diff / pipSize;
+    const validPipSize = Number.isFinite(pipSize) && pipSize > 0 ? pipSize : 0.0001;
+    const distancePips = diff / validPipSize;
 
     let score = 0;
     if (currentPrice > vwap) score = Math.min(1.0, distancePips / 50);
@@ -42,8 +42,8 @@ export class VolumeOrderFlowEngine {
     };
   }
 
-  public static evaluateVWAP(closes: number[], highs: number[], lows: number[], volumes: number[]): ComponentDirectionResult {
-    const vwapRes = this.calculateVWAP(closes, highs, lows, volumes);
+  public static evaluateVWAP(closes: number[], highs: number[], lows: number[], volumes: number[], pipSize = 0.0001): ComponentDirectionResult {
+    const vwapRes = this.calculateVWAP(closes, highs, lows, volumes, pipSize);
     let direction: 'UP' | 'DOWN' | 'NEUTRAL' = 'NEUTRAL';
     if (vwapRes.score > 0.15) direction = 'UP';
     else if (vwapRes.score < -0.15) direction = 'DOWN';
