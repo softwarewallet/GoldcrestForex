@@ -19,6 +19,22 @@ assert.equal(status.requiresContinuityAuthorization, false, 'Initial requiresCon
 assert.equal(status.isProfitContinuityActive, false, 'Initial isProfitContinuityActive should be false');
 assert.equal(tradeContinuityService.canExecuteNewTrade().allowed, true, 'Initial execution should be allowed');
 
+// Duplicate broker/reconciliation notifications must not count as multiple losses.
+status = tradeContinuityService.recordTradeOutcome({
+  id: 'duplicate-loss-regression',
+  symbol: 'EUR/USD',
+  pnl: -10
+});
+assert.equal(status.consecutiveLossCount, 1, 'First outcome should count once');
+status = tradeContinuityService.recordTradeOutcome({
+  id: 'duplicate-loss-regression',
+  symbol: 'EUR/USD',
+  pnl: -10
+});
+assert.equal(status.consecutiveLossCount, 1, 'Duplicate outcome must not increment the loss streak');
+assert.equal(status.recentTradeOutcomes.filter(t => t.id === 'duplicate-loss-regression').length, 1, 'Duplicate outcome must not be inserted twice');
+tradeContinuityService.resetStreaks();
+
 // 1. Test 19 consecutive losses - system should NOT pause yet
 for (let i = 1; i <= 19; i++) {
   status = tradeContinuityService.simulateTradeOutcome(-15, 'EUR/USD');

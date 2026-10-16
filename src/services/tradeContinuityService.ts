@@ -117,6 +117,13 @@ class TradeContinuityService {
   }
 
   public recordTradeOutcome(record: { id: string; symbol: string; pnl: number; timestamp?: number }): TradeContinuityStatus {
+    const tradeId = String(record.id || `trade_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
+    // A broker fill/reconciliation event may be delivered more than once.
+    // Reject duplicate IDs before changing streak counts or emitting breaker logs.
+    if (this.recentTradeOutcomes.some(trade => trade.id === tradeId)) {
+      return this.getStatus();
+    }
+
     const pnl = Number(record.pnl);
     let outcome: 'PROFIT' | 'LOSS' | 'BREAKEVEN' = 'BREAKEVEN';
 
@@ -173,19 +180,16 @@ class TradeContinuityService {
     }
 
     const tradeRecord: TradeOutcomeRecord = {
-      id: record.id || `trade_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      id: tradeId,
       symbol: record.symbol,
       pnl,
       outcome,
       timestamp: record.timestamp || Date.now()
     };
 
-    // Avoid duplicate insertions
-    if (!this.recentTradeOutcomes.some(t => t.id === tradeRecord.id)) {
-      this.recentTradeOutcomes.push(tradeRecord);
-      if (this.recentTradeOutcomes.length > 50) {
-        this.recentTradeOutcomes.shift();
-      }
+    this.recentTradeOutcomes.push(tradeRecord);
+    if (this.recentTradeOutcomes.length > 50) {
+      this.recentTradeOutcomes.shift();
     }
 
     this.persistState();

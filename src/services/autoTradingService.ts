@@ -1,5 +1,4 @@
-import { ForexDataProvider } from '../markets/forex/provider';
-import { ForexCandle, ForexMarketStatus, ForexQuote, ForexTimeframe } from '../markets/forex/types';
+import { LiveForexProvider } from '../markets/forex/provider';
 import { FOREX_PAIRS, getForexPairConfig } from '../markets/forex/instruments';
 import { ForexSignalEngine } from '../markets/forex/signalEngine';
 import { getForexSessionState } from '../markets/common/session';
@@ -17,15 +16,6 @@ import { tradeContinuityService } from './tradeContinuityService';
 import { calculateForexPipTargets, normalizePriceToThreeDigits, sizeForexOrderToMaxTradeValue } from '../brokers/safety/TradeSizing';
 
 const LIVE_QUOTE_MAX_AGE_MS = 30_000;
-
-// Short-lived candle cache avoids repeated history calls on every cycle.
-// This does not replace the separate live-quote freshness check at execution.
-const AUTO_CANDLE_CACHE_TTL_MS: Record<ForexTimeframe, number> = {
-  '1M': 5_000, '5M': 10_000, '15M': 20_000, '30M': 30_000,
-  '1H': 45_000, '4H': 120_000, 'Daily': 300_000
-};
-const autoCandleCache = new Map<string, { candles: any[]; expiresAt: number }>();
-const autoCandleInFlight = new Map<string, Promise<any[]>>();
 
 const AUTO_INTERVAL_MS = Math.max(
   15_000,
@@ -76,112 +66,6 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-class LiveForexSignalProvider implements ForexDataProvider {
-  readonly providerName = 'CTRADER_LIVE_PROVIDER';
-  readonly status = 'LIVE' as const;
-  readonly isDemo = false;
-
-  private candles = new Map<string, ForexCandle[]>();
-  private quotes = new Map<string, ForexQuote>();
-
-  async refreshPair(pair: string): Promise<void> {
-    const adapter = brokerRegistry.getAdapter('CTRADER', getCTraderApiMode());
-    if (!adapter.getHistoricalCandles) {
-      throw new Error('Authoritative cTrader historical market-data capability is unavailable.');
-    }
-
-    const timeframes: ForexTimeframe[] = ['5M', '15M', '1H', '4H', 'Daily'];
-    const refreshStartedAt = Date.now();
-    liveRuntimeLog('INFO', 'AUTO_LIVE_MARKET_DATA_REFRESH_STARTED', { pair, mode: getCTraderApiMode(), timeframes });
-    const rows = await Promise.all(timeframes.map(async timeframe => {
-      const cacheKey = `${getCTraderApiMode()}:${pair}:${timeframe}`;
-      const now = Date.now();
-      const cached = autoCandleCache.get(cacheKey);
-      if (cached && now < cached.expiresAt && cached.candles.length >= 35) {
-        liveRuntimeLog('INFO', 'AUTO_LIVE_CANDLE_CACHE_HIT', {
-          pair, timeframe, candleCount: cached.candles.length,
-          cacheAgeMs: now - (cached.expiresAt - AUTO_CANDLE_CACHE_TTL_MS[timeframe])
-        });
-        return { timeframe, data: cached.candles };
-      }
-      const existingRequest = autoCandleInFlight.get(cacheKey);
-      if (existingRequest) {
-        liveRuntimeLog('INFO', 'AUTO_LIVE_CANDLE_REQUEST_DEDUPED', { pair, timeframe });
-        return { timeframe, data: await existingRequest };
-      }
-      const startedAt = Date.now();
-      liveRuntimeLog('INFO', 'AUTO_LIVE_CANDLE_REQUEST_STARTED', { pair, timeframe, limit: 80 });
-      const request = (async () => {
-        try {
-          const data = await adapter.getHistoricalCandles(pair, timeframe, 80);
-          if (Array.isArray(data) && data.length >= 35) {
-            autoCandleCache.set(cacheKey, { candles: data, expiresAt: Date.now() + AUTO_CANDLE_CACHE_TTL_MS[timeframe] });
-          }
-          liveRuntimeLog('INFO', 'AUTO_LIVE_CANDLE_REQUEST_COMPLETED', {
-            pair, timeframe, candleCount: Array.isArray(data) ? data.length : null,
-            durationMs: Date.now() - startedAt
-          });
-          return data;
-        } catch (error: any) {
-          liveRuntimeLog('ERROR', 'AUTO_LIVE_CANDLE_REQUEST_FAILED', {
-            pair, timeframe, durationMs: Date.now() - startedAt, error: error?.message || String(error)
-          });
-          throw error;
-        } finally {
-          autoCandleInFlight.delete(cacheKey);
-        }
-      })();
-      autoCandleInFlight.set(cacheKey, request);
-      return { timeframe, data: await request };
-    }));
-
-    for (const row of rows) {
-      if (!Array.isArray(row.data) || row.data.length < 35) {
-        throw new Error(`Insufficient live ${row.timeframe} candle history for ${pair}.`);
-      }
-      this.candles.set(`${pair}:${row.timeframe}`, row.data as ForexCandle[]);
-    }
-
-    // Pre-open trend preparation only needs historical candles. A live quote
-    // is fetched again at the execution boundary, so opening another broker
-    // WebSocket here only adds latency and can block preparation unnecessarily.
-  }
-
-  getQuote(pair: string): ForexQuote {
-    const quote = this.quotes.get(pair);
-    if (!quote) throw new Error(`Live quote cache is empty for ${pair}.`);
-    return quote;
-  }
-
-  getCandles(pair: string, timeframe: ForexTimeframe = '15M', limit = 80): ForexCandle[] {
-    const rows = this.candles.get(`${pair}:${timeframe}`) || [];
-    return rows.slice(Math.max(0, rows.length - limit));
-  }
-
-  getLatestCandle(pair: string, timeframe: ForexTimeframe = '15M'): ForexCandle {
-    const rows = this.getCandles(pair, timeframe, 2);
-    if (!rows.length) throw new Error(`Live candle cache is empty for ${pair} ${timeframe}.`);
-    return rows[rows.length - 1];
-  }
-
-  getAvailablePairs() {
-    return FOREX_PAIRS;
-  }
-
-  getMarketStatus(): ForexMarketStatus {
-    const session = getForexSessionState();
-    const isOpen = !session.activeSessions.includes('CLOSED (WEEKEND)');
-    return {
-      isOpen,
-      status: isOpen ? 'OPEN' : 'WEEKEND',
-      activeSessions: session.activeSessions,
-      currentSession: session.activeSessions.join(' / ') || 'Interbank Electronic Off-Peak',
-      isLondonNyOverlap: session.isLondonNyOverlap,
-      serverUtcTime: new Date().toISOString()
-    };
-  }
-}
-
 export type AutoTradingState = 'STOPPED' | 'PREPARING' | 'RUNNING' | 'PAUSED_LIMIT' | 'PAUSED_RUNTIME' | 'BLOCKED';
 export type AutoTradingExecutionStage = 'IDLE' | 'SCANNING_MARKET' | 'ANALYZING_SIGNAL' | 'PREPARING_ORDER' | 'SAFETY_GATE' | 'SUBMITTING_ORDER' | 'TRADE_EXECUTED' | 'REJECTED';
 
@@ -228,7 +112,7 @@ export interface AutoTradingStatus {
 }
 
 class AutoTradingService {
-  private provider = new LiveForexSignalProvider();
+  private provider = new LiveForexProvider();
   private signalEngine = new ForexSignalEngine(undefined, this.provider);
   private timer: NodeJS.Timeout | null = null;
   private state: AutoTradingState = 'STOPPED';

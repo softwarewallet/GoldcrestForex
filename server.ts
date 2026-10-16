@@ -1432,6 +1432,7 @@ let forexPairsInFlight: Promise<any[]> | null = null;
 const SIGNALS_CACHE_TTL_MS = 15_000;
 let signalsCache: { payload: any[]; expiresAt: number } | null = null;
 let signalsInFlight: Promise<any[]> | null = null;
+let signalsAutoLiveSuppressionLogged = false;
 
 const INDIA_UNDERLYINGS_CACHE_TTL_MS = 60_000;
 let indiaUnderlyingsCache: { payload: any[]; expiresAt: number } | null = null;
@@ -2172,6 +2173,24 @@ app.post('/api/options/payoff', (req: Request, res: Response) => {
 app.get(['/api/signals', '/api/signals/all'], async (_req: Request, res: Response) => {
   const now = Date.now();
   if (signalsCache && now < signalsCache.expiresAt) return res.json(signalsCache.payload);
+
+  const autoLiveState = autoTradingService.getStatus().state;
+  if (['PREPARING', 'RUNNING', 'PAUSED_LIMIT', 'PAUSED_RUNTIME'].includes(autoLiveState)) {
+    if (!signalsAutoLiveSuppressionLogged) {
+      liveRuntimeLog('INFO', 'SIGNALS_SCAN_SKIPPED_AUTO_LIVE_ACTIVE', {
+        state: autoLiveState,
+        reason: 'Auto Live owns the shared cTrader market-data queue; serve cached signals instead of starting a competing scanner.'
+      });
+      signalsAutoLiveSuppressionLogged = true;
+    }
+    if (signalsCache) {
+      res.setHeader('X-Goldcrest-Signals-Cache', 'stale-auto-live');
+      return res.json(signalsCache.payload);
+    }
+    res.setHeader('X-Goldcrest-Signals-Cache', 'auto-live-active');
+    return res.json([]);
+  }
+  signalsAutoLiveSuppressionLogged = false;
 
   // HTTP timeouts do not cancel scanner work. Keep a single shared scan alive
   // until it settles, and serve stale known signals while refreshing.

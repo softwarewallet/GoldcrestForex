@@ -611,44 +611,89 @@ function getPayloadTypeName(payloadType: number): string {
   return names[payloadType] || `Type ${payloadType}`;
 }
 
-const wsConnectionState = new WeakMap<WebSocket, { queue: Promise<any>; lastRequestTimestamp: number; cooldownUntil: number }>();
-// cTrader rate limits are account/connection scoped. The default request spacing
-// is deliberately conservative and can be raised, but never configured below
-// 750 ms to prevent a stale environment setting from reintroducing a request burst.
+interface WsQueuedRequest {
+  priority: number;
+  sequence: number;
+  enqueuedAt: number;
+  task: () => Promise<unknown>;
+  resolve: (value: unknown) => void;
+  reject: (reason?: unknown) => void;
+}
+
+interface WsConnectionRequestQueueState {
+  pending: WsQueuedRequest[];
+  draining: boolean;
+  sequence: number;
+  lastRequestTimestamp: number;
+  cooldownUntil: number;
+}
+
+const wsConnectionState = new WeakMap<WebSocket, WsConnectionRequestQueueState>();
+// Preserve cTrader's request-rate limit while preventing long historical-candle
+// backlogs from delaying quotes and orders. FIFO ordering is retained within a priority.
 const MIN_REQUEST_INTERVAL_MS = Math.max(
   750,
   Number(process.env.CTRADER_MIN_REQUEST_INTERVAL_MS || 1000)
 );
 
-function queueWsRequest<T>(ws: WebSocket, task: () => Promise<T>): Promise<T> {
-  const state = wsConnectionState.get(ws) || {
-    queue: Promise.resolve(),
-    lastRequestTimestamp: 0,
-    cooldownUntil: 0
-  };
-  const nextQueue = state.queue.catch(() => {}).then(async () => {
-    const requiredAt = Math.max(state.lastRequestTimestamp + MIN_REQUEST_INTERVAL_MS, state.cooldownUntil);
-    const waitMs = Math.max(0, requiredAt - Date.now());
-    if (waitMs > 0) {
-      await new Promise(resolve => setTimeout(resolve, waitMs));
-    }
-    state.lastRequestTimestamp = Date.now();
-    try {
-      return await task();
-    } catch (error: any) {
-      const message = String(error?.message || error);
-      if (/BLOCKED_PAYLOAD_TYPE|RATE_LIMIT_EXCEEDED|TOO_MANY_REQUESTS|rate limit|too many requests/i.test(message)) {
-        // Every task rejection propagates through this queue. Apply a shared
-        // connection cooldown so the next queued request cannot immediately
-        // add more load after a provider throttle response.
-        state.cooldownUntil = Math.max(state.cooldownUntil, Date.now() + 5000);
+function getCTraderRequestPriority(payloadType: number): number {
+  if ([MSG_NEW_ORDER_REQ, MSG_CANCEL_ORDER_REQ, MSG_AMEND_ORDER_REQ, MSG_AMEND_POSITION_SLTP_REQ, MSG_CLOSE_POSITION_REQ].includes(payloadType)) return 100;
+  if (payloadType === MSG_SUBSCRIBE_SPOTS_REQ) return 90;
+  if ([MSG_RECONCILE_REQ, MSG_ORDER_DETAILS_REQ, MSG_DEAL_LIST_REQ].includes(payloadType)) return 75;
+  if ([MSG_GET_ACCOUNTS_REQ, MSG_TRADER_REQ, MSG_SYMBOLS_LIST_REQ].includes(payloadType)) return 50;
+  if (payloadType === MSG_GET_TRENDBARS_REQ) return 10;
+  return 40;
+}
+
+async function drainWsQueue(state: WsConnectionRequestQueueState): Promise<void> {
+  if (state.draining) return;
+  state.draining = true;
+  try {
+    while (state.pending.length > 0) {
+      state.pending.sort((a, b) => b.priority - a.priority || a.sequence - b.sequence);
+      const entry = state.pending.shift()!;
+      const requiredAt = Math.max(state.lastRequestTimestamp + MIN_REQUEST_INTERVAL_MS, state.cooldownUntil);
+      const waitMs = Math.max(0, requiredAt - Date.now());
+      if (waitMs > 0) await new Promise(resolve => setTimeout(resolve, waitMs));
+      state.lastRequestTimestamp = Date.now();
+
+      const queueWaitMs = state.lastRequestTimestamp - entry.enqueuedAt;
+      if (queueWaitMs >= 5000) {
+        console.warn(`[cTrader] Request waited ${queueWaitMs}ms in queue (priority=${entry.priority}, pending=${state.pending.length}).`);
       }
-      throw error;
+      try {
+        entry.resolve(await entry.task());
+      } catch (error: any) {
+        const message = String(error?.message || error);
+        if (/BLOCKED_PAYLOAD_TYPE|RATE_LIMIT_EXCEEDED|TOO_MANY_REQUESTS|rate limit|too many requests/i.test(message)) {
+          state.cooldownUntil = Math.max(state.cooldownUntil, Date.now() + 5000);
+        }
+        entry.reject(error);
+      }
     }
+  } finally {
+    state.draining = false;
+    if (state.pending.length > 0) void drainWsQueue(state);
+  }
+}
+
+function queueWsRequest<T>(ws: WebSocket, task: () => Promise<T>, priority = 40): Promise<T> {
+  let state = wsConnectionState.get(ws);
+  if (!state) {
+    state = { pending: [], draining: false, sequence: 0, lastRequestTimestamp: 0, cooldownUntil: 0 };
+    wsConnectionState.set(ws, state);
+  }
+  return new Promise<T>((resolve, reject) => {
+    state!.pending.push({
+      priority,
+      sequence: state!.sequence++,
+      enqueuedAt: Date.now(),
+      task: task as () => Promise<unknown>,
+      resolve: value => resolve(value as T),
+      reject
+    });
+    void drainWsQueue(state!);
   });
-  state.queue = nextQueue;
-  wsConnectionState.set(ws, state);
-  return nextQueue;
 }
 
 function sendAndAwait(
@@ -658,8 +703,10 @@ function sendAndAwait(
   expectedPayloadType: number,
   timeoutMs = 60000
 ): Promise<any> {
-  return queueWsRequest(ws, () =>
-    sendAndAwaitUnqueued(ws, payloadType, payload, expectedPayloadType, timeoutMs, 1)
+  return queueWsRequest(
+    ws,
+    () => sendAndAwaitUnqueued(ws, payloadType, payload, expectedPayloadType, timeoutMs, 1),
+    getCTraderRequestPriority(payloadType)
   );
 }
 
@@ -823,7 +870,7 @@ async function submitLiveCTraderExecutionAction(
       // submission with a missing acknowledgement is ambiguous.
       void queueWsRequest(ws, async () => {
         ws.send(JSON.stringify({ clientMsgId, payloadType, payload }));
-      }).catch((error: any) => {
+      }, 100).catch((error: any) => {
         clearTimeout(timer);
         ws.removeEventListener('message', handler);
         reject(error);
@@ -981,23 +1028,27 @@ export async function submitLiveCTraderOrder(
             console.error('[TRADE-LOG] Failed to record trade result:', logError);
           }
         };
-        const timer = setTimeout(() => {
-          ws.removeEventListener('message', handler);
-          if (accepted) {
-            logResult({
-              status: 'ACCEPTED',
-              orderId: accepted.orderId,
-              executionPrice: accepted.executionPrice,
-              executedVolume: accepted.executedVolume,
-              response: accepted.raw
-            });
-            resolve(accepted);
-          } else {
-            const error = 'cTrader order submission timed out without broker acknowledgement.';
-            logResult({ status: 'TIMEOUT', error });
-            reject(new Error(error));
-          }
-        }, 15000);
+        let timer: NodeJS.Timeout | undefined;
+        const startAcknowledgementTimeout = () => {
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(() => {
+            ws.removeEventListener('message', handler);
+            if (accepted) {
+              logResult({
+                status: 'ACCEPTED',
+                orderId: accepted.orderId,
+                executionPrice: accepted.executionPrice,
+                executedVolume: accepted.executedVolume,
+                response: accepted.raw
+              });
+              resolve(accepted);
+            } else {
+              const error = 'cTrader order submission timed out without broker acknowledgement.';
+              logResult({ status: 'TIMEOUT', error });
+              reject(new Error(error));
+            }
+          }, 15000);
+        };
 
         const finish = (value: CTraderOrderSubmission) => {
           clearTimeout(timer);
@@ -1140,13 +1191,15 @@ export async function submitLiveCTraderOrder(
           payload
         });
 
-        try {
+        void queueWsRequest(ws, async () => {
+          if (resultLogged) return;
+          startAcknowledgementTimeout();
           ws.send(packet);
-        } catch (sendError: any) {
+        }, 100).catch((sendError: any) => {
           const message = `cTrader request transmission failed: ${sendError?.message || String(sendError)}`;
           logResult({ status: 'FAILED', error: message });
           reject(new Error(message));
-        }
+        });
       });
     }
   );
@@ -1380,7 +1433,7 @@ export async function fetchLiveCTraderQuote(
               subscribeToSpotTimestamp: true
             }
           }));
-        });
+        }, 90);
         return await Promise.race([
           eventPromise,
           new Promise<CTraderMarketQuote>((_resolve, reject) => {
@@ -1427,7 +1480,7 @@ export async function fetchCTraderTrendbars(
       count: safeCount,
       fromTimestamp,
       toTimestamp
-    }, MSG_GET_TRENDBARS_RES, 60000);
+    }, MSG_GET_TRENDBARS_RES, 15000);
 
     const trendbars = Array.isArray(payload.trendbar) ? payload.trendbar : [];
     return trendbars.map((bar: any) => {
