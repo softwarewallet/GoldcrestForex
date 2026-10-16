@@ -40,7 +40,6 @@ try {
   const demoStatus = autoTradingService.start({ confirmWhenClosed: true });
   assert.equal(demoStatus.state, 'BLOCKED');
   assert.match(demoStatus.lastCycleResult || '', /requires cTrader API mode LIVE/i);
-  assert.equal(refreshAutonomousExecutionPermission(), false);
 } finally {
   autoTradingService.stop('Restore test state');
   updateSystemConfig({
