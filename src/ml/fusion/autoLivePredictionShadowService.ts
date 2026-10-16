@@ -2,8 +2,8 @@
  * Bounded SHADOW comparison of the incumbent signal with the distinct statistical
  * and macro/volatility predictors. No component here can authorize an order.
  */
-import type { ForexSignal, ForexCandle } from '../markets/forex/types';
-import { getForexPairConfig } from '../markets/forex/instruments';
+import type { ForexSignal, ForexCandle } from '../../markets/forex/types';
+import { getForexPairConfig } from '../../markets/forex/instruments';
 import type { LiveNewsSnapshot } from '../../services/liveNewsService';
 import { CombinedPredictionEngine } from '../prediction/combinedPredictionEngine';
 import { NewsIntelligenceEngine } from '../prediction/newsIntelligenceEngine';
