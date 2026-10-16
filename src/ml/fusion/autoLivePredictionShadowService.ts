@@ -215,6 +215,7 @@ export class AutoLivePredictionShadowService {
           pair,
           horizon: '15M',
           currentClose: (Number(input.quote.bid) + Number(input.quote.ask)) / 2,
+          pipSize: pairConfig.pipSize,
           candles: statisticalCandles,
           multiTimeframeCandles: {
             '5M': five.candles.map(c => ({ timestamp: c.timestamp, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume })),
