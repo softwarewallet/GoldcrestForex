@@ -55,7 +55,7 @@ const AUTO_LIVE_PAIR_CONCURRENCY = Math.max(
   Math.min(4, Math.floor(Number(process.env.GOLDCREST_AUTO_LIVE_PAIR_CONCURRENCY || 2)))
 );
 
-async function mapWithConcurrency<T, R>(
+export async function mapWithConcurrency<T, R>(
   items: T[],
   concurrency: number,
   worker: (item: T) => Promise<R>
