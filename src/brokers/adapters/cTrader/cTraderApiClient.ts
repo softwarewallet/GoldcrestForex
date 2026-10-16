@@ -1302,6 +1302,12 @@ export async function fetchLiveCTraderQuote(
       let timer: NodeJS.Timeout | undefined;
       let settled = false;
       let onMsg: ((data: any) => void) | undefined;
+      // ProtoOASpotEvent is incremental: a frame can contain only bid OR ask.
+      // Accumulate both sides for this symbol instead of treating the first
+      // one-sided frame as a complete quote (which made every pair fail).
+      let latestBid: number | undefined;
+      let latestAsk: number | undefined;
+      let quoteTimestamp = Date.now();
 
       const eventPromise = new Promise<CTraderMarketQuote>((resolve, reject) => {
         const cleanup = () => {
@@ -1326,15 +1332,28 @@ export async function fetchLiveCTraderQuote(
             }
             if (msg.payloadType !== MSG_SPOT_EVENT || Number(msg.payload?.symbolId) !== symbolId) return;
             const p = msg.payload;
-            if (p.bid === undefined && p.ask === undefined) return;
+            if (p.bid !== undefined) {
+              const bid = priceFromRelative(Number(p.bid), digits);
+              if (Number.isFinite(bid) && bid > 0) latestBid = bid;
+            }
+            if (p.ask !== undefined) {
+              const ask = priceFromRelative(Number(p.ask), digits);
+              if (Number.isFinite(ask) && ask > 0) latestAsk = ask;
+            }
+            if (p.timestamp !== undefined && Number.isFinite(Number(p.timestamp)) && Number(p.timestamp) > 0) {
+              quoteTimestamp = Number(p.timestamp);
+            }
+            // Wait for both sides; one-sided spot updates are normal on cTrader.
+            if (latestBid === undefined || latestAsk === undefined) return;
+            if (latestAsk < latestBid) return;
             settled = true;
             cleanup();
             resolve({
               symbol,
               symbolId,
-              bid: p.bid === undefined ? undefined : priceFromRelative(Number(p.bid), digits),
-              ask: p.ask === undefined ? undefined : priceFromRelative(Number(p.ask), digits),
-              timestamp: p.timestamp ? Number(p.timestamp) : Date.now(),
+              bid: latestBid,
+              ask: latestAsk,
+              timestamp: quoteTimestamp,
               status: 'FRESH'
             });
           } catch {}
