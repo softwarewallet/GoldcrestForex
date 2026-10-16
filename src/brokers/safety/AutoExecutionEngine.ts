@@ -105,7 +105,7 @@ function syncAutonomousPermission(): boolean {
   let ctraderConfigured = false;
   try {
     const status = brokerRegistry.getCredentialStatuses().find(
-      item => item.broker === 'CTRADER' && item.environment === 'LIVE'
+      item => item.broker === 'CTRADER' && item.environment === getCTraderApiMode()
     );
     ctraderConfigured = Boolean(status?.configured);
   } catch {
@@ -190,7 +190,7 @@ class AutoExecutionEngine {
         try {
           return Boolean(
             brokerRegistry.getCredentialStatuses().find(
-              item => item.broker === 'CTRADER' && item.environment === 'LIVE'
+              item => item.broker === 'CTRADER' && item.environment === getCTraderApiMode()
             )?.configured
           );
         } catch {
