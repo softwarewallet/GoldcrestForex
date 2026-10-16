@@ -20,6 +20,7 @@ import { calculateStrategyPayoff } from './src/markets/india_options/strategySke
 // Phase 2A Forex Engines
 import { LiveForexProvider } from './src/markets/forex/provider';
 import { getActiveAutoLiveForexPairs, isActiveAutoLiveForexPair } from './src/markets/forex/activePairs';
+import { isAutoLiveMarketDataEnabled, getAutoLiveMarketDataGeneration, isAutoLiveMarketDataSessionCurrent } from './src/services/autoLiveMarketDataSession';
 import { ForexSignalEngine } from './src/markets/forex/signalEngine';
 import { calculateIndicators, calculateATR } from './src/markets/forex/indicators';
 import { analyzeMarketStructure } from './src/markets/forex/marketStructure';
@@ -428,6 +429,14 @@ app.get('/api/prediction/universe-scan', operatorAuthRequired, async (req: Reque
 
 // Shadow Mode Dashboard Live Feed & History (Phase 23)
 app.get('/api/prediction/shadow-mode/feed', operatorAuthRequired, async (req: Request, res: Response) => {
+  if (!isAutoLiveMarketDataEnabled()) {
+    return res.json({
+      success: true,
+      status: 'PAUSED_UNTIL_AUTO_LIVE',
+      feed: [],
+      message: 'Start Auto Live to request broker market data.'
+    });
+  }
   try {
     const horizon = (req.query?.horizon as any) || '15M';
     const now = Date.now();
@@ -1453,6 +1462,13 @@ function refreshActiveForexMarketDataSelection(): void {
     const symbol = String(key.split('|')[1] || '').toUpperCase().replace('/', '');
     if (!activeKeys.has(symbol)) candleCache.delete(key);
   }
+  if (!isAutoLiveMarketDataEnabled()) {
+    liveRuntimeLog('INFO', 'CTRADER_ACTIVE_PAIR_SUBSCRIPTION_SYNC_DEFERRED', {
+      activePairs: getActiveAutoLiveForexPairs().map(pair => pair.symbol),
+      reason: 'Waiting for Start Auto Live.'
+    });
+    return;
+  }
   void liveForexProvider.syncActiveQuoteSubscriptions().catch((error: any) => {
     liveRuntimeLog('WARN', 'CTRADER_ACTIVE_PAIR_SUBSCRIPTION_SYNC_FAILED', {
       activePairs: getActiveAutoLiveForexPairs().map(pair => pair.symbol),
@@ -1463,6 +1479,10 @@ function refreshActiveForexMarketDataSelection(): void {
 
 
 app.get('/api/forex/pairs', async (_req: Request, res: Response) => {
+  if (!isAutoLiveMarketDataEnabled()) {
+    res.setHeader('X-Goldcrest-Market-Data', 'paused-until-auto-live');
+    return res.json([]);
+  }
   try {
     const now = Date.now();
     if (forexPairsCache && now < forexPairsCache.expiresAt) {
@@ -1657,6 +1677,10 @@ app.get(['/api/forex/sessions'], (req: Request, res: Response) => {
 
 // Helper to get live-anchored candles
 async function getLiveAnchoredCandles(pair: string, tf: ForexTimeframe = '15M', limit: number = 80) {
+  if (!isAutoLiveMarketDataEnabled()) {
+    throw new Error('Historical and candle data are paused until Start Auto Live is activated.');
+  }
+  const generation = getAutoLiveMarketDataGeneration();
   if (!isActiveAutoLiveForexPair(pair)) {
     throw new Error('Forex candle fetch blocked: ' + pair +
       ' is disabled in SettingsHub. Enable the pair before requesting broker candle history.');
@@ -1665,7 +1689,13 @@ async function getLiveAnchoredCandles(pair: string, tf: ForexTimeframe = '15M', 
   if (!adapter.getHistoricalCandles) {
     throw new BrokerError('UNAVAILABLE', 'Authoritative cTrader historical market-data capability is unavailable.', 'CTRADER', 'LIVE');
   }
+  if (!isAutoLiveMarketDataSessionCurrent(generation)) {
+    throw new Error('Auto Live stopped before the broker candle request was dispatched.');
+  }
   const candles = await adapter.getHistoricalCandles(pair, tf, limit);
+  if (!isAutoLiveMarketDataSessionCurrent(generation)) {
+    throw new Error('Auto Live stopped while the broker candle request was in flight.');
+  }
   if (!Array.isArray(candles) || candles.length === 0) {
     throw new BrokerError('STALE_DATA', `No authoritative cTrader historical candles returned for ${pair} ${tf}.`, 'CTRADER', 'LIVE');
   }
@@ -1819,6 +1849,12 @@ function generateResilientCandles(pair: string, tf: ForexTimeframe, count: numbe
 
 // Advanced Quantitative Predictive Engine Policy Endpoints
 app.post(['/api/forex/predict-policy', '/api/forex/predict-policy/:pair', '/api/forex/predict-policy/:part1/:part2'], async (req: Request, res: Response) => {
+  if (!isAutoLiveMarketDataEnabled()) {
+    return res.status(503).json({
+      error: 'AUTO_LIVE_MARKET_DATA_PAUSED',
+      message: 'Start Auto Live before requesting broker-backed predictive candle data.'
+    });
+  }
   try {
     const pair = extractForexPair(req);
     await liveForexProvider.refreshPair(pair).catch(() => {});
@@ -1862,6 +1898,12 @@ app.post(['/api/forex/predict-policy', '/api/forex/predict-policy/:pair', '/api/
 });
 
 app.get(['/api/forex/predict-policy/:pair', '/api/forex/predict-policy/:part1/:part2'], async (req: Request, res: Response) => {
+  if (!isAutoLiveMarketDataEnabled()) {
+    return res.status(503).json({
+      error: 'AUTO_LIVE_MARKET_DATA_PAUSED',
+      message: 'Start Auto Live before requesting broker-backed predictive candle data.'
+    });
+  }
   try {
     const pair = extractForexPair(req);
     await liveForexProvider.refreshPair(pair).catch(() => {});
@@ -2040,6 +2082,10 @@ app.get('/api/india/sessions', (req: Request, res: Response) => {
 });
 
 app.get('/api/india/candles/:symbol', async (req: Request, res: Response) => {
+  if (!isAutoLiveMarketDataEnabled()) {
+    res.setHeader('X-Goldcrest-Market-Data', 'paused-until-auto-live');
+    return res.json([]);
+  }
   const symbol = req.params.symbol.toUpperCase();
   try {
     const adapter = brokerRegistry.getAdapter('FIVE_PAISA', 'LIVE');
@@ -2074,6 +2120,10 @@ app.get('/api/india/analysis/:symbol', async (req: Request, res: Response) => {
 
 // Universal candles endpoint supporting both Forex (EUR/USD, EUR%2FUSD) and Indian underlyings (NIFTY, etc.)
 app.get(['/api/candles/:symbol', '/api/candles/:part1/:part2'], async (req: Request, res: Response) => {
+  if (!isAutoLiveMarketDataEnabled()) {
+    res.setHeader('X-Goldcrest-Market-Data', 'paused-until-auto-live');
+    return res.json([]);
+  }
   try {
     let symbol = req.params.symbol;
     if (!symbol && req.params.part1 && req.params.part2) {
@@ -2206,6 +2256,10 @@ app.post('/api/options/payoff', (req: Request, res: Response) => {
 // Keep strategy analysis separate from /api/forex/pairs, which intentionally
 // serves lightweight market-data rows without generated signals.
 app.get(['/api/signals', '/api/signals/all'], async (_req: Request, res: Response) => {
+  if (!isAutoLiveMarketDataEnabled()) {
+    res.setHeader('X-Goldcrest-Signals-Cache', 'paused-until-auto-live');
+    return res.json([]);
+  }
   const now = Date.now();
   if (signalsCache && now < signalsCache.expiresAt) return res.json(signalsCache.payload);
 
