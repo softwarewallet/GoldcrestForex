@@ -136,7 +136,7 @@ export function evaluateLegacyForexSetup(pairSymbol: string, candles: Candle[]):
   // Volatility (0-5)
   const volatilityScore = 4;
 
-  // ML Probability Estimate (Phase 1 rule: statistical baseline, clearly calibrated, not claiming certainty)
+  // Heuristic directional prior only. This is a rule-based baseline, not a trained or calibrated ML probability.
   let mlProbability = 0.5;
   if (structure.trend === 'BULLISH' && isEmaAlignedBull && features.rsi >= 50 && features.rsi <= 65) {
     mlProbability = 0.74;
@@ -249,6 +249,6 @@ export function evaluateLegacyForexSetup(pairSymbol: string, candles: Candle[]):
     invalidationConditions,
     reasons,
     noTradeReasons: noTradeReasons.length > 0 ? noTradeReasons : undefined,
-    modelVersion: 'xgboost_forex_v1.0.0_baseline'
+    modelVersion: 'legacy_rule_based_ema_rsi_structure_v1'
   };
 }
