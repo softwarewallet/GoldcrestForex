@@ -9,6 +9,7 @@ import { brokerRegistry } from '../brokers/registry';
 import { autoExecutionEngine, refreshAutonomousExecutionPermission, disarmLocalAutonomousExecution } from '../brokers/safety/AutoExecutionEngine';
 import { autoTradeReadinessService } from '../brokers/safety/AutoTradeReadiness';
 import { getSystemConfig } from './configService';
+import { enableAutoLiveMarketDataSession, disableAutoLiveMarketDataSession, isAutoLiveMarketDataEnabled } from './autoLiveMarketDataSession';
 import { killSwitch } from '../brokers/safety/KillSwitch';
 import { BrokerAdapter, NormalizedQuote, OrderRequest } from '../brokers/types';
 import { liveRuntimeLog, tradeAuditLog } from './liveRuntimeLog';
@@ -355,6 +356,14 @@ class AutoTradingService {
 
     if (this.timer) return this.getStatus();
 
+    // The operator's Start Auto Live action is the sole switch that enables
+    // broker quote subscriptions and historical/candle requests.
+    enableAutoLiveMarketDataSession('AUTO_LIVE_START');
+    liveRuntimeLog('SYSTEM', 'AUTO_LIVE_MARKET_DATA_GATE_OPENED', {
+      activePairs: getConfiguredAutoForexPairs(),
+      marketGate
+    });
+
     // Refresh the news universe immediately on every new Auto Live start;
     // don't wait for the first scan interval or rely on an old cached snapshot.
     this.refreshNewsOnStart();
@@ -401,6 +410,19 @@ class AutoTradingService {
   }
 
   stop(reason = 'Operator stopped auto trading.'): AutoTradingStatus {
+    const marketDataWasEnabled = isAutoLiveMarketDataEnabled();
+    disableAutoLiveMarketDataSession(reason);
+    if (marketDataWasEnabled) {
+      liveRuntimeLog('SYSTEM', 'AUTO_LIVE_MARKET_DATA_GATE_CLOSED', { reason });
+    }
+    // This method unsubscribes only if a spot stream was previously opened;
+    // idle startup and dashboard polling never trigger a broker connection.
+    void this.provider.stopActiveQuoteSubscriptions().catch((error: any) => {
+      liveRuntimeLog('WARN', 'AUTO_LIVE_MARKET_DATA_UNSUBSCRIBE_FAILED', {
+        error: error?.message || String(error)
+      });
+    });
+
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
