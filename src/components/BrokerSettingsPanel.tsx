@@ -80,6 +80,7 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
   const [autoLiveMinSignalScore, setAutoLiveMinSignalScore] = useState(75);
   const [autoLiveMaxTradesPerPair, setAutoLiveMaxTradesPerPair] = useState(4);
   const [maxOpenPositions, setMaxOpenPositions] = useState(5);
+  const [maxConsecutiveLosses, setMaxConsecutiveLosses] = useState(3);
   const [savingAutoLiveControls, setSavingAutoLiveControls] = useState(false);
   const [autoLiveControlsMessage, setAutoLiveControlsMessage] = useState('');
   const [autoLiveForexPairs, setAutoLiveForexPairs] = useState<string[]>([
@@ -130,6 +131,9 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
         }
         if (Number.isFinite(Number(config.maxOpenPositions))) {
           setMaxOpenPositions(Number(config.maxOpenPositions));
+        }
+        if (Number.isFinite(Number(config.maxConsecutiveLosses))) {
+          setMaxConsecutiveLosses(Number(config.maxConsecutiveLosses));
         }
         if (Number.isFinite(Number(config.forexStopLossPips))) {
           setForexStopLossPips(Number(config.forexStopLossPips));
@@ -462,7 +466,7 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
           <Sliders className="w-5 h-5 text-emerald-400 mt-0.5" />
           <div className="flex-1">
             <div className="text-sm font-bold text-white">Auto Live Execution Rules</div>
-            <div className="grid md:grid-cols-3 gap-4 mt-4">
+            <div className="grid md:grid-cols-4 gap-4 mt-4">
               <label className="block space-y-1">
                 <span className="text-[10px] uppercase text-slate-500 font-mono">Minimum Signal Score</span>
                 <div className="flex items-center gap-2">
@@ -511,6 +515,22 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
                 </div>
                 <span className="text-[10px] text-slate-600 font-mono">Condition 13B uses this account-wide limit. It counts all current live positions across all pairs/markets routed through the same broker.</span>
               </label>
+              <label className="block space-y-1">
+                <span className="text-[10px] uppercase text-slate-500 font-mono">Maximum Consecutive Losses</span>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min="1"
+                    max="100"
+                    step="1"
+                    value={maxConsecutiveLosses}
+                    onChange={e => setMaxConsecutiveLosses(Number(e.target.value))}
+                    className={inputClass}
+                  />
+                  <span className="text-[10px] text-slate-500 font-mono whitespace-nowrap">1–100</span>
+                </div>
+                <span className="text-[10px] text-slate-600 font-mono">Blocks new Auto Live orders after this many consecutive closed-trade losses. Set the limit for your risk policy.</span>
+              </label>
 
             </div>
             <div className="flex items-center gap-3 mt-4">
@@ -532,6 +552,11 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
                     setAutoLiveControlsMessage('Maximum Simultaneous Trades / System must be an integer from 1 to 100.');
                     return;
                   }
+                  const consecutiveLossLimit = Number(maxConsecutiveLosses);
+                  if (!Number.isInteger(consecutiveLossLimit) || consecutiveLossLimit < 1 || consecutiveLossLimit > 100) {
+                    setAutoLiveControlsMessage('Maximum Consecutive Losses must be an integer from 1 to 100.');
+                    return;
+                  }
                   setSavingAutoLiveControls(true);
                   setAutoLiveControlsMessage('');
                   try {
@@ -541,13 +566,14 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
                       body: JSON.stringify({
                         autoLiveMinSignalScore: score,
                         autoLiveMaxTradesPerPair: pairLimit,
-                        maxOpenPositions: systemLimit
+                        maxOpenPositions: systemLimit,
+                        maxConsecutiveLosses: consecutiveLossLimit
                       })
                     });
                     const data = await res.json();
                     if (!res.ok) throw new Error(data.error || 'Failed to save Auto Live execution rules.');
                     setAutoLiveControlsMessage(
-                      `Auto Live rules saved: minimum score ${score}, maximum ${pairLimit} simultaneous trades per pair, maximum ${systemLimit} simultaneous trades system-wide.`
+                      `Auto Live rules saved: minimum score ${score}, maximum ${pairLimit} simultaneous trades per pair, maximum ${systemLimit} simultaneous trades system-wide, consecutive-loss limit ${consecutiveLossLimit}.`
                     );
                     onRefreshGlobal?.();
                   } catch (err: any) {
