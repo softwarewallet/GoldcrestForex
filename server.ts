@@ -19,6 +19,7 @@ import { calculateStrategyPayoff } from './src/markets/india_options/strategySke
 
 // Phase 2A Forex Engines
 import { LiveForexProvider } from './src/markets/forex/provider';
+import { getActiveAutoLiveForexPairs, isActiveAutoLiveForexPair } from './src/markets/forex/activePairs';
 import { ForexSignalEngine } from './src/markets/forex/signalEngine';
 import { calculateIndicators, calculateATR } from './src/markets/forex/indicators';
 import { analyzeMarketStructure } from './src/markets/forex/marketStructure';
@@ -430,10 +431,7 @@ app.get('/api/prediction/shadow-mode/feed', operatorAuthRequired, async (req: Re
   try {
     const horizon = (req.query?.horizon as any) || '15M';
     const now = Date.now();
-    const configuredPairs = getSystemConfig().autoLiveForexPairs || FOREX_PAIRS.map(p => p.symbol);
-    const pairsToScan = Array.isArray(configuredPairs) && configuredPairs.length > 0
-      ? configuredPairs
-      : FOREX_PAIRS.map(p => p.symbol);
+    const pairsToScan = getActiveAutoLiveForexPairs().map(pair => pair.symbol);
 
     const items = await Promise.all(
       pairsToScan.map(async (pair) => {
@@ -809,6 +807,7 @@ app.post('/api/prediction/enable-pair', operatorAuthRequired, async (req: Reques
       'INSERT OR REPLACE INTO system_settings (key, value, updated_at) VALUES (?, ?, ?)',
       ['AUTO_LIVE_FOREX_PAIRS', JSON.stringify(result.activePairs), now]
     );
+    refreshActiveForexMarketDataSelection();
     res.json({ success: true, ...result, config: getSystemConfig() });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
@@ -829,6 +828,7 @@ app.post('/api/prediction/disable-pair', operatorAuthRequired, async (req: Reque
       'INSERT OR REPLACE INTO system_settings (key, value, updated_at) VALUES (?, ?, ?)',
       ['AUTO_LIVE_FOREX_PAIRS', JSON.stringify(result.activePairs), now]
     );
+    refreshActiveForexMarketDataSelection();
     res.json({ success: true, ...result, config: getSystemConfig() });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
@@ -1370,6 +1370,7 @@ app.post('/api/config', operatorAuthRequired, async (req: Request, res: Response
         'AUTO_LIVE_SCHEDULER', JSON.stringify(updated.autoLiveScheduler || {}), now
       ]
     );
+    refreshActiveForexMarketDataSelection();
     res.json({ success: true, config: updated });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
@@ -1442,6 +1443,25 @@ const CANDLE_CACHE_TTL_MS = 30_000;
 const candleCache = new Map<string, { payload: any[]; expiresAt: number }>();
 const candleInFlight = new Map<string, Promise<any[]>>();
 
+function refreshActiveForexMarketDataSelection(): void {
+  forexPairsCache = null;
+  const activeKeys = new Set(getActiveAutoLiveForexPairs().map(pair =>
+    pair.symbol.toUpperCase().replace('/', '')
+  ));
+  for (const key of candleCache.keys()) {
+    if (!key.startsWith('FX|')) continue;
+    const symbol = String(key.split('|')[1] || '').toUpperCase().replace('/', '');
+    if (!activeKeys.has(symbol)) candleCache.delete(key);
+  }
+  void liveForexProvider.syncActiveQuoteSubscriptions().catch((error: any) => {
+    liveRuntimeLog('WARN', 'CTRADER_ACTIVE_PAIR_SUBSCRIPTION_SYNC_FAILED', {
+      activePairs: getActiveAutoLiveForexPairs().map(pair => pair.symbol),
+      error: error?.message || String(error)
+    });
+  });
+}
+
+
 app.get('/api/forex/pairs', async (_req: Request, res: Response) => {
   try {
     const now = Date.now();
@@ -1453,6 +1473,13 @@ app.get('/api/forex/pairs', async (_req: Request, res: Response) => {
     }
 
     forexPairsInFlight = (async () => {
+      const activePairs = getActiveAutoLiveForexPairs();
+      if (activePairs.length === 0) {
+        const emptyRows: any[] = [];
+        forexPairsCache = { payload: emptyRows, expiresAt: Date.now() + 5_000 };
+        return emptyRows;
+      }
+
       // This endpoint serves lightweight market-data rows, not strategy analysis.
       // ScannerService refreshes every pair and runs prediction work; Promise.race
       // cannot cancel that work after a timeout, so repeated dashboard requests
@@ -1484,7 +1511,7 @@ app.get('/api/forex/pairs', async (_req: Request, res: Response) => {
       // symbols with broker-specific formatting first; slicing it directly can
       // accidentally return zero usable Forex pairs to the dashboard.
       const normalizePairKey = (value: unknown) => String(value || '').toUpperCase().replace(/[^A-Z]/g, '');
-      const fallbackInstruments = FOREX_PAIRS.slice(0, 8).map(pair => {
+      const fallbackInstruments = activePairs.map(pair => {
         const key = normalizePairKey(pair.symbol);
         const discovered = instruments.find(inst => normalizePairKey(inst.symbol) === key)
           || instruments.find(inst => normalizePairKey(inst.name) === key);
@@ -1630,6 +1657,10 @@ app.get(['/api/forex/sessions'], (req: Request, res: Response) => {
 
 // Helper to get live-anchored candles
 async function getLiveAnchoredCandles(pair: string, tf: ForexTimeframe = '15M', limit: number = 80) {
+  if (!isActiveAutoLiveForexPair(pair)) {
+    throw new Error('Forex candle fetch blocked: ' + pair +
+      ' is disabled in SettingsHub. Enable the pair before requesting broker candle history.');
+  }
   const adapter = brokerRegistry.getAdapter('CTRADER');
   if (!adapter.getHistoricalCandles) {
     throw new BrokerError('UNAVAILABLE', 'Authoritative cTrader historical market-data capability is unavailable.', 'CTRADER', 'LIVE');
@@ -2060,6 +2091,10 @@ app.get(['/api/candles/:symbol', '/api/candles/:part1/:part2'], async (req: Requ
     const limit = req.query.limit
       ? Math.min(Math.max(parseInt(req.query.limit as string, 10), 10), 500)
       : 80;
+
+    if (isForex && !isActiveAutoLiveForexPair(symbol)) {
+      return res.status(403).json({ error: 'Forex candle fetch blocked: ' + symbol + ' is disabled in SettingsHub.' });
+    }
 
     const cacheKey = `${isForex ? 'FX' : 'IN'}|${symbol}|${tf}|${limit}`;
     const cached = candleCache.get(cacheKey);

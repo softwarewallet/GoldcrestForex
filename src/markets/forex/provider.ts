@@ -5,6 +5,7 @@ import { getForexSessionState } from '../common/session';
 import { brokerRegistry } from '../../brokers/registry';
 import { executeQuery, persistHistoricalCandles } from '../../database/db';
 import { liveRuntimeLog } from '../../services/liveRuntimeLog';
+import { getActiveAutoLiveForexPairs, isActiveAutoLiveForexPair } from './activePairs';
 
 interface SharedForexPairSnapshot {
   candles: Map<string, ForexCandle[]>;
@@ -154,26 +155,58 @@ export class LiveForexProvider implements LiveForexDataProvider {
   }
 
 
-  private async ensureSpotQuoteUniverseSubscription(): Promise<void> {
-    if (!this.getMarketStatus().isOpen) return;
+  private pruneInactivePairSnapshots(): void {
+    const active = new Set(getActiveAutoLiveForexPairs().map(pair => pair.symbol.toUpperCase()));
+    for (const symbol of sharedForexSnapshots.keys()) {
+      if (!active.has(symbol.toUpperCase())) sharedForexSnapshots.delete(symbol);
+    }
+    for (const key of this.candles.keys()) {
+      const pair = key.slice(0, key.lastIndexOf(':')).toUpperCase();
+      if (!active.has(pair)) this.candles.delete(key);
+    }
+    for (const pair of this.quotes.keys()) {
+      if (!active.has(pair.toUpperCase())) this.quotes.delete(pair);
+    }
+  }
+
+  /** Apply SettingsHub pair changes immediately to market-data subscriptions. */
+  async syncActiveQuoteSubscriptions(): Promise<void> {
+    this.pruneInactivePairSnapshots();
+    const activePairs = getActiveAutoLiveForexPairs();
     const adapter = brokerRegistry.getAdapter('CTRADER', 'LIVE') as any;
     if (typeof adapter.subscribeQuotes !== 'function') return;
     const startedAt = Date.now();
+    await adapter.subscribeQuotes(activePairs.map(pair => pair.symbol));
+    liveRuntimeLog('INFO', 'CTRADER_ACTIVE_SPOT_UNIVERSE_SYNCED', {
+      pairCount: activePairs.length,
+      pairs: activePairs.map(pair => pair.symbol),
+      durationMs: Date.now() - startedAt
+    });
+  }
+
+  private async ensureSpotQuoteUniverseSubscription(): Promise<void> {
+    const startedAt = Date.now();
     try {
-      await adapter.subscribeQuotes(FOREX_PAIRS.map(pair => pair.symbol));
+      await this.syncActiveQuoteSubscriptions();
     } catch (error: any) {
-      // Record the failure, but let the existing quote/history path decide
-      // whether the pair can continue; never synthesize a stream quote here.
       liveRuntimeLog('WARN', 'CTRADER_BATCH_SPOT_STREAM_INITIALIZATION_FAILED', {
-        pairCount: FOREX_PAIRS.length,
+        pairCount: getActiveAutoLiveForexPairs().length,
         durationMs: Date.now() - startedAt,
         error: error?.message || String(error)
       });
     }
   }
-
   async refreshPair(pair: string): Promise<void> {
     const symbol = getForexPairConfig(pair).symbol;
+    this.pruneInactivePairSnapshots();
+    if (!isActiveAutoLiveForexPair(symbol)) {
+      liveRuntimeLog('WARN', 'CTRADER_INACTIVE_PAIR_CANDLE_FETCH_BLOCKED', {
+        pair: symbol,
+        activePairs: getActiveAutoLiveForexPairs().map(activePair => activePair.symbol)
+      });
+      throw new Error('Forex candle fetch blocked: ' + symbol +
+        ' is disabled in SettingsHub. Enable this pair in Auto Live Forex settings to request broker candles.');
+    }
     const inflight = sharedForexRefreshes.get(symbol);
     if (inflight) {
       await inflight;
@@ -193,6 +226,9 @@ export class LiveForexProvider implements LiveForexDataProvider {
 
     const work = (async () => {
       await this.ensureSpotQuoteUniverseSubscription();
+      if (!isActiveAutoLiveForexPair(symbol)) {
+        throw new Error('Forex candle fetch blocked: ' + symbol + ' is no longer active in SettingsHub.');
+      }
       if (!sharedForexSnapshots.has(symbol)) await this.hydratePersistedCandleSnapshot(symbol);
       await this.refreshPairFromBroker(symbol);
     })();
@@ -239,6 +275,9 @@ export class LiveForexProvider implements LiveForexDataProvider {
     // The 15M/Daily histories are large enough to support analog validation;
     // higher timeframes refresh much less frequently than every Auto Live cycle.
     for (const item of requestedTimeframes) {
+      if (!isActiveAutoLiveForexPair(symbol)) {
+        throw new Error('Forex candle fetch cancelled: ' + symbol + ' was disabled during market-data refresh.');
+      }
       const key = `${symbol}:${item.timeframe}`;
       const cached = this.candles.get(key);
       const lastFetchedAt = fetchedAt.get(item.timeframe) || 0;
@@ -308,6 +347,16 @@ export class LiveForexProvider implements LiveForexDataProvider {
         close: bar.close,
         volume: bar.volume
       })));
+    }
+
+    if (!isActiveAutoLiveForexPair(symbol)) {
+      for (const key of this.candles.keys()) {
+        if (key.slice(0, key.lastIndexOf(':')).toUpperCase() === symbol.toUpperCase()) this.candles.delete(key);
+      }
+      this.quotes.delete(symbol);
+      sharedForexSnapshots.delete(symbol);
+      liveRuntimeLog('INFO', 'CTRADER_INACTIVE_PAIR_CANDLE_REFRESH_DISCARDED', { pair: symbol });
+      return;
     }
 
     if (persistenceRows.length) {

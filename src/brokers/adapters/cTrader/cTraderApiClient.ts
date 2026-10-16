@@ -47,6 +47,8 @@ const MSG_SYMBOLS_LIST_REQ = 2114;
 const MSG_SYMBOLS_LIST_RES = 2115;
 const MSG_SUBSCRIBE_SPOTS_REQ = 2127;
 const MSG_SUBSCRIBE_SPOTS_RES = 2128;
+const MSG_UNSUBSCRIBE_SPOTS_REQ = 2129;
+const MSG_UNSUBSCRIBE_SPOTS_RES = 2130;
 const MSG_SPOT_EVENT = 2131;
 const MSG_GET_TRENDBARS_REQ = 2137;
 const MSG_GET_TRENDBARS_RES = 2138;
@@ -578,6 +580,15 @@ export function buildCTraderSpotSubscriptionPayload(
     throw new Error('A spot subscription batch must contain at least one valid symbol ID.');
   }
   return { ctidTraderAccountId, symbolId: normalizedIds, subscribeToSpotTimestamp: true };
+}
+
+/** Unsubscribe payload intentionally omits subscribe-only fields. */
+export function buildCTraderSpotUnsubscriptionPayload(
+  ctidTraderAccountId: number,
+  symbolIds: number[]
+): { ctidTraderAccountId: number; symbolId: number[] } {
+  const payload = buildCTraderSpotSubscriptionPayload(ctidTraderAccountId, symbolIds);
+  return { ctidTraderAccountId: payload.ctidTraderAccountId, symbolId: payload.symbolId };
 }
 
 export interface CTraderCandle {
@@ -1369,6 +1380,7 @@ interface CTraderSpotWaiter {
   timer: NodeJS.Timeout;
 }
 interface CTraderSpotSubscriptionRequest {
+  action: 'SUBSCRIBE' | 'UNSUBSCRIBE';
   symbolIds: number[];
   resolve: () => void;
   reject: (error: Error) => void;
@@ -1412,14 +1424,30 @@ function settleCTraderSpotSubscription(state: CTraderSpotStreamState, clientMsgI
   state.requests.delete(clientMsgId);
   if (request.timer) clearTimeout(request.timer);
   for (const symbolId of request.symbolIds) {
-    if (error) {
+    if (request.action === 'SUBSCRIBE') {
+      if (error) {
+        state.requestedSymbolIds.delete(symbolId);
+        state.confirmedSymbolIds.delete(symbolId);
+        rejectCTraderSpotWaiters(state, symbolId, error);
+      } else {
+        state.confirmedSymbolIds.add(symbolId);
+      }
+      if (state.subscriptionPromises.get(symbolId) === request.promise) {
+        state.subscriptionPromises.delete(symbolId);
+      }
+    } else if (!error) {
       state.requestedSymbolIds.delete(symbolId);
       state.confirmedSymbolIds.delete(symbolId);
-      rejectCTraderSpotWaiters(state, symbolId, error);
-    } else {
-      state.confirmedSymbolIds.add(symbolId);
+      state.pendingSymbolIds.delete(symbolId);
+      state.snapshots.delete(symbolId);
+      state.symbols.delete(symbolId);
+      rejectCTraderSpotWaiters(
+        state,
+        symbolId,
+        new Error('cTrader quote subscription removed because the pair is no longer active in SettingsHub.')
+      );
     }
-    if (state.subscriptionPromises.get(symbolId) === request.promise) state.subscriptionPromises.delete(symbolId);
+    // On failed unsubscribe, retain previous subscription state.
   }
   if (error) request.reject(error);
   else request.resolve();
@@ -1447,13 +1475,25 @@ function getOrCreateCTraderSpotStream(ws: WebSocket, accountId: number): CTrader
       const raw = typeof data === 'string' ? data : (data?.data ?? data).toString();
       const msg = JSON.parse(raw);
       const clientMsgId = String(msg.clientMsgId || '');
-      if (msg.payloadType === MSG_SUBSCRIBE_SPOTS_RES && clientMsgId) {
-        settleCTraderSpotSubscription(state, clientMsgId);
+      if (
+        (msg.payloadType === MSG_SUBSCRIBE_SPOTS_RES || msg.payloadType === MSG_UNSUBSCRIBE_SPOTS_RES) &&
+        clientMsgId &&
+        state.requests.has(clientMsgId)
+      ) {
+        const request = state.requests.get(clientMsgId)!;
+        const expectedResponseType = request.action === 'SUBSCRIBE'
+          ? MSG_SUBSCRIBE_SPOTS_RES
+          : MSG_UNSUBSCRIBE_SPOTS_RES;
+        if (msg.payloadType === expectedResponseType) settleCTraderSpotSubscription(state, clientMsgId);
         return;
       }
       if (msg.payloadType === MSG_ERROR_RES && clientMsgId && state.requests.has(clientMsgId)) {
-        settleCTraderSpotSubscription(state, clientMsgId,
-          new Error('cTrader batch spot subscription rejected: ' + JSON.stringify(msg.payload || {})));
+        settleCTraderSpotSubscription(
+          state,
+          clientMsgId,
+          new Error('cTrader ' + state.requests.get(clientMsgId)!.action.toLowerCase() +
+            ' spot request rejected: ' + JSON.stringify(msg.payload || {}))
+        );
         return;
       }
       if (msg.payloadType !== MSG_SPOT_EVENT) return;
@@ -1524,47 +1564,79 @@ function getOrCreateCTraderSpotStream(ws: WebSocket, accountId: number): CTrader
   return state;
 }
 async function sendCTraderSpotSubscriptionBatch(
-  ws: WebSocket, state: CTraderSpotStreamState, requestedIds: number[]
+  ws: WebSocket,
+  state: CTraderSpotStreamState,
+  requestedIds: number[],
+  action: 'SUBSCRIBE' | 'UNSUBSCRIBE' = 'SUBSCRIBE'
 ): Promise<void> {
-  const symbolIds = normalizeCTraderSpotSymbolIds(requestedIds)
-    .filter(id => !state.confirmedSymbolIds.has(id) && !state.requestedSymbolIds.has(id));
+  const symbolIds = normalizeCTraderSpotSymbolIds(requestedIds).filter(id =>
+    action === 'SUBSCRIBE'
+      ? !state.confirmedSymbolIds.has(id) && !state.requestedSymbolIds.has(id)
+      : state.confirmedSymbolIds.has(id) || state.requestedSymbolIds.has(id)
+  );
   if (!symbolIds.length) return;
-  const clientMsgId = 'spot_batch_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+
+  const clientMsgId = 'spot_' + action.toLowerCase() + '_' + Date.now() + '_' +
+    Math.random().toString(36).slice(2, 8);
   let resolveRequest!: () => void;
   let rejectRequest!: (error: Error) => void;
-  const promise = new Promise<void>((resolve, reject) => { resolveRequest = resolve; rejectRequest = reject; });
+  const promise = new Promise<void>((resolve, reject) => {
+    resolveRequest = resolve;
+    rejectRequest = reject;
+  });
   const request: CTraderSpotSubscriptionRequest = {
-    symbolIds, resolve: resolveRequest, reject: rejectRequest, timer: null, promise
+    action, symbolIds, resolve: resolveRequest, reject: rejectRequest, timer: null, promise
   };
-  request.timer = setTimeout(() => settleCTraderSpotSubscription(state, clientMsgId,
-    new Error('Timed out waiting for cTrader spot-subscription acknowledgement for ' + symbolIds.length + ' symbols.')),
-  CTRADER_SPOT_SUBSCRIPTION_ACK_TIMEOUT_MS);
+  request.timer = setTimeout(() => settleCTraderSpotSubscription(
+    state,
+    clientMsgId,
+    new Error('Timed out waiting for cTrader spot-' + action.toLowerCase() +
+      ' acknowledgement for ' + symbolIds.length + ' symbols.')
+  ), CTRADER_SPOT_SUBSCRIPTION_ACK_TIMEOUT_MS);
   state.requests.set(clientMsgId, request);
-  for (const symbolId of symbolIds) {
-    state.requestedSymbolIds.add(symbolId);
-    state.subscriptionPromises.set(symbolId, promise);
+
+  if (action === 'SUBSCRIBE') {
+    for (const symbolId of symbolIds) {
+      state.requestedSymbolIds.add(symbolId);
+      state.subscriptionPromises.set(symbolId, promise);
+    }
   }
+
   try {
-    const payload = buildCTraderSpotSubscriptionPayload(state.accountId, symbolIds);
+    const payload = action === 'SUBSCRIBE'
+      ? buildCTraderSpotSubscriptionPayload(state.accountId, symbolIds)
+      : buildCTraderSpotUnsubscriptionPayload(state.accountId, symbolIds);
     await queueWsRequest(ws, async () => {
-      if (ws.readyState !== WebSocket.OPEN) throw new Error('cTrader WebSocket is not open for spot subscription.');
-      ws.send(JSON.stringify({ clientMsgId, payloadType: MSG_SUBSCRIBE_SPOTS_REQ, payload }));
+      if (ws.readyState !== WebSocket.OPEN) {
+        throw new Error('cTrader WebSocket is not open for spot subscription.');
+      }
+      ws.send(JSON.stringify({
+        clientMsgId,
+        payloadType: action === 'SUBSCRIBE' ? MSG_SUBSCRIBE_SPOTS_REQ : MSG_UNSUBSCRIBE_SPOTS_REQ,
+        payload
+      }));
     }, 90);
   } catch (error: any) {
-    settleCTraderSpotSubscription(state, clientMsgId,
-      new Error(String(error?.message || error || 'Failed to send cTrader spot subscription.')));
+    settleCTraderSpotSubscription(
+      state,
+      clientMsgId,
+      new Error(String(error?.message || error || 'Failed to send cTrader spot ' + action.toLowerCase() + '.'))
+    );
   }
   return promise;
 }
 async function sendCTraderSpotSubscriptionBatches(
-  ws: WebSocket, state: CTraderSpotStreamState, symbolIds: number[]
+  ws: WebSocket,
+  state: CTraderSpotStreamState,
+  symbolIds: number[],
+  action: 'SUBSCRIBE' | 'UNSUBSCRIBE' = 'SUBSCRIBE'
 ): Promise<void> {
   const ids = normalizeCTraderSpotSymbolIds(symbolIds);
   const batches: number[][] = [];
   for (let index = 0; index < ids.length; index += CTRADER_SPOT_SUBSCRIPTION_BATCH_SIZE) {
     batches.push(ids.slice(index, index + CTRADER_SPOT_SUBSCRIPTION_BATCH_SIZE));
   }
-  await Promise.all(batches.map(batch => sendCTraderSpotSubscriptionBatch(ws, state, batch)));
+  await Promise.all(batches.map(batch => sendCTraderSpotSubscriptionBatch(ws, state, batch, action)));
 }
 async function flushPendingCTraderSpotSubscriptions(ws: WebSocket, state: CTraderSpotStreamState): Promise<void> {
   const ids = [...state.pendingSymbolIds];
@@ -1625,7 +1697,7 @@ function waitForCTraderSpotQuote(
   });
 }
 
-/** Prime one authenticated socket with a multi-symbol request and retain its spot stream. */
+/** Sync the authenticated socket subscription set to exactly the selected SettingsHub pairs. */
 export async function subscribeLiveCTraderSpots(
   ctidTraderAccountId: number, symbols: CTraderSpotSubscriptionSymbol[],
   clientId: string, clientSecret: string, accessToken: string, isLive: boolean
@@ -1637,24 +1709,62 @@ export async function subscribeLiveCTraderSpots(
       unique.set(id, { symbolId: id, symbol: String(symbol.symbol || id), digits: Number(symbol.digits || 5) });
     }
   }
-  if (!unique.size) return;
   await withAuthenticatedAccount(ctidTraderAccountId, clientId, clientSecret, accessToken, isLive, async ws => {
     const state = getOrCreateCTraderSpotStream(ws, ctidTraderAccountId);
+    if (state.flushTimer) {
+      clearTimeout(state.flushTimer);
+      state.flushTimer = undefined;
+    }
+
+    const desiredIds = new Set(unique.keys());
     for (const symbol of unique.values()) state.symbols.set(symbol.symbolId, symbol);
-    if (state.flushTimer) { clearTimeout(state.flushTimer); state.flushTimer = undefined; }
-    const allIds = normalizeCTraderSpotSymbolIds([...unique.keys(), ...state.pendingSymbolIds]);
-    state.pendingSymbolIds.clear();
-    const toSend = allIds.filter(id => !state.confirmedSymbolIds.has(id) && !state.requestedSymbolIds.has(id));
-    const sendPromise = toSend.length
-      ? sendCTraderSpotSubscriptionBatches(ws, state, toSend)
-      : Promise.resolve();
-    const inFlight = allIds
+
+    for (const symbolId of [...state.pendingSymbolIds]) {
+      if (!desiredIds.has(symbolId)) {
+        state.pendingSymbolIds.delete(symbolId);
+        rejectCTraderSpotWaiters(
+          state,
+          symbolId,
+          new Error('cTrader quote request cancelled because the pair is no longer active in SettingsHub.')
+        );
+      }
+    }
+
+    const initiallyStale = normalizeCTraderSpotSymbolIds([
+      ...state.requestedSymbolIds,
+      ...state.confirmedSymbolIds
+    ]).filter(id => !desiredIds.has(id));
+    const staleSubscribePromises = initiallyStale
       .map(id => state.subscriptionPromises.get(id))
       .filter((promise): promise is Promise<void> => Boolean(promise));
-    await Promise.all([sendPromise, ...inFlight]);
+    if (staleSubscribePromises.length) await Promise.allSettled(staleSubscribePromises);
+
+    const staleIds = normalizeCTraderSpotSymbolIds([
+      ...state.requestedSymbolIds,
+      ...state.confirmedSymbolIds
+    ]).filter(id => !desiredIds.has(id));
+    let unsubscribeError: unknown;
+    if (staleIds.length) {
+      try {
+        await sendCTraderSpotSubscriptionBatches(ws, state, staleIds, 'UNSUBSCRIBE');
+      } catch (error) {
+        unsubscribeError = error;
+      }
+    }
+
+    const toSubscribe = [...desiredIds].filter(id =>
+      !state.confirmedSymbolIds.has(id) && !state.requestedSymbolIds.has(id)
+    );
+    const subscribePromise = toSubscribe.length
+      ? sendCTraderSpotSubscriptionBatches(ws, state, toSubscribe, 'SUBSCRIBE')
+      : Promise.resolve();
+    const activeInFlight = [...desiredIds]
+      .map(id => state.subscriptionPromises.get(id))
+      .filter((promise): promise is Promise<void> => Boolean(promise));
+    await Promise.all([subscribePromise, ...activeInFlight]);
+    if (unsubscribeError) throw unsubscribeError;
   });
 }
-
 export async function fetchLiveCTraderQuote(
   ctidTraderAccountId: number, symbolId: number, symbol: string,
   clientId: string, clientSecret: string, accessToken: string, isLive: boolean, digits: number
