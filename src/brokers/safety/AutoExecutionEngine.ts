@@ -444,8 +444,38 @@ class AutoExecutionEngine {
         };
       }
 
+      // Last-moment quote check after safety/readiness and durable-intent work.
+      // Never dispatch on a quote that aged out while those checks were running.
+      const dispatchQuote = gateParams.currentQuote;
+      const dispatchQuoteAgeMs = Date.now() - Number(dispatchQuote?.timestamp);
+      if (
+        !dispatchQuote ||
+        dispatchQuote.status !== 'FRESH' ||
+        dispatchQuoteAgeMs < 0 ||
+        dispatchQuoteAgeMs >= 30_000
+      ) {
+        const reason = `Authoritative quote expired before broker dispatch (ageMs=${dispatchQuoteAgeMs}).`;
+        await failExecutionIntent(idempotencyKey, {
+          status: 'REJECTED',
+          rejectionReason: reason
+        } as NormalizedOrder);
+        auditExecution('FINAL_DISPATCH_QUOTE_EXPIRED', {
+          code: 'QUOTE_EXPIRED_BEFORE_DISPATCH',
+          reason,
+          quoteAgeMs: dispatchQuoteAgeMs
+        });
+        return {
+          executed: false,
+          code: 'QUOTE_EXPIRED_BEFORE_DISPATCH',
+          reason
+        };
+      }
+
       // This is the last guarded application-level point before the live broker API call.
-      auditExecution('FINAL_ORDER_PACKET', { request: order });
+      auditExecution('FINAL_ORDER_PACKET', {
+        request: order,
+        quoteAgeMsAtDispatch: dispatchQuoteAgeMs
+      });
       onReadyToSubmit?.();
       const placedOrder = await autonomousPlacer.call(adapter, order);
 
