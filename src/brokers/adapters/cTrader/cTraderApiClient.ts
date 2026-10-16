@@ -1688,6 +1688,9 @@ async function sendCTraderSpotSubscriptionBatch(
       ? buildCTraderSpotSubscriptionPayload(state.accountId, symbolIds)
       : buildCTraderSpotUnsubscriptionPayload(state.accountId, symbolIds);
     await queueWsRequest(ws, async () => {
+      // The stream may have closed or this request may have been abandoned while
+      // waiting in the queue. Never dispatch a stale subscription after cleanup.
+      if (!state.requests.has(clientMsgId)) return;
       if (ws.readyState !== WebSocket.OPEN) {
         throw new Error('cTrader WebSocket is not open for spot subscription.');
       }
