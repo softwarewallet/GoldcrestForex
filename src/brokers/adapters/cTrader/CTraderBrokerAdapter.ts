@@ -974,23 +974,30 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
    * Subscribe the configured Forex universe through one cTrader
    * ProtoOASubscribeSpotsReq. The socket retains this subscription for quote reads.
    */
+  /**
+   * Sync the cTrader spot stream with the configured active Forex universe.
+   * Empty symbol lists unsubscribe a previously selected universe.
+   */
   async subscribeQuotes(symbols: string[]): Promise<void> {
     this.syncConfig();
     this.validateCredentials();
-    const raw = await this.resolveRawAccount();
-    const availableSymbols = await this.getCachedCTraderSymbols(raw);
-    const requestedNames = new Set(
+    const normalizedNames = new Set(
       (Array.isArray(symbols) ? symbols : []).map(symbol => String(symbol || '').replace('/', '').toUpperCase())
     );
+    const isEmptyRequest = normalizedNames.size === 0;
+    if (isEmptyRequest && this.spotUniverseSubscriptionKey === null) return;
+
+    const raw = await this.resolveRawAccount();
+    const availableSymbols = await this.getCachedCTraderSymbols(raw);
     const matchedSymbols = availableSymbols.filter(symbol =>
-      requestedNames.has(symbol.symbolName.replace('/', '').toUpperCase())
+      normalizedNames.has(symbol.symbolName.replace('/', '').toUpperCase())
     );
     const subscriptionSymbols = matchedSymbols.map(symbol => ({
       symbolId: symbol.symbolId,
       symbol: symbol.symbolName,
       digits: symbol.digits
     }));
-    if (subscriptionSymbols.length === 0) {
+    if (!isEmptyRequest && subscriptionSymbols.length === 0) {
       throw new BrokerError(
         'INVALID_SYMBOL',
         'No requested Forex symbols were found in the authenticated cTrader symbol list.',
@@ -998,27 +1005,35 @@ export abstract class CTraderBrokerAdapter extends BaseBrokerAdapter {
         this.environment
       );
     }
+
     const symbolKey = subscriptionSymbols.map(symbol => String(symbol.symbolId)).sort().join(',');
     const key = String(this.environment) + ':' + String(raw.isLive) + ':' +
       String(raw.ctidTraderAccountId) + ':' + symbolKey;
     if (this.spotUniverseSubscriptionKey === key && this.spotUniverseSubscriptionPromise) {
       return this.spotUniverseSubscriptionPromise;
     }
-    this.spotUniverseSubscriptionKey = key;
-    const work = subscribeLiveCTraderSpots(
-      raw.ctidTraderAccountId, subscriptionSymbols,
-      this.config.clientId!, this.config.clientSecret!, this.config.accessToken!, raw.isLive
-    );
-    this.spotUniverseSubscriptionPromise = work.catch((error: any) => {
-      if (this.spotUniverseSubscriptionKey === key) {
-        this.spotUniverseSubscriptionKey = null;
-        this.spotUniverseSubscriptionPromise = null;
-      }
-      throw error;
-    });
-    return this.spotUniverseSubscriptionPromise;
-  }
+    const running = this.spotUniverseSubscriptionPromise;
+    if (running) await running.catch(() => {});
 
+    const work = subscribeLiveCTraderSpots(
+      raw.ctidTraderAccountId,
+      subscriptionSymbols,
+      this.config.clientId!,
+      this.config.clientSecret!,
+      this.config.accessToken!,
+      raw.isLive
+    );
+    this.spotUniverseSubscriptionKey = key;
+    this.spotUniverseSubscriptionPromise = work;
+    try {
+      await work;
+    } catch (error) {
+      if (this.spotUniverseSubscriptionKey === key) this.spotUniverseSubscriptionKey = null;
+      throw error;
+    } finally {
+      if (this.spotUniverseSubscriptionPromise === work) this.spotUniverseSubscriptionPromise = null;
+    }
+  }
   async getQuote(symbol: string): Promise<NormalizedQuote> {
     try {
       const raw = await this.resolveRawAccount();

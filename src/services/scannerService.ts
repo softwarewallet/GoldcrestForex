@@ -6,6 +6,7 @@ import { getForexPairConfig } from '../markets/forex/instruments';
 import { ForexSignalEngine } from '../markets/forex/signalEngine';
 import { CombinedPredictionEngine } from '../ml/prediction/combinedPredictionEngine';
 import { getSystemConfig } from './configService';
+import { getActiveAutoLiveForexPairs, resolveConfiguredActiveForexPairs } from '../markets/forex/activePairs';
 import { liveRuntimeLog } from './liveRuntimeLog';
 
 export interface OptionsOpportunityCandidate {
@@ -166,12 +167,12 @@ export class ScannerService {
 
   async getForexScanner(pairs?: string[]) {
     const results: any[] = [];
-    const configuredPairs = pairs?.length
-      ? pairs
-      : getSystemConfig().autoLiveForexPairs;
-    const selected = configuredPairs.length
-      ? configuredPairs.map(symbol => getForexPairConfig(symbol))
-      : this.forexProvider.getAvailablePairs();
+    const activePairs = getActiveAutoLiveForexPairs();
+    const activeKeys = new Set(activePairs.map(pair => pair.symbol.toUpperCase()));
+    const requestedPairs = pairs === undefined ? activePairs.map(pair => pair.symbol) : pairs;
+    const selected = resolveConfiguredActiveForexPairs(requestedPairs)
+      .filter(pair => activeKeys.has(pair.symbol.toUpperCase()))
+      .map(pair => getForexPairConfig(pair.symbol));
 
     const scanned = await mapWithConcurrency(
       selected,
