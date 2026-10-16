@@ -114,46 +114,55 @@ class AutoTradeReadinessService {
     const strategyId = String(order.strategyId || '').trim();
     checks.strategyCalibrated = productionStrategyApproved && (approvedStrategyId === '*' || !strategyId || strategyId === approvedStrategyId || Boolean(strategyId));
 
-    try {
-      checks.brokerConnected = (await withReadinessTimeout(adapter.getTradingStatus(), 'broker connection status')) === 'CONNECTED';
-    } catch {
-      checks.brokerConnected = false;
-    }
+    // Independent broker readiness reads run concurrently. Sequential network
+    // round-trips here can consume the entire 30-second quote freshness window.
+    const brokerReadinessStartedAt = Date.now();
+    const [statusResult, accountResult, instrumentResult, positionsResult] = await Promise.all([
+      withReadinessTimeout(adapter.getTradingStatus(), 'broker connection status')
+        .then(value => ({ value })).catch(error => ({ error })),
+      withReadinessTimeout(adapter.getAccount(), 'account validation')
+        .then(value => ({ value })).catch(error => ({ error })),
+      withReadinessTimeout(adapter.getInstrument(order.symbol), 'instrument validation')
+        .then(value => ({ value })).catch(error => ({ error })),
+      withReadinessTimeout(adapter.getPositions(), 'open positions')
+        .then(value => ({ value })).catch(error => ({ error }))
+    ]);
 
-    try {
-      account = await withReadinessTimeout(adapter.getAccount(), 'account validation');
-      checks.accountValidated = Boolean(account?.accountId && Number(account.balance) > 0);
-      const permissions = account?.permissions || [];
-      checks.tradingPermission = permissions.includes('TRADING') ||
-        permissions.includes('EQUITY') ||
-        permissions.includes('DERIVATIVES') ||
-        permissions.includes('NSE_FNO');
-    } catch {
-      account = null;
-    }
+    checks.brokerConnected = 'value' in statusResult && statusResult.value === 'CONNECTED';
+    const account = 'value' in accountResult ? accountResult.value : null;
+    checks.accountValidated = Boolean(account?.accountId && Number(account.balance) > 0);
+    const permissions = account?.permissions || [];
+    checks.tradingPermission = permissions.includes('TRADING') ||
+      permissions.includes('EQUITY') ||
+      permissions.includes('DERIVATIVES') ||
+      permissions.includes('NSE_FNO');
+    const instrument = 'value' in instrumentResult ? instrumentResult.value : null;
+    checks.instrumentValidated = Boolean(instrument);
+    positions = 'value' in positionsResult && Array.isArray(positionsResult.value)
+      ? positionsResult.value
+      : [];
 
-    try {
-      const instrument = await withReadinessTimeout(adapter.getInstrument(order.symbol), 'instrument validation');
-      checks.instrumentValidated = Boolean(instrument);
-    } catch {
-      checks.instrumentValidated = false;
-    }
+    liveRuntimeLog('INFO', 'AUTO_TRADE_READINESS_BROKER_CHECKS_COMPLETED', {
+      symbol: order.symbol,
+      durationMs: Date.now() - brokerReadinessStartedAt,
+      brokerConnected: checks.brokerConnected,
+      accountValidated: checks.accountValidated,
+      instrumentValidated: checks.instrumentValidated,
+      positionsAvailable: 'value' in positionsResult
+    });
 
-    try {
-      quote = quote || await withReadinessTimeout(adapter.getQuote(order.symbol), 'live quote');
-      checks.quoteFresh = Boolean(
-        quote &&
-        quote.status === 'FRESH' &&
-        Date.now() - Number(quote.timestamp) < LIVE_QUOTE_MAX_AGE_MS &&
-        Number(quote.bid) > 0 &&
-        Number(quote.ask) > 0
-      );
-      if (quote && quote.bid > 0 && quote.ask > 0) {
-        const mid = (quote.bid + quote.ask) / 2;
-        spreadBps = mid > 0 ? (quote.ask - quote.bid) / mid * 10000 : null;
-      }
-    } catch {
-      checks.quoteFresh = false;
+    quote = quote || undefined;
+    checks.quoteFresh = Boolean(
+      quote &&
+      quote.status === 'FRESH' &&
+      Date.now() - Number(quote.timestamp) >= 0 &&
+      Date.now() - Number(quote.timestamp) < LIVE_QUOTE_MAX_AGE_MS &&
+      Number(quote.bid) > 0 &&
+      Number(quote.ask) > 0
+    );
+    if (quote && quote.bid > 0 && quote.ask > 0) {
+      const mid = (quote.bid + quote.ask) / 2;
+      spreadBps = mid > 0 ? (quote.ask - quote.bid) / mid * 10000 : null;
     }
 
     const signalAgeMs = Math.max(0, Date.now() - Number(signalTimestamp || 0));
@@ -163,12 +172,6 @@ class AutoTradeReadinessService {
     checks.marketOpen = order.market === 'FOREX'
       ? !getForexSessionState().activeSessions.includes('CLOSED (WEEKEND)')
       : getIndianSessionState().isOpen;
-
-    try {
-      positions = await withReadinessTimeout(adapter.getPositions(), 'open positions');
-    } catch {
-      positions = [];
-    }
 
     const maxOpenPositions = Number(config.maxOpenPositions);
     checks.positionLimit = Number.isFinite(maxOpenPositions) &&
@@ -240,6 +243,18 @@ class AutoTradeReadinessService {
 
     for (const [key, message] of orderedChecks) {
       if (!checks[key]) failedReasons.push(message);
+    }
+
+    // Re-check freshness after every readiness query and database lookup.
+    // A quote that was fresh at the beginning but aged out during validation
+    // must never be treated as dispatch-ready.
+    const finalQuoteAgeMs = quote ? Date.now() - Number(quote.timestamp) : Number.POSITIVE_INFINITY;
+    checks.quoteFresh = Boolean(
+      quote && quote.status === 'FRESH' && finalQuoteAgeMs >= 0 &&
+      finalQuoteAgeMs < LIVE_QUOTE_MAX_AGE_MS && Number(quote.bid) > 0 && Number(quote.ask) > 0
+    );
+    if (!checks.quoteFresh && !failedReasons.includes('Authoritative quote is missing or stale.')) {
+      failedReasons.push('Authoritative quote is missing or stale at the end of readiness validation.');
     }
 
     const ready = failedReasons.length === 0;
