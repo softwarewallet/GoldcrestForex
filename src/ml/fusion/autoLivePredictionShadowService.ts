@@ -4,6 +4,7 @@
  */
 import type { ForexSignal, ForexCandle } from '../../markets/forex/types';
 import { getForexPairConfig } from '../../markets/forex/instruments';
+import { computeTechnicalFeatures } from '../../markets/common/indicators';
 import type { LiveNewsSnapshot } from '../../services/liveNewsService';
 import { CombinedPredictionEngine } from '../prediction/combinedPredictionEngine';
 import { NewsIntelligenceEngine } from '../prediction/newsIntelligenceEngine';
@@ -200,11 +201,34 @@ export class AutoLivePredictionShadowService {
         });
       }
       try {
+        const statisticalCandles = fifteen.candles.map(c => ({
+          timestamp: c.timestamp, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume
+        }));
+        const actualFeatures = computeTechnicalFeatures(statisticalCandles);
+        const technicalDirection = actualFeatures.ema9 > actualFeatures.ema21 && actualFeatures.ema21 > actualFeatures.ema50
+          ? 'BUY'
+          : actualFeatures.ema9 < actualFeatures.ema21 && actualFeatures.ema21 < actualFeatures.ema50
+            ? 'SELL'
+            : 'NEUTRAL';
+        const technicalTrend = technicalDirection === 'BUY' ? 'bullish' : technicalDirection === 'SELL' ? 'bearish' : 'neutral';
         const prediction = await CombinedPredictionEngine.predict({
           pair,
           horizon: '15M',
           currentClose: (Number(input.quote.bid) + Number(input.quote.ask)) / 2,
-          candles: fifteen.candles.map(c => ({ timestamp: c.timestamp, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume })),
+          candles: statisticalCandles,
+          multiTimeframeCandles: {
+            '5M': five.candles.map(c => ({ timestamp: c.timestamp, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume })),
+            '15M': statisticalCandles,
+            '1H': hourly.candles.map(c => ({ timestamp: c.timestamp, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume }))
+          },
+          currentTechnicalSignal: {
+            direction: technicalDirection,
+            score: Math.round(Math.max(0, Math.min(100, actualFeatures.adx.adx))),
+            rsi: actualFeatures.rsi,
+            macd: actualFeatures.macd.hist,
+            atr: actualFeatures.atr,
+            trend: technicalTrend
+          },
           newsArticles: articles,
           spreadPips: input.quote.spreadPips,
           cutoffTimestamp: cutoff
