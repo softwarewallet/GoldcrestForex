@@ -130,7 +130,7 @@ class AutoTradeReadinessService {
     ]);
 
     checks.brokerConnected = 'value' in statusResult && statusResult.value === 'CONNECTED';
-    const account = 'value' in accountResult ? accountResult.value : null;
+    account = 'value' in accountResult ? accountResult.value : null;
     checks.accountValidated = Boolean(account?.accountId && Number(account.balance) > 0);
     const permissions = account?.permissions || [];
     checks.tradingPermission = permissions.includes('TRADING') ||
