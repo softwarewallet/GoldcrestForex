@@ -176,7 +176,7 @@ function runFusionTests() {
   assert(['BUY', 'SELL', 'WAIT', 'NO_TRADE'].includes(baseline.direction));
   assert(Number.isFinite(baseline.score));
   assert.equal(baseline.instrument, 'EUR/USD');
-  assert.equal(baseline.modelVersion, 'xgboost_forex_v1.0.0_baseline');
+  assert.equal(baseline.modelVersion, 'legacy_rule_based_ema_rsi_structure_v1');
 
   console.log('PREDICTION FUSION SHADOW TESTS PASSED');
 }
