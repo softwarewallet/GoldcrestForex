@@ -140,7 +140,7 @@ export function fusePredictionObservations(input: PredictionFusionInput): Predic
   const directionTotal = buys + sells;
   const conflictRatio = directionTotal > 0 ? conflicts / directionTotal : 0;
   const consensus: PredictionSide =
-    directionTotal < ACTIONABLE_ENGINE_COUNT || conflictRatio > 0.25 || buys === sells
+    directionTotal < ACTIONABLE_ENGINE_COUNT || conflictRatio >= 0.25 || buys === sells
       ? 'NO_TRADE'
       : buys > sells ? 'BUY' : 'SELL';
 
