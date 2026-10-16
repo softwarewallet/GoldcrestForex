@@ -1410,7 +1410,7 @@ interface CTraderSpotStreamState {
 const cTraderSpotStreams = new WeakMap<WebSocket, CTraderSpotStreamState>();
 const CTRADER_SPOT_SUBSCRIPTION_BATCH_SIZE = 50;
 const CTRADER_SPOT_BATCH_DELAY_MS = 20;
-const CTRADER_SPOT_QUOTE_TIMEOUT_MS = 5500;
+const CTRADER_SPOT_QUOTE_TIMEOUT_MS = 15000;
 const CTRADER_SPOT_CACHE_FRESH_MS = 2500;
 const CTRADER_SPOT_SUBSCRIPTION_ACK_TIMEOUT_MS = 7000;
 
@@ -1671,16 +1671,9 @@ async function sendCTraderSpotSubscriptionBatch(
   const request: CTraderSpotSubscriptionRequest = {
     action, symbolIds, resolve: resolveRequest, reject: rejectRequest, timer: null, promise
   };
-  request.timer = setTimeout(() => {
-    const timeoutMessage = 'Timed out waiting for cTrader spot-' + action.toLowerCase() +
-      ' acknowledgement for ' + symbolIds.length + ' symbols.';
-    const recoveryMode = getCTraderSpotSubscriptionRecoveryMode(action, symbolIds.length, 'ACK_TIMEOUT');
-    if (recoveryMode === 'SPLIT_RETRY') {
-      retryCTraderSpotSubscriptionIndividually(ws, state, clientMsgId, timeoutMessage);
-      return;
-    }
-    settleCTraderSpotSubscription(state, clientMsgId, new Error(timeoutMessage));
-  }, CTRADER_SPOT_SUBSCRIPTION_ACK_TIMEOUT_MS);
+  // Start the acknowledgement deadline only after this request leaves the
+  // per-connection queue. Queue congestion must not be mistaken for a broker
+  // acknowledgement timeout or trigger retries before the first send occurs.
   state.requests.set(clientMsgId, request);
 
   if (action === 'SUBSCRIBE') {
@@ -1695,9 +1688,22 @@ async function sendCTraderSpotSubscriptionBatch(
       ? buildCTraderSpotSubscriptionPayload(state.accountId, symbolIds)
       : buildCTraderSpotUnsubscriptionPayload(state.accountId, symbolIds);
     await queueWsRequest(ws, async () => {
+      // The stream may have closed or this request may have been abandoned while
+      // waiting in the queue. Never dispatch a stale subscription after cleanup.
+      if (!state.requests.has(clientMsgId)) return;
       if (ws.readyState !== WebSocket.OPEN) {
         throw new Error('cTrader WebSocket is not open for spot subscription.');
       }
+      request.timer = setTimeout(() => {
+        const timeoutMessage = 'Timed out waiting for cTrader spot-' + action.toLowerCase() +
+          ' acknowledgement for ' + symbolIds.length + ' symbols.';
+        const recoveryMode = getCTraderSpotSubscriptionRecoveryMode(action, symbolIds.length, 'ACK_TIMEOUT');
+        if (recoveryMode === 'SPLIT_RETRY') {
+          retryCTraderSpotSubscriptionIndividually(ws, state, clientMsgId, timeoutMessage);
+          return;
+        }
+        settleCTraderSpotSubscription(state, clientMsgId, new Error(timeoutMessage));
+      }, CTRADER_SPOT_SUBSCRIPTION_ACK_TIMEOUT_MS);
       ws.send(JSON.stringify({
         clientMsgId,
         payloadType: action === 'SUBSCRIBE' ? MSG_SUBSCRIBE_SPOTS_REQ : MSG_UNSUBSCRIBE_SPOTS_REQ,
