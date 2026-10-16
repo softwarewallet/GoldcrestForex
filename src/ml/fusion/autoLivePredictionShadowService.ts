@@ -8,6 +8,7 @@ import type { LiveNewsSnapshot } from '../../services/liveNewsService';
 import { CombinedPredictionEngine } from '../prediction/combinedPredictionEngine';
 import { NewsIntelligenceEngine } from '../prediction/newsIntelligenceEngine';
 import { AdvancedQuantitativePredictiveEngine } from '../../markets/forex/advancedPredictiveEngine';
+import { evaluateLegacyForexSetup } from './legacyForexPredictionEngine';
 import { fusePredictionObservations, normalizePredictionSide, PredictionFusionResult, PredictionEngineObservation } from './predictionFusionOrchestrator';
 import { liveRuntimeLog } from '../../services/liveRuntimeLog';
 
@@ -131,6 +132,56 @@ export class AutoLivePredictionShadowService {
         timestamp: cutoff, reason: 'Advanced policy was not evaluated without a current authoritative cTrader quote.'
       });
       return fusePredictionObservations({ pair, cutoffTimestamp: cutoff, observations });
+    }
+
+    if (fifteen.fresh && fifteen.candles.length >= 60) {
+      try {
+        const legacySignal = evaluateLegacyForexSetup(pair, fifteen.candles.map(c => ({
+          timestamp: c.timestamp,
+          open: c.open,
+          high: c.high,
+          low: c.low,
+          close: c.close,
+          volume: c.volume
+        })));
+        const legacyDirection = normalizePredictionSide(legacySignal.direction);
+        observations.push({
+          engine: 'LEGACY_TECHNICAL',
+          direction: legacyDirection,
+          evidenceState: 'AVAILABLE',
+          timestamp: legacySignal.timestamp,
+          spreadPips: input.quote.spreadPips,
+          reason: `Goldcrest-FX-Live legacy technical baseline: ${legacySignal.direction}, score ${legacySignal.score}/100. ${(legacySignal.reasons || []).slice(0, 3).join(' ')}`,
+          metadata: {
+            source: 'GOLDCREST_FX_LIVE_LEGACY_BASELINE',
+            candleCount: fifteen.candles.length,
+            modelVersion: 'xgboost_forex_v1.0.0_baseline',
+            heuristicProbability: legacySignal.mlProbability,
+            calibratedProbability: false,
+            noTradeReasons: legacySignal.noTradeReasons || []
+          }
+        });
+      } catch (error: any) {
+        observations.push({
+          engine: 'LEGACY_TECHNICAL',
+          direction: 'NO_TRADE',
+          evidenceState: 'ERROR',
+          timestamp: cutoff,
+          reason: `Goldcrest-FX-Live legacy technical baseline failed: ${error?.message || String(error)}`
+        });
+      }
+    } else {
+      observations.push({
+        engine: 'LEGACY_TECHNICAL',
+        direction: 'NO_TRADE',
+        evidenceState: fifteen.fresh ? 'INSUFFICIENT_DATA' : 'STALE',
+        timestamp: cutoff,
+        reason: `Legacy technical baseline requires 60 fresh, actual 15M candles; received ${fifteen.candles.length}.`,
+        metadata: {
+          source: 'GOLDCREST_FX_LIVE_LEGACY_BASELINE',
+          candleCount: fifteen.candles.length
+        }
+      });
     }
 
     if (!fifteen.sufficient || !fifteen.fresh) {
