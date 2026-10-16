@@ -701,7 +701,7 @@ export const BrokerSettingsPanel: React.FC<BrokerSettingsPanelProps> = ({
                 {pairMessage && <div className="text-[10px] text-cyan-300 font-mono mb-2">{pairMessage}</div>}
 
                 <div className="grid sm:grid-cols-2 gap-2">
-                  {FOREX_PAIRS.map(pair => {
+                  {FOREX_PAIRS.map(({ symbol: pair }) => {
                     const checked = autoLiveForexPairs.includes(pair);
                     const isPending = pendingPairToggle === pair;
                     return (
