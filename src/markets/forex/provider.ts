@@ -3,12 +3,12 @@ import { FOREX_PAIRS, ForexPairConfig, getForexPairConfig } from './instruments'
 import { ForexCandle, ForexMarketStatus, ForexQuote, ForexTimeframe } from './types';
 import { getForexSessionState } from '../common/session';
 import { brokerRegistry } from '../../brokers/registry';
-import { persistHistoricalCandles } from '../../database/db';
+import { executeQuery, persistHistoricalCandles } from '../../database/db';
 import { liveRuntimeLog } from '../../services/liveRuntimeLog';
 
 interface SharedForexPairSnapshot {
   candles: Map<string, ForexCandle[]>;
-  quote: ForexQuote;
+  quote: ForexQuote | null;
   candleFetchedAt: Map<string, number>;
   quoteFetchedAt: number;
 }
@@ -18,6 +18,7 @@ interface SharedForexPairSnapshot {
 // than creating another wave of WebSocket history requests.
 const sharedForexSnapshots = new Map<string, SharedForexPairSnapshot>();
 const sharedForexRefreshes = new Map<string, Promise<void>>();
+const sharedPersistedHydrations = new Map<string, Promise<void>>();
 
 export interface ForexDataProvider {
   getQuote(pair: string): Promise<ForexQuote> | ForexQuote;
@@ -51,8 +52,105 @@ export class LiveForexProvider implements LiveForexDataProvider {
     const snapshot = sharedForexSnapshots.get(symbol);
     if (!snapshot) return null;
     for (const [key, candles] of snapshot.candles) this.candles.set(key, candles);
-    this.quotes.set(symbol, snapshot.quote);
+    if (snapshot.quote) this.quotes.set(symbol, snapshot.quote);
+    else this.quotes.delete(symbol);
     return snapshot;
+  }
+
+  private async hydratePersistedCandleSnapshot(symbol: string): Promise<void> {
+    if (sharedForexSnapshots.has(symbol)) return;
+    const existing = sharedPersistedHydrations.get(symbol);
+    if (existing) {
+      await existing;
+      return;
+    }
+
+    const work = (async () => {
+      const startedAt = Date.now();
+      const requestedTimeframes: Array<{ timeframe: ForexTimeframe; limit: number }> = [
+        { timeframe: '5M', limit: 80 },
+        { timeframe: '15M', limit: 500 },
+        { timeframe: '1H', limit: 80 },
+        { timeframe: '4H', limit: 80 },
+        { timeframe: 'Daily', limit: 500 }
+      ];
+      const loaded = await Promise.all(requestedTimeframes.map(async item => {
+        try {
+          const rows = await executeQuery<any>(
+            'SELECT timestamp, open, high, low, close, volume FROM candles WHERE symbol = ? AND timeframe = ? ORDER BY timestamp DESC LIMIT ?',
+            [symbol.toUpperCase(), item.timeframe, item.limit]
+          );
+          return { item, rows };
+        } catch (error: any) {
+          liveRuntimeLog('WARN', 'CTRADER_PERSISTED_CANDLE_QUERY_FAILED', {
+            pair: symbol, timeframe: item.timeframe, error: error?.message || String(error)
+          });
+          return { item, rows: [] as any[] };
+        }
+      }));
+
+      const candlesByKey = new Map<string, ForexCandle[]>();
+      const candleFetchedAt = new Map<string, number>();
+      const candleCounts: Record<string, number> = {};
+      for (const { item, rows } of loaded) {
+        const candles: ForexCandle[] = (Array.isArray(rows) ? rows : [])
+          .map((row: any) => ({
+            pair: symbol,
+            timeframe: item.timeframe,
+            timestamp: Number(row.timestamp),
+            open: Number(row.open),
+            high: Number(row.high),
+            low: Number(row.low),
+            close: Number(row.close),
+            bid: Number(row.close),
+            ask: Number(row.close),
+            spread: 0,
+            volume: Math.max(0, Number(row.volume || 0)),
+            tickVolume: Math.max(0, Number(row.volume || 0)),
+            provider: 'CTRADER_PERSISTED_HISTORY',
+            dataStatus: 'DELAYED' as const
+          }))
+          .filter(candle =>
+            Number.isFinite(candle.timestamp) && candle.timestamp > 0 &&
+            Number.isFinite(candle.open) && Number.isFinite(candle.high) &&
+            Number.isFinite(candle.low) && Number.isFinite(candle.close) &&
+            candle.open > 0 && candle.high > 0 && candle.low > 0 && candle.close > 0 &&
+            candle.high >= Math.max(candle.open, candle.close, candle.low) &&
+            candle.low <= Math.min(candle.open, candle.close, candle.high)
+          )
+          .reverse();
+
+        candleCounts[item.timeframe] = candles.length;
+        if (candles.length < 35) continue;
+        candlesByKey.set(`${symbol}:${item.timeframe}`, candles);
+        // Persisted bars have no trustworthy fetch-time metadata; use the latest
+        // bar timestamp so TTL checks refresh stale periods instead of marking
+        // old local history as newly fetched.
+        candleFetchedAt.set(item.timeframe, candles[candles.length - 1].timestamp);
+      }
+
+      // Quote freshness is never inferred from historical candles. Keep a null
+      // quote until a current broker spot event has been received.
+      sharedForexSnapshots.set(symbol, {
+        candles: candlesByKey,
+        quote: null,
+        candleFetchedAt,
+        quoteFetchedAt: 0
+      });
+      liveRuntimeLog('INFO', 'CTRADER_PERSISTED_CANDLE_SNAPSHOT_HYDRATED', {
+        pair: symbol,
+        candleCounts,
+        usableTimeframes: [...candlesByKey.keys()].map(key => key.split(':').slice(1).join(':')),
+        durationMs: Date.now() - startedAt
+      });
+    })();
+
+    sharedPersistedHydrations.set(symbol, work);
+    try {
+      await work;
+    } finally {
+      if (sharedPersistedHydrations.get(symbol) === work) sharedPersistedHydrations.delete(symbol);
+    }
   }
 
   async refreshPair(pair: string): Promise<void> {
@@ -68,14 +166,16 @@ export class LiveForexProvider implements LiveForexDataProvider {
 
     const snapshot = this.hydrateSharedSnapshot(symbol);
     const now = Date.now();
-    if (snapshot && now - snapshot.quoteFetchedAt < this.quoteCacheMs) {
-      // Reuse the shared quote/candles snapshot across UI polling, signal
-      // scanning and Auto Live while it is recent; order-time gates still
-      // enforce the stricter 30-second authoritative quote limit.
+    if (snapshot?.quote && now - snapshot.quoteFetchedAt < this.quoteCacheMs) {
+      // Reuse a recent quote and its shared candles across UI polling, signal
+      // scanning and Auto Live. Execution still requires a fresh broker quote.
       return;
     }
 
-    const work = this.refreshPairFromBroker(symbol);
+    const work = (async () => {
+      if (!sharedForexSnapshots.has(symbol)) await this.hydratePersistedCandleSnapshot(symbol);
+      await this.refreshPairFromBroker(symbol);
+    })();
     sharedForexRefreshes.set(symbol, work);
     try {
       await work;
