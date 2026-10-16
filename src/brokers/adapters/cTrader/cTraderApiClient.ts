@@ -1427,7 +1427,7 @@ export async function fetchCTraderTrendbars(
       count: safeCount,
       fromTimestamp,
       toTimestamp
-    }, MSG_GET_TRENDBARS_RES, 60000);
+    }, MSG_GET_TRENDBARS_RES, 15000);
 
     const trendbars = Array.isArray(payload.trendbar) ? payload.trendbar : [];
     return trendbars.map((bar: any) => {
