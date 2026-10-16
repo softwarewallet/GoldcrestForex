@@ -424,8 +424,25 @@ class AutoTradingService {
       };
     }
 
-    // Auto Live is mode-agnostic: the cTrader adapter resolves the selected
-    // DEMO/LIVE endpoint and matching credentials from system configuration.
+    // Follow the working Goldcrest-FX-Live reference: Auto Live only arms
+    // autonomous execution for the cTrader LIVE environment. DEMO remains
+    // available to other workflows but cannot start this live-order loop.
+    if (getCTraderApiMode() !== 'LIVE') {
+      this.state = 'BLOCKED';
+      this.lastCycleResult = 'Auto Live requires cTrader API mode LIVE. The current mode is DEMO; select LIVE and verify LIVE credentials before starting.';
+      liveRuntimeLog('WARN', 'AUTO_TRADING_START_BLOCKED', {
+        stage: 'CTRADER_API_MODE',
+        configuredMode: getCTraderApiMode(),
+        reason: this.lastCycleResult
+      });
+      tradeAuditLog('AUTO_TRADING_START_BLOCKED', {
+        stage: 'CTRADER_API_MODE',
+        configuredMode: getCTraderApiMode(),
+        reason: this.lastCycleResult
+      });
+      return this.getStatus();
+    }
+
     if (!this.isRequested()) {
       this.state = 'BLOCKED';
       this.lastCycleResult = 'Autonomous execution is not enabled. Both GOLDCREST_AUTO_TRADING_ENABLED and GOLDCREST_AUTONOMOUS_LIVE_EXECUTION must be true.';
