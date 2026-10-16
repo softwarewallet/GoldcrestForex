@@ -5,7 +5,7 @@
 import { ComponentDirectionResult, MTFMatrixResult } from './types';
 
 export class MultiTimeframeEngine {
-  public static evaluateMTF(timeframesData: Record<string, { closes: number[] }>): ComponentDirectionResult {
+  public static evaluateMTF(timeframesData: Record<string, { closes: number[] }>, pipSize = 0.0001): ComponentDirectionResult {
     const timeframes = Object.keys(timeframesData);
     if (timeframes.length === 0) {
       return {
@@ -35,8 +35,11 @@ export class MultiTimeframeEngine {
       const diff = last - prev;
       let dir: 'UP' | 'DOWN' | 'NEUTRAL' = 'NEUTRAL';
       let score = 0;
-      if (diff > 0.0005) { dir = 'UP'; bullishCount++; score = 0.8; }
-      else if (diff < -0.0005) { dir = 'DOWN'; bearishCount++; score = -0.8; }
+      // Normalize the minimum move by instrument pip size. A fixed price delta
+      // disproportionately labels JPY crosses and metals as directional.
+      const minimumDirectionalMove = Math.max(Number.EPSILON, pipSize * 5);
+      if (diff > minimumDirectionalMove) { dir = 'UP'; bullishCount++; score = 0.8; }
+      else if (diff < -minimumDirectionalMove) { dir = 'DOWN'; bearishCount++; score = -0.8; }
       else { neutralCount++; }
 
       tfResults[tf] = { direction: dir, score, adx: 28 };
