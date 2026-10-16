@@ -7,6 +7,7 @@ import { getCTraderApiMode, getSystemConfig } from '../../services/configService
 import { executeQuery } from '../../database/db';
 import { reconciliationService } from '../../services/reconciliationService';
 import { MartingaleRecoveryService } from '../../services/martingaleRecoveryService';
+import { liveRuntimeLog } from '../../services/liveRuntimeLog';
 
 const READINESS_REQUEST_TIMEOUT_MS = Math.max(
   2_000,
