@@ -7,7 +7,7 @@
     "dev": "tsx server.ts",
     "db:migrate": "tsx scripts/migrate_database.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
-    "start": "node dist/server.cjs",
+    "start": "node --input-type=commonjs -e \"process.env.NODE_ENV='production'; require('./dist/server.cjs')\"",
     "prestart": "npm run build",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
