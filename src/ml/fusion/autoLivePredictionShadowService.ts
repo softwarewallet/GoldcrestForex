@@ -104,9 +104,9 @@ export class AutoLivePredictionShadowService {
       return { candles: clean, fresh, sufficient: clean.length >= minCount };
     };
 
-    const five = boundedCandles(input.candles5M, MAX_5M_AGE_MS, 20);
-    const fifteen = boundedCandles(input.candles15M, MAX_15M_AGE_MS, 35);
-    const hourly = boundedCandles(input.candles1H, MAX_1H_AGE_MS, 15);
+    const five = boundedCandles(input.candles5M, MAX_5M_AGE_MS, 35);
+    const fifteen = boundedCandles(input.candles15M, MAX_15M_AGE_MS, 60);
+    const hourly = boundedCandles(input.candles1H, MAX_1H_AGE_MS, 50);
     const incumbentSide = normalizePredictionSide(input.incumbent.direction);
     const incumbentAvailable = currentQuoteOk && input.incumbent.dataStatus === 'LIVE'
       && five.fresh && fifteen.fresh && hourly.fresh;
@@ -188,7 +188,7 @@ export class AutoLivePredictionShadowService {
     if (!fifteen.sufficient || !fifteen.fresh) {
       observations.push({
         engine: 'COMBINED_STATISTICAL', direction: 'NO_TRADE', evidenceState: fifteen.fresh ? 'INSUFFICIENT_DATA' : 'STALE',
-        timestamp: cutoff, reason: `Statistical predictor requires at least 35 valid, cutoff-bounded 15M candles with a fresh latest bar; received ${fifteen.candles.length}.`
+        timestamp: cutoff, reason: `Statistical predictor requires at least 60 valid, cutoff-bounded 15M candles with a fresh latest bar; received ${fifteen.candles.length}.`
       });
     } else {
       let articles = [];
@@ -269,7 +269,7 @@ export class AutoLivePredictionShadowService {
         engine: 'ADVANCED_POLICY', direction: 'NO_TRADE',
         evidenceState: (!five.fresh || !hourly.fresh) ? 'STALE' : 'INSUFFICIENT_DATA',
         timestamp: cutoff,
-        reason: `Advanced policy requires fresh real 5M (min 20) and 1H (min 15) candle histories; counts=${five.candles.length}/${hourly.candles.length}.`
+        reason: `Advanced policy requires fresh real 5M (min 35) and 1H (min 50) candle histories; counts=${five.candles.length}/${hourly.candles.length}.`
       });
     } else {
       const newsSnapshot = input.newsSnapshot;
