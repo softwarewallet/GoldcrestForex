@@ -10,7 +10,7 @@ export type PredictionEvidenceState = 'AVAILABLE' | 'INSUFFICIENT_DATA' | 'UNAVA
 export type ChallengerStatus = 'AGREES' | 'CONFLICTS' | 'NO_TRADE' | 'UNAVAILABLE' | 'INSUFFICIENT_DATA' | 'ERROR';
 
 export interface PredictionEngineObservation {
-  engine: 'FOREX_SIGNAL' | 'COMBINED_STATISTICAL' | 'QUANTITATIVE_DIRECTION' | 'ADVANCED_POLICY';
+  engine: 'FOREX_SIGNAL' | 'LEGACY_TECHNICAL' | 'COMBINED_STATISTICAL' | 'QUANTITATIVE_DIRECTION' | 'ADVANCED_POLICY';
   direction: PredictionSide;
   evidenceState: PredictionEvidenceState;
   timestamp: number;
@@ -109,6 +109,10 @@ export function fusePredictionObservations(input: PredictionFusionInput): Predic
     if (item.evidenceState !== 'AVAILABLE') return false;
     if (item.direction === 'NO_TRADE') return false;
     if (now - item.timestamp < 0 || now - item.timestamp > MAX_EVIDENCE_AGE_MS) return false;
+    if (item.engine === 'LEGACY_TECHNICAL') {
+      return Number(item.metadata?.candleCount) >= 60
+        && item.metadata?.source === 'GOLDCREST_FX_LIVE_LEGACY_BASELINE';
+    }
     if (item.engine === 'COMBINED_STATISTICAL') {
       return Number(item.sampleSize) >= MIN_COMBINED_SAMPLE_SIZE
         && validProbability(item.confidence) !== undefined
