@@ -62,6 +62,60 @@ export class ForexSignalEngine {
   }
 
   /**
+   * Combines the existing 5M EMA50/zone/rejection model with the independent
+   * RSI + EMA9/21 + MACD momentum confirmations used by the alternate FX engine.
+   *
+   * This is a bounded score adjustment, not a replacement for the existing
+   * signal engine or a broker/execution gate. Missing indicators are ignored;
+   * no synthetic values are introduced.
+   */
+  calculateMomentumConsensusScore(
+    baseScore: number,
+    direction: 'BUY' | 'SELL' | 'NEUTRAL',
+    indicators: StructuredIndicators
+  ): number {
+    if (direction === 'NEUTRAL') return Math.max(0, Math.min(100, Math.round(baseScore)));
+
+    const votes: number[] = [];
+    const isBuy = direction === 'BUY';
+
+    if (indicators.rsi !== null) {
+      // Avoid rewarding overextended RSI readings as fresh momentum.
+      if (isBuy && indicators.rsi >= 50 && indicators.rsi <= 68) votes.push(1);
+      else if (!isBuy && indicators.rsi >= 32 && indicators.rsi <= 50) votes.push(1);
+      else if ((isBuy && indicators.rsi < 45) || (!isBuy && indicators.rsi > 55)) votes.push(-1);
+      else votes.push(0);
+    }
+
+    if (indicators.ema9 !== null && indicators.ema21 !== null) {
+      const aligned = isBuy ? indicators.ema9 > indicators.ema21 : indicators.ema9 < indicators.ema21;
+      const opposed = isBuy ? indicators.ema9 < indicators.ema21 : indicators.ema9 > indicators.ema21;
+      votes.push(aligned ? 1 : opposed ? -1 : 0);
+    }
+
+    if (indicators.macd !== null && indicators.macdSignal !== null && indicators.macdHistogram !== null) {
+      const aligned = isBuy
+        ? indicators.macd > indicators.macdSignal && indicators.macdHistogram > 0
+        : indicators.macd < indicators.macdSignal && indicators.macdHistogram < 0;
+      const opposed = isBuy
+        ? indicators.macd < indicators.macdSignal && indicators.macdHistogram < 0
+        : indicators.macd > indicators.macdSignal && indicators.macdHistogram > 0;
+      votes.push(aligned ? 1 : opposed ? -1 : 0);
+    }
+
+    // If there is not enough independent momentum evidence, preserve the
+    // established score rather than treating missing data as a negative vote.
+    if (votes.length < 2) return Math.max(0, Math.min(100, Math.round(baseScore)));
+
+    const directionalVotes = votes.reduce((sum, vote) => sum + vote, 0);
+    const consensusScore = 50 + (directionalVotes / votes.length) * 50;
+    // Limit this second model to 20% of the combined score to avoid allowing
+    // one indicator family to overwhelm the structural/bounce model.
+    const combinedScore = (baseScore * 0.8) + (consensusScore * 0.2);
+    return Math.max(0, Math.min(100, Math.round(combinedScore)));
+  }
+
+  /**
    * Evaluates directional bias and signal category
    * Strictly enforces Rule 1: 5M 50 EMA Trend (Price > 50 EMA: Buy Only; Price < 50 EMA: Sell Only)
    */
@@ -514,19 +568,28 @@ export class ForexSignalEngine {
       currentPrice
     });
 
+    // Consensus score: keep the established structure/bounce model dominant,
+    // while incorporating independent RSI, EMA9/21 and MACD confirmation.
+    const consensusDirection = bounceEval.trendDirection;
+    const consensusScore = this.calculateMomentumConsensusScore(
+      tentativeScore,
+      consensusDirection,
+      indicators
+    );
+
     const directionEvaluation = this.calculateDirection(
       mtf,
       structure,
       structure.regime,
       indicators,
-      tentativeScore,
+      consensusScore,
       noTradeReasons,
       bounceEval
     );
 
     // Build Entry & Trade Plan if not NO_TRADE
     let tradePlan: TradePlan | null = null;
-    let finalScore = Math.max(tentativeScore, bounceEval.strategyScore);
+    let finalScore = Math.max(consensusScore, bounceEval.strategyScore);
 
     if (directionEvaluation.direction !== 'NO_TRADE') {
       const isReadyToEnter = bounceEval.setupState === 'READY_TO_ENTER';
