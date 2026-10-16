@@ -153,6 +153,25 @@ export class LiveForexProvider implements LiveForexDataProvider {
     }
   }
 
+
+  private async ensureSpotQuoteUniverseSubscription(): Promise<void> {
+    if (!this.getMarketStatus().isOpen) return;
+    const adapter = brokerRegistry.getAdapter('CTRADER', 'LIVE') as any;
+    if (typeof adapter.subscribeQuotes !== 'function') return;
+    const startedAt = Date.now();
+    try {
+      await adapter.subscribeQuotes(FOREX_PAIRS.map(pair => pair.symbol));
+    } catch (error: any) {
+      // Record the failure, but let the existing quote/history path decide
+      // whether the pair can continue; never synthesize a stream quote here.
+      liveRuntimeLog('WARN', 'CTRADER_BATCH_SPOT_STREAM_INITIALIZATION_FAILED', {
+        pairCount: FOREX_PAIRS.length,
+        durationMs: Date.now() - startedAt,
+        error: error?.message || String(error)
+      });
+    }
+  }
+
   async refreshPair(pair: string): Promise<void> {
     const symbol = getForexPairConfig(pair).symbol;
     const inflight = sharedForexRefreshes.get(symbol);
@@ -173,6 +192,7 @@ export class LiveForexProvider implements LiveForexDataProvider {
     }
 
     const work = (async () => {
+      await this.ensureSpotQuoteUniverseSubscription();
       if (!sharedForexSnapshots.has(symbol)) await this.hydratePersistedCandleSnapshot(symbol);
       await this.refreshPairFromBroker(symbol);
     })();
