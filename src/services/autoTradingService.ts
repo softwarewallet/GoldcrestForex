@@ -42,7 +42,17 @@ const PREOPEN_PREPARATION_MIN_INTERVAL_MS = Math.max(
 );
 const PREOPEN_PAIR_CONCURRENCY = Math.max(
   1,
-  Math.min(3, Number(process.env.GOLDCREST_PREOPEN_PAIR_CONCURRENCY || 3))
+  Math.min(3, Math.floor(Number(process.env.GOLDCREST_PREOPEN_PAIR_CONCURRENCY || 3)))
+);
+
+// Historical cTrader requests are limited to about five per second per
+// connection. Auto Live used to evaluate every configured pair with Promise.all,
+// causing each pair to enqueue several timeframe-history requests at once.
+// Bound active pair refreshes so history requests are produced progressively,
+// keeping queue latency down and leaving capacity for quotes and execution.
+const AUTO_LIVE_PAIR_CONCURRENCY = Math.max(
+  1,
+  Math.min(4, Math.floor(Number(process.env.GOLDCREST_AUTO_LIVE_PAIR_CONCURRENCY || 2)))
 );
 
 async function mapWithConcurrency<T, R>(
@@ -846,9 +856,13 @@ class AutoTradingService {
       // independently isolated, while the execution portion of evaluatePair
       // is serialized by withExecutionLock(). This removes the old sequential
       // scan bottleneck without weakening account-level safety gates.
-      liveRuntimeLog('INFO', 'AUTO_LIVE_PAIR_EVALUATION_BATCH_STARTED', { cycleId, pairsToEvaluate });
+      liveRuntimeLog('INFO', 'AUTO_LIVE_PAIR_EVALUATION_BATCH_STARTED', {
+        cycleId,
+        pairsToEvaluate,
+        pairConcurrencyLimit: AUTO_LIVE_PAIR_CONCURRENCY
+      });
       const pairBatchStartedAt = Date.now();
-      await Promise.all(pairsToEvaluate.map(async pair => {
+      await mapWithConcurrency(pairsToEvaluate, AUTO_LIVE_PAIR_CONCURRENCY, async pair => {
         const startedAt = Date.now();
         liveRuntimeLog('INFO', 'AUTO_LIVE_PAIR_EVALUATION_STARTED', { cycleId, pair });
         try {
@@ -858,8 +872,13 @@ class AutoTradingService {
           liveRuntimeLog('ERROR', 'AUTO_LIVE_PAIR_EVALUATION_UNHANDLED_ERROR', { cycleId, pair, durationMs: Date.now() - startedAt, error: error?.message || String(error) });
           throw error;
         }
-      }));
-      liveRuntimeLog('INFO', 'AUTO_LIVE_PAIR_EVALUATION_BATCH_FINISHED', { cycleId, durationMs: Date.now() - pairBatchStartedAt, actions: this.lastActions });
+      });
+      liveRuntimeLog('INFO', 'AUTO_LIVE_PAIR_EVALUATION_BATCH_FINISHED', {
+        cycleId,
+        durationMs: Date.now() - pairBatchStartedAt,
+        pairConcurrencyLimit: AUTO_LIVE_PAIR_CONCURRENCY,
+        actions: this.lastActions
+      });
 
       const executed = this.lastActions.find(action => action.result === 'EXECUTED');
       if (!executed) {
