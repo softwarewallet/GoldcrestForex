@@ -13,6 +13,20 @@ Goldcrest is an AI-assisted trading analysis platform with broker connectivity, 
 - **Research AI gateway:** optional single `LLAMA_GATEWAY` connection. Llama is the gateway/orchestrator and may run Qwen internally through the same network connection. The gateway is used only by the research prediction layer; it has no broker credentials and cannot place or modify trades.
 - **Prediction modes:** the research prediction API supports the deterministic `BASELINE` model and an opt-in `AI_GATEWAY` model. AI inference receives only pre-outcome features; realized P&L, outcome, and holding duration are excluded to prevent label leakage.
 
+## Research AI Gateway
+
+The optional research-only AI gateway is configured with `LLAMA_GATEWAY_URL`, `LLAMA_GATEWAY_MODEL`, and optional `LLAMA_GATEWAY_API_KEY` / `LLAMA_GATEWAY_TIMEOUT_MS`. The endpoint accepts an OpenAI-compatible chat-completions API; Llama may orchestrate Qwen behind that single endpoint.
+
+- `GET /api/research-ai/status` reports configuration state without contacting the model.
+- `POST /api/research-ai/predict` accepts a `snapshot` containing pair, horizon, as-of timestamp, and scalar features.
+- Both routes require operator authentication outside the loopback development bypass.
+- Only allowlisted pre-outcome features are forwarded. Unknown fields (including realized P&L, outcomes, holding duration, credentials, and order data) are discarded.
+- The response is research-only and has no broker or execution capability. It must never authorize, size, place, modify, or cancel an order.
+- Inference uses a bounded timeout and logs sanitized metadata only; upstream response bodies and credentials are not logged.
+- If the gateway is unconfigured or unavailable, research AI inference fails closed; the deterministic baseline remains a separate mode.
+
+Run `npm run test:research_ai_gateway` to validate feature sanitization and fail-closed behavior.
+
 ## Safety Invariant
 
 The absolute safety invariant:
