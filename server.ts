@@ -40,6 +40,7 @@ import { autoTradingService } from './src/services/autoTradingService';
 import { tradeContinuityService } from './src/services/tradeContinuityService';
 import { PredictionDecisionGate } from './src/ml/prediction/predictionDecisionGate';
 import { CombinedPredictionEngine } from './src/ml/prediction/combinedPredictionEngine';
+import { ResearchAiGateway } from './src/services/researchAiGateway';
 import { WalkForwardEngine } from './src/ml/prediction/walkForwardEngine';
 import { PredictionStorage } from './src/ml/prediction/predictionStorage';
 import { UniversePredictionScanner } from './src/ml/prediction/universePredictionScanner';
@@ -351,6 +352,26 @@ app.post('/api/auto-trading/simulate-outcome', operatorAuthRequired, (req: Reque
     continuity: status,
     autoTrading: autoTradingService.getStatus()
   });
+});
+
+// Research AI Gateway API — isolated from broker and execution routes.
+app.get('/api/research-ai/status', operatorAuthRequired, (_req: Request, res: Response) => {
+  res.json({ success: true, gateway: ResearchAiGateway.getStatus(), scope: 'RESEARCH_ONLY' });
+});
+
+app.post('/api/research-ai/predict', operatorAuthRequired, async (req: Request, res: Response) => {
+  try {
+    const prediction = await ResearchAiGateway.predict(req.body?.snapshot);
+    res.json({ success: true, scope: 'RESEARCH_ONLY', prediction });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'AI_GATEWAY_REQUEST_FAILED';
+    const status = message === 'AI_GATEWAY_NOT_CONFIGURED' ? 503
+      : message === 'AI_GATEWAY_TIMEOUT' ? 504
+      : message === 'AI_GATEWAY_RATE_LIMITED' ? 429
+      : message.startsWith('INVALID_') || message === 'NO_ALLOWED_FEATURES' ? 400
+      : 502;
+    res.status(status).json({ success: false, scope: 'RESEARCH_ONLY', error: message });
+  }
 });
 
 // Prediction & Evidence Pipeline Routes (Phases 1-20)
