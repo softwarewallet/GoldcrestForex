@@ -40,6 +40,9 @@ import { autoTradingService } from './src/services/autoTradingService';
 import { tradeContinuityService } from './src/services/tradeContinuityService';
 import { PredictionDecisionGate } from './src/ml/prediction/predictionDecisionGate';
 import { CombinedPredictionEngine } from './src/ml/prediction/combinedPredictionEngine';
+import { ResearchAiGateway } from './src/services/researchAiGateway';
+import { sanitizeResearchFeatures } from './src/services/researchAiGateway';
+import { compareResearchPredictions } from './src/services/researchPredictionComparison';
 import { WalkForwardEngine } from './src/ml/prediction/walkForwardEngine';
 import { PredictionStorage } from './src/ml/prediction/predictionStorage';
 import { UniversePredictionScanner } from './src/ml/prediction/universePredictionScanner';
@@ -351,6 +354,70 @@ app.post('/api/auto-trading/simulate-outcome', operatorAuthRequired, (req: Reque
     continuity: status,
     autoTrading: autoTradingService.getStatus()
   });
+});
+
+// Research AI Gateway API — isolated from broker and execution routes.
+app.get('/api/research-ai/status', operatorAuthRequired, (_req: Request, res: Response) => {
+  res.json({ success: true, gateway: ResearchAiGateway.getStatus(), scope: 'RESEARCH_ONLY' });
+});
+
+app.post('/api/research-ai/predict', operatorAuthRequired, async (req: Request, res: Response) => {
+  try {
+    const prediction = await ResearchAiGateway.predict(req.body?.snapshot);
+    res.json({ success: true, scope: 'RESEARCH_ONLY', prediction });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'AI_GATEWAY_REQUEST_FAILED';
+    const status = message === 'AI_GATEWAY_NOT_CONFIGURED' ? 503
+      : message === 'AI_GATEWAY_TIMEOUT' ? 504
+      : message === 'AI_GATEWAY_RATE_LIMITED' ? 429
+      : message.startsWith('INVALID_') || message === 'NO_ALLOWED_FEATURES' ? 400
+      : 502;
+    res.status(status).json({ success: false, scope: 'RESEARCH_ONLY', error: message });
+  }
+});
+
+app.post('/api/research-ai/compare', operatorAuthRequired, async (req: Request, res: Response) => {
+  try {
+    const snapshot = sanitizeResearchFeatures(req.body?.snapshot);
+    const [baseline, ai] = await Promise.all([
+      CombinedPredictionEngine.predict({
+        pair: snapshot.pair,
+        horizon: snapshot.horizon,
+        cutoffTimestamp: snapshot.asOf
+      }),
+      ResearchAiGateway.predict(snapshot)
+    ]);
+
+    const comparison = compareResearchPredictions({
+      direction: baseline.direction,
+      confidence: baseline.calibratedConfidence,
+      recommendation: baseline.recommendation
+    }, ai);
+
+    // Explicitly observational: this response is never an execution authorization.
+    res.json({ success: true, ...comparison });
+  } catch (err: unknown) {
+    const rawMessage = err instanceof Error ? err.message : 'RESEARCH_COMPARISON_FAILED';
+    const message = rawMessage === 'AI_GATEWAY_NOT_CONFIGURED'
+      || rawMessage === 'AI_GATEWAY_TIMEOUT'
+      || rawMessage === 'AI_GATEWAY_RATE_LIMITED'
+      || rawMessage.startsWith('AI_GATEWAY_HTTP_')
+      || rawMessage.startsWith('INVALID_')
+      || rawMessage === 'NO_ALLOWED_FEATURES'
+      ? rawMessage
+      : 'RESEARCH_COMPARISON_FAILED';
+    const status = message === 'AI_GATEWAY_NOT_CONFIGURED' ? 503
+      : message === 'AI_GATEWAY_TIMEOUT' ? 504
+      : message === 'AI_GATEWAY_RATE_LIMITED' ? 429
+      : message.startsWith('INVALID_') || message === 'NO_ALLOWED_FEATURES' ? 400
+      : 502;
+    res.status(status).json({
+      success: false,
+      scope: 'RESEARCH_ONLY',
+      actionable: false,
+      error: message
+    });
+  }
 });
 
 // Prediction & Evidence Pipeline Routes (Phases 1-20)
