@@ -45,4 +45,18 @@ const status = ResearchAiGateway.getStatus();
 assert.equal(status.executionAccess, false);
 assert.equal(status.provider, 'LLAMA_GATEWAY');
 
-console.log('PASS: research AI gateway isolation and sanitization tests');
+const configuredUrl = process.env.LLAMA_GATEWAY_URL;
+process.env.LLAMA_GATEWAY_URL = '';
+await assert.rejects(
+  ResearchAiGateway.predict({
+    pair: 'EUR/USD',
+    horizon: '15M',
+    asOf,
+    features: { rsi14: 50 }
+  }),
+  /AI_GATEWAY_NOT_CONFIGURED/
+);
+if (configuredUrl === undefined) delete process.env.LLAMA_GATEWAY_URL;
+else process.env.LLAMA_GATEWAY_URL = configuredUrl;
+
+console.log('PASS: research AI gateway isolation, sanitization, and fail-closed tests');
