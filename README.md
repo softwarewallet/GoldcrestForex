@@ -19,13 +19,14 @@ The optional research-only AI gateway is configured with `LLAMA_GATEWAY_URL`, `L
 
 - `GET /api/research-ai/status` reports configuration state without contacting the model.
 - `POST /api/research-ai/predict` accepts a `snapshot` containing pair, horizon, as-of timestamp, and scalar features.
+- `POST /api/research-ai/compare` runs the existing deterministic research prediction and the AI gateway in parallel, then reports directional agreement/disagreement without blending scores or creating an actionable signal.
 - Both routes require operator authentication outside the loopback development bypass.
 - Only allowlisted pre-outcome features are forwarded. Unknown fields (including realized P&L, outcomes, holding duration, credentials, and order data) are discarded.
 - The response is research-only and has no broker or execution capability. It must never authorize, size, place, modify, or cancel an order.
 - Inference uses a bounded timeout and logs sanitized metadata only; upstream response bodies and credentials are not logged.
 - If the gateway is unconfigured or unavailable, research AI inference fails closed; the deterministic baseline remains a separate mode.
 
-Run `npm run test:research_ai_gateway` to validate feature sanitization and fail-closed behavior.
+Run `npm run test:research_ai_gateway` and `npm run test:research_prediction_comparison` to validate feature sanitization, fail-closed behavior, and the non-actionable comparison contract.
 
 ## Safety Invariant
 
